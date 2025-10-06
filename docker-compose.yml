@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  bot:
+    build: .
+    command: ["python", "wattattack_bot.py"]
+    env_file: .env
+    volumes:
+      - ./accounts.json:/app/accounts.json:ro
+    restart: unless-stopped
+
+  scheduler:
+    build: .
+    command:
+      [
+        "python",
+        "wattattack_scheduler.py",
+        "--interval",
+        "${WATTATTACK_INTERVAL_SECONDS:-1800}",
+        "--notifier-args",
+        "--accounts",
+        "/app/accounts.json",
+        "--state",
+        "/app/notifier_state.json"
+      ]
+    env_file: .env
+    volumes:
+      - ./accounts.json:/app/accounts.json:ro
+      - ./notifier_state.json:/app/notifier_state.json
+    restart: unless-stopped

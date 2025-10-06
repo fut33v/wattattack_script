@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+.venv/
+.env
+.git
+.gitignore
+cabinet.html
+cabinet_files/
