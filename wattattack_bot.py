@@ -8,7 +8,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -85,7 +85,8 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     message = (
         "Использование:\n"
         "/start — показать список аккаунтов\n"
-        "/recent <число> — предложить последние N активностей всех аккаунтов"
+        "/recent <число> — предложить последние N активностей выбранного аккаунта\n"
+        "/latest — скачать последнюю активность по каждому аккаунту"
     )
     await update.message.reply_text(message)
 
@@ -105,6 +106,63 @@ async def recent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "Выберите аккаунт:",
         reply_markup=build_accounts_keyboard(limit),
     )
+
+
+async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    await update.message.reply_text("Собираю последние активности по аккаунтам...")
+
+    cache = context.user_data.setdefault("activities", {})
+
+    for account_id, account in ACCOUNT_REGISTRY.items():
+        try:
+            activities = await fetch_recent_activities(account_id, 1)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to fetch latest activity for %s", account_id)
+            await update.message.reply_text(
+                f"{account.name}: ошибка получения данных — {exc}",
+            )
+            continue
+
+        cache[account_id] = activities
+
+        if not activities:
+            await update.message.reply_text(f"{account.name}: активностей пока нет.")
+            continue
+
+        activity = activities[0]
+        caption = format_activity_meta(activity, account.name)
+        fit_id = activity.get("fitFileId")
+        if fit_id:
+            try:
+                temp_path = await download_fit_tempfile(account_id, str(fit_id))
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.exception("Fit download failed for %s", account_id)
+                await update.message.reply_text(
+                    f"{account.name}: не удалось скачать FIT — {exc}",
+                )
+                continue
+
+            filename = f"activity_{activity.get('id')}.fit"
+            with temp_path.open("rb") as file_handle:
+                await update.message.reply_document(
+                    file_handle,
+                    filename=filename,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                )
+            temp_path.unlink(missing_ok=True)
+            try:
+                temp_path.parent.rmdir()
+            except OSError:
+                LOGGER.debug("Temp directory not removed: %s", temp_path.parent)
+        else:
+            await update.message.reply_text(
+                f"{account.name}: FIT недоступен\n{caption}",
+                parse_mode=ParseMode.HTML,
+            )
 
 
 def build_accounts_keyboard(limit: int) -> InlineKeyboardMarkup:
@@ -151,6 +209,8 @@ async def send_recent_activities(query, context, account_id: str, limit: int) ->
         await query.edit_message_text("Аккаунт не найден.")
         return
 
+    account = ACCOUNT_REGISTRY[account_id]
+
     try:
         activities = await fetch_recent_activities(account_id, limit)
     except Exception as exc:  # noqa: BLE001
@@ -161,7 +221,8 @@ async def send_recent_activities(query, context, account_id: str, limit: int) ->
     cache = context.user_data.setdefault("activities", {})
     cache[account_id] = activities
 
-    text_lines = [f"Последние {min(limit, len(activities))} активностей:"]
+    text_lines = [f"<b>{account.name}</b>"]
+    text_lines.append(f"Последние {min(limit, len(activities))} активностей:")
     keyboard_rows: List[List[InlineKeyboardButton]] = []
 
     for idx, activity in enumerate(activities[:limit], start=1):
@@ -188,15 +249,12 @@ async def send_recent_activities(query, context, account_id: str, limit: int) ->
 
 
 def format_activity_line(index: int, activity: Dict[str, Any]) -> str:
-    start_time = activity.get("startTime")
-    if start_time:
-        dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-        date_str = dt.strftime("%Y-%m-%d %H:%M")
-    else:
-        date_str = "?"
-
+    date_str = format_start_time(activity)
     distance = activity.get("distance", 0) or 0
-    distance_km = float(distance) / 1000 if distance else 0
+    try:
+        distance_km = float(distance) / 1000
+    except (TypeError, ValueError):
+        distance_km = 0.0
     duration = format_duration(activity.get("elapsedTime"))
     name = activity.get("mapNameRu") or activity.get("name") or "Без названия"
 
@@ -214,6 +272,51 @@ def format_duration(seconds: Optional[int]) -> str:
     return f"{minutes}м {seconds:02d}с"
 
 
+def format_start_time(activity: Dict[str, Any]) -> str:
+    start_time = activity.get("startTime")
+    if not start_time:
+        return "?"
+    try:
+        dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+        dt = dt + timedelta(hours=3)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return str(start_time)
+
+
+def format_activity_meta(activity: Dict[str, Any], account_name: Optional[str] = None) -> str:
+    name = activity.get("mapNameRu") or activity.get("name") or "Без названия"
+    date_str = format_start_time(activity)
+    distance = activity.get("distance", 0) or 0
+    try:
+        distance_km = float(distance) / 1000
+    except (TypeError, ValueError):
+        distance_km = 0.0
+    duration = format_duration(activity.get("elapsedTime"))
+    elevation = activity.get("totalElevationGain")
+    power_avg = activity.get("averageWatts")
+    cadence_avg = activity.get("averageCadence")
+    heartrate_avg = activity.get("averageHeartrate")
+
+    lines = []
+    if account_name:
+        lines.append(f"<b>{account_name}</b>")
+    lines.append(f"<b>{name}</b>")
+    lines.append(f"Дата: {date_str}")
+    lines.append(f"Дистанция: {distance_km:.1f} км")
+    lines.append(f"Время: {duration}")
+    if elevation is not None:
+        lines.append(f"Набор высоты: {elevation} м")
+    if power_avg:
+        lines.append(f"Средняя мощность: {power_avg} Вт")
+    if cadence_avg:
+        lines.append(f"Средний каденс: {cadence_avg} об/мин")
+    if heartrate_avg:
+        lines.append(f"Средний пульс: {heartrate_avg} уд/мин")
+
+    return "\n".join(lines)
+
+
 async def fetch_recent_activities(account_id: str, limit: int) -> List[Dict[str, Any]]:
     account = ACCOUNT_REGISTRY[account_id]
 
@@ -229,6 +332,7 @@ async def fetch_recent_activities(account_id: str, limit: int) -> List[Dict[str,
 async def send_fit_file(query, context, account_id: str, activity_id: str) -> None:
     cache = context.user_data.setdefault("activities", {})
     activities: List[Dict[str, Any]] = cache.get(account_id, [])
+    account = ACCOUNT_REGISTRY.get(account_id)
 
     activity = None
     for item in activities:
@@ -265,8 +369,14 @@ async def send_fit_file(query, context, account_id: str, activity_id: str) -> No
         return
 
     filename = f"activity_{activity_id}.fit"
+    caption = format_activity_meta(activity, account.name if account else None)
     with temp_path.open("rb") as file_handle:
-        await query.message.reply_document(file_handle, filename=filename)
+        await query.message.reply_document(
+            file_handle,
+            filename=filename,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+        )
     temp_path.unlink(missing_ok=True)
     try:
         temp_path.parent.rmdir()
@@ -302,6 +412,7 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("help", help_handler))
     application.add_handler(CommandHandler("recent", recent_handler))
+    application.add_handler(CommandHandler("latest", latest_handler))
     application.add_handler(CallbackQueryHandler(noop_handler, pattern="^noop$"))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_error_handler(on_error)
