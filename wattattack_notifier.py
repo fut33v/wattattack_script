@@ -6,9 +6,10 @@ import argparse
 import json
 import logging
 import os
-from datetime import datetime
+import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import requests
 
@@ -91,6 +92,8 @@ def load_accounts(config_path: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def load_state(path: Path) -> Dict[str, Any]:
+    if path.is_dir():
+        raise IsADirectoryError(f"State path points to a directory: {path}")
     if not path.exists():
         return {}
     try:
@@ -176,6 +179,199 @@ def format_duration(seconds: Any) -> str:
     return f"{minutes}м {secs:02d}с"
 
 
+def telegram_send_document(
+    token: str,
+    chat_id: str,
+    file_path: Path,
+    filename: str,
+    *,
+    caption: str = "",
+    timeout: float,
+) -> None:
+    url = f"https://api.telegram.org/bot{token}/sendDocument"
+    with file_path.open("rb") as file_handle:
+        files = {"document": (filename, file_handle, "application/octet-stream")}
+        data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+        response = requests.post(url, data=data, files=files, timeout=timeout)
+    if response.status_code != 200:
+        LOGGER.error(
+            "Failed to send document to %s (%s): %s",
+            chat_id,
+            response.status_code,
+            response.text,
+        )
+        response.raise_for_status()
+
+
+def format_start_time(activity: Dict[str, Any]) -> str:
+    start_time = activity.get("startTime")
+    if not start_time:
+        return "?"
+    try:
+        dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+        dt += timedelta(hours=3)
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return str(start_time)
+
+
+def format_activity_meta(
+    activity: Dict[str, Any],
+    account_name: Optional[str],
+    profile: Optional[Dict[str, Any]],
+) -> str:
+    name = activity.get("mapNameRu") or activity.get("name") or "Без названия"
+    date_str = format_start_time(activity)
+    distance = activity.get("distance", 0) or 0
+    try:
+        distance_km = float(distance) / 1000
+    except (TypeError, ValueError):
+        distance_km = 0.0
+    duration = format_duration(activity.get("elapsedTime"))
+    elevation = activity.get("totalElevationGain")
+    power_avg = activity.get("averageWatts")
+    cadence_avg = activity.get("averageCadence")
+    heartrate_avg = activity.get("averageHeartrate")
+
+    lines: List[str] = []
+    if account_name:
+        lines.append(f"<b>{account_name}</b>")
+    lines.append(f"<b>{name}</b>")
+    if profile:
+        athlete_name = extract_athlete_name(profile)
+        if athlete_name:
+            lines.append(f"Атлет: {athlete_name}")
+        gender = extract_athlete_field(profile, "gender")
+        if gender:
+            lines.append(f"Пол: {'М' if gender.upper().startswith('M') else 'Ж'}")
+        weight = extract_athlete_field(profile, "weight")
+        if weight:
+            lines.append(f"Вес: {weight} кг")
+        ftp_value = extract_athlete_field(profile, "ftp")
+        if ftp_value:
+            lines.append(f"FTP: {ftp_value} Вт")
+
+    lines.append(f"Дата: {date_str}")
+    lines.append(f"Дистанция: {distance_km:.1f} км")
+    lines.append(f"Время: {duration}")
+    if elevation is not None:
+        lines.append(f"Набор высоты: {elevation} м")
+    if power_avg:
+        lines.append(f"Средняя мощность: {power_avg} Вт")
+    if cadence_avg:
+        lines.append(f"Средний каденс: {cadence_avg} об/мин")
+    if heartrate_avg:
+        lines.append(f"Средний пульс: {heartrate_avg} уд/мин")
+
+    return "\n".join(lines)
+
+
+def extract_athlete_name(profile: Dict[str, Any]) -> str:
+    candidate = profile
+    if isinstance(profile.get("user"), dict):
+        candidate = profile["user"]
+    elif isinstance(profile.get("athlete"), dict):
+        candidate = profile["athlete"]
+
+    first = candidate.get("firstName") if isinstance(candidate, dict) else None
+    last = candidate.get("lastName") if isinstance(candidate, dict) else None
+
+    parts = [str(part) for part in (first, last) if part]
+    if parts:
+        return " ".join(parts)
+
+    if isinstance(candidate, dict):
+        for key in ("nickname", "name", "displayName"):
+            value = candidate.get(key)
+            if value:
+                return str(value)
+    return ""
+
+
+def extract_athlete_field(profile: Dict[str, Any], field: str) -> str:
+    candidate = profile
+    if isinstance(profile.get("user"), dict):
+        candidate = profile["user"]
+    elif isinstance(profile.get("athlete"), dict):
+        candidate = profile["athlete"]
+
+    if isinstance(candidate, dict):
+        value = candidate.get(field)
+        if value:
+            return str(value)
+    if isinstance(profile, dict):
+        value = profile.get(field)
+        if value:
+            return str(value)
+    return ""
+
+
+def send_activity_fit(
+    *,
+    client: WattAttackClient,
+    activity: Dict[str, Any],
+    account_name: str,
+    profile: Dict[str, Any],
+    token: str,
+    admin_ids: Sequence[str],
+    timeout: float,
+) -> None:
+    fit_id = activity.get("fitFileId")
+    caption = format_activity_meta(activity, account_name, profile)
+
+    if not fit_id:
+        LOGGER.info("Activity %s has no FIT file", activity.get("id"))
+        for chat_id in admin_ids:
+            try:
+                telegram_send_message(
+                    token,
+                    chat_id,
+                    caption,
+                    timeout=timeout,
+                )
+            except requests.HTTPError:
+                pass
+        return
+
+    temp_file = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            temp_file = Path(tmp.name)
+        client.download_fit_file(str(fit_id), temp_file, timeout=timeout)
+        filename = f"activity_{activity.get('id')}.fit"
+        for chat_id in admin_ids:
+            try:
+                telegram_send_document(
+                    token,
+                    chat_id,
+                    temp_file,
+                    filename,
+                    caption=caption,
+                    timeout=timeout,
+                )
+            except requests.HTTPError:
+                pass
+    except Exception:
+        LOGGER.exception("Failed to download/send FIT %s", fit_id)
+        for chat_id in admin_ids:
+            try:
+                telegram_send_message(
+                    token,
+                    chat_id,
+                    f"Не удалось отправить FIT для активности {activity.get('id')}",
+                    timeout=timeout,
+                )
+            except requests.HTTPError:
+                pass
+    finally:
+        if temp_file and temp_file.exists():
+            try:
+                temp_file.unlink()
+            except OSError:
+                LOGGER.debug("Failed to remove temp file %s", temp_file)
+
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args(argv)
@@ -207,17 +403,31 @@ def main(argv: Iterable[str] | None = None) -> int:
             for item in state.get("accounts", {}).get(account_id, {}).get("known_ids", [])
         )
 
-        def worker() -> List[Dict[str, Any]]:
-            client = WattAttackClient(account["base_url"])
+        client = WattAttackClient(account["base_url"])
+        try:
             client.login(account["email"], account["password"], timeout=args.timeout)
-            payload = client.fetch_activities(timeout=args.timeout)
-            return payload.get("activities", [])
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to login for %s", account_id)
+            continue
 
         try:
-            activities = worker()
+            payload = client.fetch_activities(timeout=args.timeout)
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Failed to fetch activities for %s", account_id)
             continue
+
+        activities = payload.get("activities", [])
+        if not isinstance(activities, list):
+            LOGGER.warning("Unexpected activities payload for %s", account_id)
+            activities = []
+
+        try:
+            profile = client.fetch_profile(timeout=args.timeout)
+            if not isinstance(profile, dict):
+                profile = {}
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch profile for %s: %s", account_id, exc)
+            profile = {}
 
         new_items: List[Dict[str, Any]] = []
         for activity in activities:
@@ -227,24 +437,18 @@ def main(argv: Iterable[str] | None = None) -> int:
 
         if new_items:
             any_changes = True
-            message = (
-                f"<b>Новые активности для {account.get('name', account_id)}</b>"\
-                + "\n\n"\
-                + "\n\n".join(format_activity(item) for item in new_items)
-            )
             LOGGER.info("Found %d new activities for %s", len(new_items), account_id)
             if not args.dry_run:
-                for chat_id in admin_ids:
-                    try:
-                        telegram_send_message(
-                            args.token,
-                            chat_id,
-                            message,
-                            timeout=args.timeout,
-                        )
-                    except requests.HTTPError:
-                        # already logged inside telegram_send_message
-                        pass
+                for activity in new_items:
+                    send_activity_fit(
+                        client=client,
+                        activity=activity,
+                        account_name=account.get("name", account_id),
+                        profile=profile,
+                        token=args.token,
+                        admin_ids=admin_ids,
+                        timeout=args.timeout,
+                    )
         else:
             LOGGER.info("No new activities for %s", account_id)
 

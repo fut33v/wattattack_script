@@ -6,7 +6,6 @@ import argparse
 import csv
 import json
 import sys
-import re
 from getpass import getpass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -80,6 +79,24 @@ class WattAttackClient:
             )
 
         return response.json()
+
+    def fetch_profile(self, *, timeout: float | None = None) -> Dict[str, Any]:
+        """Return the athlete profile details for the current session."""
+
+        response = self.session.get(
+            self._api_url("/athlete"), timeout=timeout
+        )
+        if response.status_code in {200, 404}:
+            try:
+                return response.json()
+            except ValueError:
+                return {}
+
+        message = response.text.strip() or "unexpected response"
+        raise RuntimeError(
+            f"Failed to fetch profile ({response.status_code}): {message}"
+        )
+
 
     def download_fit_file(
         self,

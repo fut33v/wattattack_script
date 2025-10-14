@@ -61,6 +61,7 @@ def request_stop(*_args) -> None:
 
 
 def main(argv: Iterable[str] | None = None) -> int:
+    global STOP_REQUESTED
     args = parse_args(argv)
     setup_logging(args.verbose)
 
@@ -79,7 +80,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         iteration += 1
         log.info("Iteration %d: invoking notifier", iteration)
         try:
-            notifier_exit = notifier_main(args.notifier_args)
+            notifier_exit = notifier_main(args.notifier_args or [])
         except SystemExit as exit_info:
             notifier_exit = exit_info.code if isinstance(exit_info.code, int) else 1
         except Exception:

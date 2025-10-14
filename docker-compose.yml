@@ -21,10 +21,10 @@ services:
         "--accounts",
         "/app/accounts.json",
         "--state",
-        "/app/notifier_state.json"
+        "/app/notifier_state/state.json"
       ]
     env_file: .env
     volumes:
       - ./accounts.json:/app/accounts.json:ro
-      - ./notifier_state.json:/app/notifier_state.json
+      - ./notifier_state:/app/notifier_state
     restart: unless-stopped

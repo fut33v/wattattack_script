@@ -10,7 +10,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -114,11 +114,14 @@ async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await update.message.reply_text("Собираю последние активности по аккаунтам...")
 
-    cache = context.user_data.setdefault("activities", {})
+    cache = context.user_data.setdefault("account_cache", {})
+    if not isinstance(cache, dict):
+        cache = {}
+        context.user_data["account_cache"] = cache
 
     for account_id, account in ACCOUNT_REGISTRY.items():
         try:
-            activities = await fetch_recent_activities(account_id, 1)
+            activities, profile = await fetch_recent_activities(account_id, 1)
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Failed to fetch latest activity for %s", account_id)
             await update.message.reply_text(
@@ -126,14 +129,14 @@ async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             continue
 
-        cache[account_id] = activities
+        cache[account_id] = {"activities": activities, "profile": profile}
 
         if not activities:
             await update.message.reply_text(f"{account.name}: активностей пока нет.")
             continue
 
         activity = activities[0]
-        caption = format_activity_meta(activity, account.name)
+        caption = format_activity_meta(activity, account.name, profile)
         fit_id = activity.get("fitFileId")
         if fit_id:
             try:
@@ -212,14 +215,17 @@ async def send_recent_activities(query, context, account_id: str, limit: int) ->
     account = ACCOUNT_REGISTRY[account_id]
 
     try:
-        activities = await fetch_recent_activities(account_id, limit)
+        activities, profile = await fetch_recent_activities(account_id, limit)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to fetch activities")
         await query.edit_message_text(f"Ошибка: {exc}")
         return
 
-    cache = context.user_data.setdefault("activities", {})
-    cache[account_id] = activities
+    cache = context.user_data.setdefault("account_cache", {})
+    if not isinstance(cache, dict):
+        cache = {}
+        context.user_data["account_cache"] = cache
+    cache[account_id] = {"activities": activities, "profile": profile}
 
     text_lines = [f"<b>{account.name}</b>"]
     text_lines.append(f"Последние {min(limit, len(activities))} активностей:")
@@ -284,7 +290,11 @@ def format_start_time(activity: Dict[str, Any]) -> str:
         return str(start_time)
 
 
-def format_activity_meta(activity: Dict[str, Any], account_name: Optional[str] = None) -> str:
+def format_activity_meta(
+    activity: Dict[str, Any],
+    account_name: Optional[str] = None,
+    profile: Optional[Dict[str, Any]] = None,
+) -> str:
     name = activity.get("mapNameRu") or activity.get("name") or "Без названия"
     date_str = format_start_time(activity)
     distance = activity.get("distance", 0) or 0
@@ -302,6 +312,18 @@ def format_activity_meta(activity: Dict[str, Any], account_name: Optional[str] =
     if account_name:
         lines.append(f"<b>{account_name}</b>")
     lines.append(f"<b>{name}</b>")
+    athlete_name = extract_athlete_name(profile) if profile else ""
+    if athlete_name:
+        lines.append(f"Атлет: {athlete_name}")
+    gender = extract_athlete_field(profile, "gender") if profile else ""
+    if gender:
+        lines.append(f"Пол: {'М' if gender.upper().startswith('M') else 'Ж'}")
+    weight = extract_athlete_field(profile, "weight") if profile else ""
+    if weight:
+        lines.append(f"Вес: {weight} кг")
+    ftp_value = extract_athlete_field(profile, "ftp") if profile else ""
+    if ftp_value:
+        lines.append(f"FTP: {ftp_value} Вт")
     lines.append(f"Дата: {date_str}")
     lines.append(f"Дистанция: {distance_km:.1f} км")
     lines.append(f"Время: {duration}")
@@ -317,21 +339,88 @@ def format_activity_meta(activity: Dict[str, Any], account_name: Optional[str] =
     return "\n".join(lines)
 
 
-async def fetch_recent_activities(account_id: str, limit: int) -> List[Dict[str, Any]]:
+def extract_athlete_name(profile: Dict[str, Any]) -> str:
+    candidate = profile
+    if isinstance(profile.get("user"), dict):
+        candidate = profile["user"]
+    elif isinstance(profile.get("athlete"), dict):
+        candidate = profile["athlete"]
+
+    first = candidate.get("firstName") if isinstance(candidate, dict) else None
+    last = candidate.get("lastName") if isinstance(candidate, dict) else None
+
+    parts = [str(part) for part in [first, last] if part]
+    if parts:
+        return " ".join(parts)
+
+    if isinstance(candidate, dict):
+        for key in ("nickname", "name", "displayName"):
+            value = candidate.get(key)
+            if value:
+                return str(value)
+    return ""
+
+
+def extract_athlete_field(profile: Dict[str, Any], field: str) -> str:
+    candidate = profile
+    if isinstance(profile.get("user"), dict):
+        candidate = profile["user"]
+    elif isinstance(profile.get("athlete"), dict):
+        candidate = profile["athlete"]
+
+    if isinstance(candidate, dict):
+        value = candidate.get(field)
+        if value:
+            return str(value)
+    if isinstance(profile, dict):
+        value = profile.get(field)
+        if value:
+            return str(value)
+    return ""
+
+
+async def fetch_recent_activities(
+    account_id: str, limit: int
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     account = ACCOUNT_REGISTRY[account_id]
 
-    def worker() -> List[Dict[str, Any]]:
+    def worker() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         client = WattAttackClient(account.base_url)
         client.login(account.email, account.password, timeout=DEFAULT_TIMEOUT)
         payload = client.fetch_activities(timeout=DEFAULT_TIMEOUT)
-        return payload.get("activities", [])[:limit]
+        activities = payload.get("activities", [])
+        if not isinstance(activities, list):
+            activities = []
+
+        profile: Dict[str, Any] = {}
+        try:
+            profile = client.fetch_profile(timeout=DEFAULT_TIMEOUT)
+            if not isinstance(profile, dict):
+                profile = {}
+            athlete_name = extract_athlete_name(profile)
+            LOGGER.info(
+                "Fetched profile for %s: %s (keys=%s)",
+                account_id,
+                athlete_name or "<unknown>",
+                list(profile.keys()),
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch profile for %s: %s", account_id, exc)
+        return activities[:limit], profile
 
     return await asyncio.to_thread(worker)
 
 
 async def send_fit_file(query, context, account_id: str, activity_id: str) -> None:
-    cache = context.user_data.setdefault("activities", {})
-    activities: List[Dict[str, Any]] = cache.get(account_id, [])
+    cache = context.user_data.setdefault("account_cache", {})
+    if not isinstance(cache, dict):
+        cache = {}
+        context.user_data["account_cache"] = cache
+    account_cache: Dict[str, Any] = cache.get(account_id, {}) if isinstance(cache, dict) else {}
+    activities: List[Dict[str, Any]] = account_cache.get("activities", []) if isinstance(account_cache, dict) else []
+    profile: Optional[Dict[str, Any]] = account_cache.get("profile") if isinstance(account_cache, dict) else None
+    if profile is not None and not isinstance(profile, dict):
+        profile = None
     account = ACCOUNT_REGISTRY.get(account_id)
 
     activity = None
@@ -342,11 +431,11 @@ async def send_fit_file(query, context, account_id: str, activity_id: str) -> No
 
     if activity is None:
         try:
-            activities = await fetch_recent_activities(account_id, DEFAULT_RECENT_LIMIT)
+            activities, profile = await fetch_recent_activities(account_id, DEFAULT_RECENT_LIMIT)
         except Exception as exc:  # noqa: BLE001
             await query.edit_message_text(f"Ошибка обновления списка: {exc}")
             return
-        cache[account_id] = activities
+        cache[account_id] = {"activities": activities, "profile": profile}
         for item in activities:
             if str(item.get("id")) == str(activity_id):
                 activity = item
@@ -358,18 +447,30 @@ async def send_fit_file(query, context, account_id: str, activity_id: str) -> No
 
     fit_id = activity.get("fitFileId")
     if not fit_id:
-        await query.edit_message_text("Для этой активности нет FIT файла.")
+        caption = format_activity_meta(
+            activity,
+            account.name if account else None,
+            profile,
+        )
+        await query.edit_message_text(
+            "Для этой активности нет FIT файла.\n\n" + caption,
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     try:
-        temp_path = await download_fit_tempfile(account_id, fit_id)
+        temp_path = await download_fit_tempfile(account_id, str(fit_id))
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Fit download failed")
         await query.edit_message_text(f"Ошибка скачивания: {exc}")
         return
 
     filename = f"activity_{activity_id}.fit"
-    caption = format_activity_meta(activity, account.name if account else None)
+    caption = format_activity_meta(
+        activity,
+        account.name if account else None,
+        profile,
+    )
     with temp_path.open("rb") as file_handle:
         await query.message.reply_document(
             file_handle,
@@ -421,7 +522,10 @@ def build_application(token: str) -> Application:
 
 
 def main(argv: Iterable[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
     token = os.environ.get(BOT_TOKEN_ENV)
     if not token:
