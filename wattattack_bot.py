@@ -126,7 +126,7 @@ def ensure_admin_message(update: Update) -> bool:
     if is_admin_user(update.message.from_user):
         return True
     try:
-        update.message.reply_text("Недостаточно прав для выполнения команды.")
+        update.message.reply_text("🚫 Недостаточно прав для выполнения команды.")
     except Exception:
         pass
     return False
@@ -136,7 +136,7 @@ async def ensure_admin_callback(query) -> bool:
     user = getattr(query, "from_user", None)
     if is_admin_user(user):
         return True
-    await query.edit_message_text("Недостаточно прав для выполнения действия.")
+    await query.edit_message_text("🚫 Недостаточно прав для выполнения действия.")
     return False
 
 
@@ -148,7 +148,7 @@ async def process_clients_document(
         data = await file.download_as_bytearray()
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to download CSV file")
-        await message.reply_text(f"Не удалось скачать файл: {exc}")
+        await message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
         return
 
     try:
@@ -157,11 +157,11 @@ async def process_clients_document(
         )
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to import clients")
-        await message.reply_text(f"Ошибка импорта: {exc}")
+        await message.reply_text(f"❌ Ошибка импорта: {exc}")
         return
 
     await message.reply_text(
-        "Импорт завершён. Добавлено: {0}, обновлено: {1}.".format(inserted, updated)
+        "✅ Импорт завершён. Добавлено: {0}, обновлено: {1}.".format(inserted, updated)
     )
 
 
@@ -197,7 +197,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not ensure_admin_message(update):
         return
     await update.message.reply_text(
-        "Выберите аккаунт WattAttack:",
+        "📋 Выберите аккаунт WattAttack:",
         reply_markup=build_accounts_keyboard(DEFAULT_RECENT_LIMIT),
     )
 
@@ -208,7 +208,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not ensure_admin_message(update):
         return
     message = (
-        "Использование:\n"
+        "ℹ️ Использование:\n"
         "/start — показать список аккаунтов\n"
         "/recent <число> — предложить последние N активностей выбранного аккаунта\n"
         "/latest — скачать последнюю активность по каждому аккаунту\n"
@@ -232,11 +232,11 @@ async def recent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         try:
             limit = max(1, int(context.args[0]))
         except ValueError:
-            await update.message.reply_text("Нужно указать число активностей, например: /recent 5")
+            await update.message.reply_text("ℹ️ Нужно указать число активностей, например: /recent 5")
             return
 
     await update.message.reply_text(
-        "Выберите аккаунт:",
+        "📂 Выберите аккаунт:",
         reply_markup=build_accounts_keyboard(limit),
     )
 
@@ -247,7 +247,7 @@ async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not ensure_admin_message(update):
         return
 
-    await update.message.reply_text("Собираю последние активности по аккаунтам...")
+    await update.message.reply_text("⏳ Собираю последние активности по аккаунтам...")
 
     cache = context.user_data.setdefault("account_cache", {})
     if not isinstance(cache, dict):
@@ -260,14 +260,14 @@ async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Failed to fetch latest activity for %s", account_id)
             await update.message.reply_text(
-                f"{account.name}: ошибка получения данных — {exc}",
+                f"⚠️ {account.name}: ошибка получения данных — {exc}",
             )
             continue
 
         cache[account_id] = {"activities": activities, "profile": profile}
 
         if not activities:
-            await update.message.reply_text(f"{account.name}: активностей пока нет.")
+            await update.message.reply_text(f"ℹ️ {account.name}: активностей пока нет.")
             continue
 
         activity = activities[0]
@@ -279,7 +279,7 @@ async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("Fit download failed for %s", account_id)
                 await update.message.reply_text(
-                    f"{account.name}: не удалось скачать FIT — {exc}",
+                    f"⚠️ {account.name}: не удалось скачать FIT — {exc}",
                 )
                 continue
 
@@ -298,7 +298,7 @@ async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 LOGGER.debug("Temp directory not removed: %s", temp_path.parent)
         else:
             await update.message.reply_text(
-                f"{account.name}: FIT недоступен\n{caption}",
+                f"ℹ️ {account.name}: FIT недоступен\n{caption}",
                 parse_mode=ParseMode.HTML,
             )
 
@@ -312,13 +312,13 @@ async def admins_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         admins = await asyncio.to_thread(db_list_admins)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to load admins")
-        await update.message.reply_text(f"Ошибка получения списка администраторов: {exc}")
+        await update.message.reply_text(f"❌ Ошибка получения списка администраторов: {exc}")
         return
 
     message = (
-        "Администраторы:\n" + format_admin_list(admins)
+        "👥 Администраторы:\n" + format_admin_list(admins)
         if admins
-        else "Администраторы не настроены."
+        else "⚠️ Администраторы не настроены."
     )
     await update.message.reply_text(message)
 
@@ -345,7 +345,7 @@ async def addadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if not identifier:
         await update.message.reply_text(
-            "Укажите ID или @username (можно ответить на сообщение пользователя)."
+            "ℹ️ Укажите ID или @username (можно ответить на сообщение пользователя)."
         )
         return
 
@@ -365,12 +365,12 @@ async def addadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to add admin")
-        await update.message.reply_text(f"Ошибка добавления администратора: {exc}")
+        await update.message.reply_text(f"❌ Ошибка добавления администратора: {exc}")
         return
 
     status = "Добавлен" if created else "Обновлён"
     summary = format_admin_record(record)
-    await update.message.reply_text(f"{status} администратор: {summary}")
+    await update.message.reply_text(f"✅ {status} администратор: {summary}")
 
 
 async def removeadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -391,7 +391,7 @@ async def removeadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if not identifier:
         await update.message.reply_text(
-            "Укажите ID или @username (можно ответить на сообщение администратора)."
+            "ℹ️ Укажите ID или @username (можно ответить на сообщение администратора)."
         )
         return
 
@@ -401,7 +401,7 @@ async def removeadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         username = target_user.username
 
     if tg_id is None and (username is None or not username):
-        await update.message.reply_text("Некорректный идентификатор администратора.")
+        await update.message.reply_text("⚠️ Некорректный идентификатор администратора.")
         return
 
     try:
@@ -412,13 +412,13 @@ async def removeadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to remove admin")
-        await update.message.reply_text(f"Ошибка удаления администратора: {exc}")
+        await update.message.reply_text(f"❌ Ошибка удаления администратора: {exc}")
         return
 
     if removed:
-        await update.message.reply_text("Администратор удалён.")
+        await update.message.reply_text("🗑️ Администратор удалён.")
     else:
-        await update.message.reply_text("Администратор не найден.")
+        await update.message.reply_text("🔍 Администратор не найден.")
 
 
 async def uploadclients_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -441,7 +441,7 @@ async def uploadclients_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     context.user_data["awaiting_csv_upload"] = {"truncate": truncate}
     await update.message.reply_text(
-        "Пришлите CSV файл (как документ). Можно указать /uploadclients truncate для полной перезагрузки."
+        "📄 Пришлите CSV файл (как документ). Можно указать /uploadclients truncate для полной перезагрузки."
     )
 
 
@@ -460,7 +460,7 @@ async def setclient_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if account_id is None:
         account_list = format_account_list()
         await update.message.reply_text(
-            f"Аккаунт {raw_account_id} не найден. Доступные аккаунты:\n{account_list}"
+            f"⚠️ Аккаунт {raw_account_id} не найден. Доступные аккаунты:\n{account_list}"
         )
         return
 
@@ -487,7 +487,7 @@ async def account_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         profile, auth_user = await asyncio.to_thread(fetch_account_information, account_id)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to fetch account info for %s", account_id)
-        await update.message.reply_text(f"Ошибка получения данных: {exc}")
+        await update.message.reply_text(f"⚠️ Ошибка получения данных: {exc}")
         return
 
     text = format_account_details(account_id, profile, auth_user)
@@ -502,7 +502,7 @@ async def client_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if not context.args:
         await update.message.reply_text(
-            "Укажите имя или фамилию, например: /client Иван"
+            "ℹ️ Укажите имя или фамилию, например: /client Иван"
         )
         return
 
@@ -553,7 +553,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         try:
             client_id = int(parts[2])
         except ValueError:
-            await query.edit_message_text("Некорректный идентификатор клиента.")
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
             return
         await assign_client_to_account(query, context, account_id, client_id)
     elif action == "setclient_page" and len(parts) >= 3:
@@ -573,16 +573,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         try:
             client_id = int(parts[1])
         except ValueError:
-            await query.edit_message_text("Некорректный идентификатор клиента.")
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
             return
         await show_client_info(query, client_id)
     else:
-        await query.edit_message_text("Неизвестное действие.")
+        await query.edit_message_text("❓ Неизвестное действие.")
 
 
 async def send_recent_activities(query, context, account_id: str, limit: int) -> None:
     if account_id not in ACCOUNT_REGISTRY:
-        await query.edit_message_text("Аккаунт не найден.")
+        await query.edit_message_text("⚠️ Аккаунт не найден.")
         return
 
     account = ACCOUNT_REGISTRY[account_id]
@@ -591,7 +591,7 @@ async def send_recent_activities(query, context, account_id: str, limit: int) ->
         activities, profile = await fetch_recent_activities(account_id, limit)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to fetch activities")
-        await query.edit_message_text(f"Ошибка: {exc}")
+        await query.edit_message_text(f"❌ Ошибка: {exc}")
         return
 
     cache = context.user_data.setdefault("account_cache", {})
@@ -600,8 +600,8 @@ async def send_recent_activities(query, context, account_id: str, limit: int) ->
         context.user_data["account_cache"] = cache
     cache[account_id] = {"activities": activities, "profile": profile}
 
-    text_lines = [f"<b>{account.name}</b>"]
-    text_lines.append(f"Последние {min(limit, len(activities))} активностей:")
+    text_lines = [f"<b>📈 {account.name}</b>"]
+    text_lines.append(f"🏁 Последние {min(limit, len(activities))} активностей:")
     keyboard_rows: List[List[InlineKeyboardButton]] = []
 
     for idx, activity in enumerate(activities[:limit], start=1):
@@ -617,7 +617,7 @@ async def send_recent_activities(query, context, account_id: str, limit: int) ->
             keyboard_rows.append([button])
 
     if not keyboard_rows:
-        keyboard_rows.append([InlineKeyboardButton(text="FIT недоступен", callback_data="noop")])
+        keyboard_rows.append([InlineKeyboardButton(text="🚫 FIT недоступен", callback_data="noop")])
 
     await query.edit_message_text(
         "\n".join(text_lines),
@@ -637,7 +637,7 @@ def format_activity_line(index: int, activity: Dict[str, Any]) -> str:
     duration = format_duration(activity.get("elapsedTime"))
     name = activity.get("mapNameRu") or activity.get("name") or "Без названия"
 
-    return f"<b>{index}.</b> {name} — {distance_km:.1f} км, {duration}, {date_str}"
+    return f"<b>{index}.</b> 🚴‍♂️ {name} — {distance_km:.1f} км, {duration}, {date_str}"
 
 
 def format_duration(seconds: Optional[int]) -> str:
@@ -683,31 +683,32 @@ def format_activity_meta(
 
     lines = []
     if account_name:
-        lines.append(f"<b>{account_name}</b>")
-    lines.append(f"<b>{name}</b>")
+        lines.append(f"<b>📈 {account_name}</b>")
+    lines.append(f"<b>🚴‍♂️ {name}</b>")
     athlete_name = extract_athlete_name(profile) if profile else ""
     if athlete_name:
-        lines.append(f"Атлет: {athlete_name}")
+        lines.append(f"👤 Атлет: {athlete_name}")
     gender = extract_athlete_field(profile, "gender") if profile else ""
     if gender:
-        lines.append(f"Пол: {'М' if gender.upper().startswith('M') else 'Ж'}")
+        gender_symbol = "🚹" if str(gender).upper().startswith("M") else "🚺"
+        lines.append(f"{gender_symbol} Пол: {'М' if str(gender).upper().startswith('M') else 'Ж'}")
     weight = extract_athlete_field(profile, "weight") if profile else ""
     if weight:
-        lines.append(f"Вес: {weight} кг")
+        lines.append(f"⚖️ Вес: {weight} кг")
     ftp_value = extract_athlete_field(profile, "ftp") if profile else ""
     if ftp_value:
-        lines.append(f"FTP: {ftp_value} Вт")
-    lines.append(f"Дата: {date_str}")
-    lines.append(f"Дистанция: {distance_km:.1f} км")
-    lines.append(f"Время: {duration}")
+        lines.append(f"⚡ FTP: {ftp_value} Вт")
+    lines.append(f"📅 Дата: {date_str}")
+    lines.append(f"🛣️ Дистанция: {distance_km:.1f} км")
+    lines.append(f"⏱️ Время: {duration}")
     if elevation is not None:
-        lines.append(f"Набор высоты: {elevation} м")
+        lines.append(f"⛰️ Набор высоты: {elevation} м")
     if power_avg:
-        lines.append(f"Средняя мощность: {power_avg} Вт")
+        lines.append(f"⚡ Средняя мощность: {power_avg} Вт")
     if cadence_avg:
-        lines.append(f"Средний каденс: {cadence_avg} об/мин")
+        lines.append(f"🔄 Средний каденс: {cadence_avg} об/мин")
     if heartrate_avg:
-        lines.append(f"Средний пульс: {heartrate_avg} уд/мин")
+        lines.append(f"❤️ Средний пульс: {heartrate_avg} уд/мин")
 
     return "\n".join(lines)
 
@@ -846,36 +847,37 @@ def format_client_summary(client_record: Dict[str, Any]) -> str:
         header = " ".join(part for part in [first_name, last_name] if part).strip()
     else:
         header = full_name or ""
-    lines = [f"<b>{header}</b>"]
+    header = header or "Без имени"
+    lines = [f"<b>👤 {header}</b>"]
     gender_value = client_record.get("gender")
     if gender_value:
         gender_norm = str(gender_value).strip().lower()
         if gender_norm.startswith("m"):
-            lines.append(f"Пол: М ({gender_value})")
+            lines.append(f"🚹 Пол: М ({gender_value})")
         elif gender_norm.startswith("f"):
-            lines.append(f"Пол: Ж ({gender_value})")
+            lines.append(f"🚺 Пол: Ж ({gender_value})")
         else:
-            lines.append(f"Пол: {gender_value}")
+            lines.append(f"🚻 Пол: {gender_value}")
     weight = client_record.get("weight")
     if weight is not None:
         try:
-            lines.append(f"Вес: {float(weight):g} кг")
+            lines.append(f"⚖️ Вес: {float(weight):g} кг")
         except (TypeError, ValueError):
             pass
     height = client_record.get("height")
     if height is not None:
         try:
-            lines.append(f"Рост: {float(height):g} см")
+            lines.append(f"📏 Рост: {float(height):g} см")
         except (TypeError, ValueError):
             pass
     ftp = client_record.get("ftp")
     if ftp is not None:
         try:
-            lines.append(f"FTP: {int(float(ftp))} Вт")
+            lines.append(f"⚡ FTP: {int(float(ftp))} Вт")
         except (TypeError, ValueError):
             pass
     if client_record.get("goal"):
-        lines.append(f"Цель: {client_record['goal']}")
+        lines.append(f"🎯 Цель: {client_record['goal']}")
     return "\n".join(lines)
 
 
@@ -893,27 +895,29 @@ def format_client_button_label(client_record: Dict[str, Any]) -> str:
 
 
 def format_client_details(client_record: Dict[str, Any]) -> str:
-    lines = [format_client_summary(client_record)]
+    summary = format_client_summary(client_record)
+    lines = [summary]
+    has_goal_in_summary = any("Цель:" in line for line in summary.splitlines())
 
     pedals = client_record.get("pedals")
     if pedals:
-        lines.append(f"Педали: {pedals}")
+        lines.append(f"🚴‍♂️ Педали: {pedals}")
     goal = client_record.get("goal")
-    if goal:
-        lines.append(f"Цель: {goal}")
+    if goal and not has_goal_in_summary:
+        lines.append(f"🎯 Цель: {goal}")
     saddle = client_record.get("saddle_height")
     if saddle:
-        lines.append(f"Высота седла: {saddle}")
+        lines.append(f"📐 Высота седла: {saddle}")
     bike = client_record.get("favorite_bike")
     if bike:
-        lines.append(f"Любимый велосипед: {bike}")
+        lines.append(f"🚲 Любимый велосипед: {bike}")
     submitted = client_record.get("submitted_at")
     if submitted:
         if isinstance(submitted, datetime):
             submitted_str = submitted.strftime("%Y-%m-%d %H:%M")
         else:
             submitted_str = str(submitted)
-        lines.append(f"Анкета заполнена: {submitted_str}")
+        lines.append(f"🗓️ Анкета заполнена: {submitted_str}")
 
     return "\n".join(lines)
 
@@ -950,51 +954,52 @@ def format_account_details(
     auth_user: Dict[str, Any],
 ) -> str:
     account = ACCOUNT_REGISTRY[account_id]
-    lines = [f"<b>{account.name}</b> ({account_id})"]
+    lines = [f"<b>👤 {account.name}</b> ({account_id})"]
 
     first = auth_user.get("firstName") if auth_user else None
     last = auth_user.get("lastName") if auth_user else None
     if first or last:
         name_str = " ".join(part for part in [first, last] if part)
         if name_str:
-            lines.append(f"Имя: {name_str}")
+            lines.append(f"🧑 Имя: {name_str}")
     else:
         name = extract_athlete_name(profile)
         if name:
-            lines.append(f"Имя: {name}")
+            lines.append(f"🧑 Имя: {name}")
 
     email = auth_user.get("email") if auth_user else None
     if email:
-        lines.append(f"Email: {email}")
+        lines.append(f"✉️ Email: {email}")
 
     gender = extract_athlete_field(profile, "gender")
     if gender:
-        lines.append(f"Пол: {'М' if gender.upper().startswith('M') else 'Ж'} ({gender})")
+        gender_symbol = "🚹" if gender.upper().startswith("M") else "🚺"
+        lines.append(f"{gender_symbol} Пол: {'М' if gender.upper().startswith('M') else 'Ж'} ({gender})")
 
     weight = extract_athlete_field(profile, "weight")
     if weight:
         try:
-            lines.append(f"Вес: {float(weight):g} кг")
+            lines.append(f"⚖️ Вес: {float(weight):g} кг")
         except (TypeError, ValueError):
-            lines.append(f"Вес: {weight} кг")
+            lines.append(f"⚖️ Вес: {weight} кг")
 
     height = extract_athlete_field(profile, "height")
     if height:
         try:
-            lines.append(f"Рост: {float(height):g} см")
+            lines.append(f"📏 Рост: {float(height):g} см")
         except (TypeError, ValueError):
-            lines.append(f"Рост: {height} см")
+            lines.append(f"📏 Рост: {height} см")
 
     ftp = extract_athlete_field(profile, "ftp")
     if ftp:
         try:
-            lines.append(f"FTP: {int(float(ftp))} Вт")
+            lines.append(f"⚡ FTP: {int(float(ftp))} Вт")
         except (TypeError, ValueError):
-            lines.append(f"FTP: {ftp} Вт")
+            lines.append(f"⚡ FTP: {ftp} Вт")
 
     birth_date = extract_athlete_field(profile, "birthDate")
     if birth_date:
-        lines.append(f"Дата рождения: {birth_date}")
+        lines.append(f"🎂 Дата рождения: {birth_date}")
 
     return "\n".join(lines)
 
@@ -1047,7 +1052,7 @@ async def show_client_page(
     query=None,
 ) -> None:
     if account_id not in ACCOUNT_REGISTRY:
-        text = "Аккаунт не найден."
+        text = "⚠️ Аккаунт не найден."
         if query:
             await query.edit_message_text(text)
         elif message:
@@ -1058,7 +1063,7 @@ async def show_client_page(
         total = await asyncio.to_thread(count_clients)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to count clients")
-        text = f"Ошибка чтения базы клиентов: {exc}"
+        text = f"❌ Ошибка чтения базы клиентов: {exc}"
         if query:
             await query.edit_message_text(text)
         elif message:
@@ -1066,7 +1071,7 @@ async def show_client_page(
         return
 
     if total <= 0:
-        text = "Список клиентов пуст."
+        text = "📭 Список клиентов пуст."
         if query:
             await query.edit_message_text(text)
         elif message:
@@ -1082,7 +1087,7 @@ async def show_client_page(
         clients = await asyncio.to_thread(list_clients, page_size, offset)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to load clients from DB")
-        text = f"Ошибка чтения базы клиентов: {exc}"
+        text = f"❌ Ошибка чтения базы клиентов: {exc}"
         if query:
             await query.edit_message_text(text)
         elif message:
@@ -1123,8 +1128,8 @@ async def show_client_page(
         keyboard_rows.append(nav_row)
 
     text = (
-        f"Выберите клиента для применения данных к {ACCOUNT_REGISTRY[account_id].name}:\n"
-        f"Страница {page + 1} из {max_page + 1} (всего {total})"
+        f"👥 Выберите клиента для применения данных к {ACCOUNT_REGISTRY[account_id].name}:\n"
+        f"📄 Страница {page + 1} из {max_page + 1} (всего {total})"
     )
 
     markup = InlineKeyboardMarkup(keyboard_rows)
@@ -1149,9 +1154,9 @@ async def show_account_selection(
         keyboard_rows.append([InlineKeyboardButton(text=label, callback_data=callback)])
 
     if kind == "setclient":
-        text = "Выберите аккаунт для применения данных клиента:"
+        text = "👤 Выберите аккаунт для применения данных клиента:"
     else:
-        text = "Выберите аккаунт для просмотра данных:"
+        text = "📊 Выберите аккаунт для просмотра данных:"
     markup = InlineKeyboardMarkup(keyboard_rows)
     if query:
         await query.edit_message_text(text, reply_markup=markup)
@@ -1161,25 +1166,25 @@ async def show_account_selection(
 
 async def assign_client_to_account(query, context, account_id: str, client_id: int) -> None:
     if account_id not in ACCOUNT_REGISTRY:
-        await query.edit_message_text("Аккаунт не найден.")
+        await query.edit_message_text("⚠️ Аккаунт не найден.")
         return
 
     try:
         client_record = await asyncio.to_thread(get_client, client_id)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to fetch client %s", client_id)
-        await query.edit_message_text(f"Ошибка чтения клиента: {exc}")
+        await query.edit_message_text(f"❌ Ошибка чтения клиента: {exc}")
         return
 
     if not client_record:
-        await query.edit_message_text("Клиент не найден.")
+        await query.edit_message_text("🔍 Клиент не найден.")
         return
 
     try:
         await asyncio.to_thread(apply_client_profile, account_id, client_record)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to apply client %s to %s", client_id, account_id)
-        await query.edit_message_text(f"Ошибка применения данных: {exc}")
+        await query.edit_message_text(f"❌ Ошибка применения данных: {exc}")
         return
 
     summary = format_client_summary(client_record)
@@ -1187,7 +1192,7 @@ async def assign_client_to_account(query, context, account_id: str, client_id: i
     if isinstance(cache, dict):
         cache.pop(account_id, None)
     await query.edit_message_text(
-        f"Данные клиента применены к {ACCOUNT_REGISTRY[account_id].name}:\n{summary}",
+        f"✅ Данные клиента применены к {ACCOUNT_REGISTRY[account_id].name}:\n{summary}",
         parse_mode=ParseMode.HTML,
     )
 
@@ -1195,14 +1200,14 @@ async def assign_client_to_account(query, context, account_id: str, client_id: i
 async def show_account_via_callback(query, account_id: str) -> None:
     account = resolve_account_identifier(account_id)
     if account is None:
-        await query.edit_message_text("Аккаунт не найден.")
+        await query.edit_message_text("⚠️ Аккаунт не найден.")
         return
 
     try:
         profile, auth_user = await asyncio.to_thread(fetch_account_information, account)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to fetch account info for %s", account)
-        await query.edit_message_text(f"Ошибка получения данных: {exc}")
+        await query.edit_message_text(f"❌ Ошибка получения данных: {exc}")
         return
 
     text = format_account_details(account, profile, auth_user)
@@ -1227,11 +1232,11 @@ async def show_client_info(query, client_id: int) -> None:
         record = await asyncio.to_thread(get_client, client_id)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to load client %s", client_id)
-        await query.edit_message_text(f"Ошибка получения данных клиента: {exc}")
+        await query.edit_message_text(f"❌ Ошибка получения данных клиента: {exc}")
         return
 
     if not record:
-        await query.edit_message_text("Клиент не найден.")
+        await query.edit_message_text("🔍 Клиент не найден.")
         return
 
     text = format_client_details(record)
@@ -1271,7 +1276,7 @@ async def document_upload_handler(update: Update, context: ContextTypes.DEFAULT_
             truncate = pending.get("truncate", False)
         else:
             await update.message.reply_text(
-                "Чтобы импортировать клиентов, используйте команду /uploadclients или добавьте её в подпись к файлу."
+                "ℹ️ Чтобы импортировать клиентов, используйте команду /uploadclients или добавьте её в подпись к файлу."
             )
             return
 
@@ -1281,21 +1286,21 @@ async def document_upload_handler(update: Update, context: ContextTypes.DEFAULT_
 async def process_client_search(message: Message, term: str) -> None:
     term = (term or "").strip()
     if not term:
-        await message.reply_text("Запрос не должен быть пустым.")
+        await message.reply_text("⚠️ Запрос не должен быть пустым.")
         return
     if len(term) < 2:
-        await message.reply_text("Уточните запрос (минимум 2 символа).")
+        await message.reply_text("ℹ️ Уточните запрос (минимум 2 символа).")
         return
 
     try:
         results = await asyncio.to_thread(search_clients, term, 15)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to search clients")
-        await message.reply_text(f"Ошибка поиска клиентов: {exc}")
+        await message.reply_text(f"❌ Ошибка поиска клиентов: {exc}")
         return
 
     if not results:
-        await message.reply_text("Ничего не найдено. Уточните запрос.")
+        await message.reply_text("🔍 Ничего не найдено. Уточните запрос.")
         return
 
     if len(results) == 1:
@@ -1312,9 +1317,9 @@ async def process_client_search(message: Message, term: str) -> None:
             [InlineKeyboardButton(text=label, callback_data=f"client_info|{record['id']}")]
         )
 
-    header = f"Найдено {len(results)} совпадений. Выберите клиента:"
+    header = f"📋 Найдено {len(results)} совпадений. Выберите клиента:"
     if len(results) >= 15:
-        header += "\nПоказаны первые 15, уточните запрос для более точного результата."
+        header += "\nℹ️ Показаны первые 15, уточните запрос для более точного результата."
 
     await message.reply_text(
         header,
@@ -1344,7 +1349,7 @@ async def send_fit_file(query, context, account_id: str, activity_id: str) -> No
         try:
             activities, profile = await fetch_recent_activities(account_id, DEFAULT_RECENT_LIMIT)
         except Exception as exc:  # noqa: BLE001
-            await query.edit_message_text(f"Ошибка обновления списка: {exc}")
+            await query.edit_message_text(f"❌ Ошибка обновления списка: {exc}")
             return
         cache[account_id] = {"activities": activities, "profile": profile}
         for item in activities:
@@ -1353,7 +1358,7 @@ async def send_fit_file(query, context, account_id: str, activity_id: str) -> No
                 break
 
     if activity is None:
-        await query.edit_message_text("Активность не найдена.")
+        await query.edit_message_text("🔍 Активность не найдена.")
         return
 
     fit_id = activity.get("fitFileId")
@@ -1364,7 +1369,7 @@ async def send_fit_file(query, context, account_id: str, activity_id: str) -> No
             profile,
         )
         await query.edit_message_text(
-            "Для этой активности нет FIT файла.\n\n" + caption,
+            "ℹ️ Для этой активности нет FIT файла.\n\n" + caption,
             parse_mode=ParseMode.HTML,
         )
         return
@@ -1373,7 +1378,7 @@ async def send_fit_file(query, context, account_id: str, activity_id: str) -> No
         temp_path = await download_fit_tempfile(account_id, str(fit_id))
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Fit download failed")
-        await query.edit_message_text(f"Ошибка скачивания: {exc}")
+        await query.edit_message_text(f"❌ Ошибка скачивания: {exc}")
         return
 
     filename = f"activity_{activity_id}.fit"
