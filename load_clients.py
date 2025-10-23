@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from io import StringIO
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List
@@ -111,15 +112,19 @@ def normalise_gender(value: str) -> str | None:
     return value
 
 
-def load_data(csv_path: Path) -> None:
-    with csv_path.open(encoding="utf-8-sig") as fh:
-        reader = csv.DictReader(fh)
-        rows: List[dict] = []
-        for raw in reader:
-            mapped: dict = {}
-            for src, target in CSV_HEADERS.items():
-                mapped[target] = raw.get(src, "")
-            rows.append(mapped)
+def _map_rows(reader: csv.DictReader) -> List[dict]:
+    rows: List[dict] = []
+    for raw in reader:
+        mapped: dict = {}
+        for src, target in CSV_HEADERS.items():
+            mapped[target] = raw.get(src, "")
+        rows.append(mapped)
+    return rows
+
+
+def load_rows(rows: List[dict]) -> tuple[int, int]:
+    inserted = 0
+    updated = 0
 
     with db_connection() as conn, dict_cursor(conn) as cur:
         for row in rows:
@@ -183,7 +188,31 @@ def load_data(csv_path: Path) -> None:
                     favorite_bike,
                 ),
             )
+            if cur.statusmessage.startswith("INSERT"):
+                inserted += 1
+            else:
+                updated += 1
         conn.commit()
+
+    return inserted, updated
+
+
+def load_data(csv_path: Path) -> tuple[int, int]:
+    with csv_path.open(encoding="utf-8-sig") as fh:
+        reader = csv.DictReader(fh)
+        rows = _map_rows(reader)
+    return load_rows(rows)
+
+
+def load_clients_from_csv_bytes(data: bytes, truncate: bool = False) -> tuple[int, int]:
+    create_table()
+    if truncate:
+        truncate_table()
+
+    text = data.decode("utf-8-sig")
+    reader = csv.DictReader(StringIO(text))
+    rows = _map_rows(reader)
+    return load_rows(rows)
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -192,8 +221,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     create_table()
     if args.truncate:
         truncate_table()
-    load_data(csv_path)
-    print(f"Imported clients from {csv_path}")
+    inserted, updated = load_data(csv_path)
+    print(f"Imported clients from {csv_path}: inserted={inserted}, updated={updated}")
     return 0
 
 

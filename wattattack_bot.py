@@ -32,6 +32,7 @@ from admin_repository import (
     remove_admin as db_remove_admin,
     is_admin as db_is_admin,
 )
+from load_clients import load_clients_from_csv_bytes
 from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
 
 LOGGER = logging.getLogger(__name__)
@@ -137,6 +138,31 @@ async def ensure_admin_callback(query) -> bool:
         return True
     await query.edit_message_text("Недостаточно прав для выполнения действия.")
     return False
+
+
+async def process_clients_document(
+    document, message: Message, truncate: bool = False
+) -> None:
+    try:
+        file = await document.get_file()
+        data = await file.download_as_bytearray()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to download CSV file")
+        await message.reply_text(f"Не удалось скачать файл: {exc}")
+        return
+
+    try:
+        inserted, updated = await asyncio.to_thread(
+            load_clients_from_csv_bytes, bytes(data), truncate
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to import clients")
+        await message.reply_text(f"Ошибка импорта: {exc}")
+        return
+
+    await message.reply_text(
+        "Импорт завершён. Добавлено: {0}, обновлено: {1}.".format(inserted, updated)
+    )
 
 
 def load_accounts(config_path: Path) -> Dict[str, AccountConfig]:
@@ -393,6 +419,30 @@ async def removeadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Администратор удалён.")
     else:
         await update.message.reply_text("Администратор не найден.")
+
+
+async def uploadclients_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    truncate = False
+    if context.args:
+        truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in context.args)
+
+    if update.message.reply_to_message and update.message.reply_to_message.document:
+        await process_clients_document(
+            update.message.reply_to_message.document,
+            update.message,
+            truncate=truncate,
+        )
+        return
+
+    context.user_data["awaiting_csv_upload"] = {"truncate": truncate}
+    await update.message.reply_text(
+        "Пришлите CSV файл (как документ). Можно указать /uploadclients truncate для полной перезагрузки."
+    )
 
 
 async def setclient_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1202,6 +1252,32 @@ async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     await process_client_search(update.message, update.message.text)
 
 
+async def document_upload_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.document:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    document = update.message.document
+    caption = update.message.caption or ""
+    truncate = False
+
+    if caption.lower().startswith("/uploadclients"):
+        args = caption.split()[1:]
+        truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in args)
+    else:
+        pending = context.user_data.pop("awaiting_csv_upload", None)
+        if pending:
+            truncate = pending.get("truncate", False)
+        else:
+            await update.message.reply_text(
+                "Чтобы импортировать клиентов, используйте команду /uploadclients или добавьте её в подпись к файлу."
+            )
+            return
+
+    await process_clients_document(document, update.message, truncate)
+
+
 async def process_client_search(message: Message, term: str) -> None:
     term = (term or "").strip()
     if not term:
@@ -1360,7 +1436,12 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("admins", admins_handler))
     application.add_handler(CommandHandler("addadmin", addadmin_handler))
     application.add_handler(CommandHandler("removeadmin", removeadmin_handler))
+    application.add_handler(CommandHandler("uploadclients", uploadclients_handler))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_search_handler))
+    csv_filter = (filters.Document.MimeType("text/csv") | filters.Document.FileExtension("csv"))
+    application.add_handler(
+        MessageHandler(csv_filter, document_upload_handler)
+    )
     application.add_handler(CallbackQueryHandler(noop_handler, pattern="^noop$"))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_error_handler(on_error)
