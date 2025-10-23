@@ -19,9 +19,11 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
-from client_repository import count_clients, get_client, list_clients
+from client_repository import count_clients, get_client, list_clients, search_clients
 from admin_repository import (
     ensure_admin_table,
     seed_admins_from_env,
@@ -186,6 +188,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/latest — скачать последнюю активность по каждому аккаунту\n"
         "/setclient <аккаунт> — применить данные клиента из базы\n"
         "/account <аккаунт> — показать текущие данные аккаунта\n"
+        "/client <имя/фамилия> — найти клиента по БД\n"
         "/admins — показать список администраторов\n"
         "/addadmin <id|@user> — добавить администратора (можно ответом на сообщение)\n"
         "/removeadmin <id|@user> — удалить администратора"
@@ -417,6 +420,8 @@ async def setclient_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def account_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
+    if not ensure_admin_message(update):
+        return
 
     if not context.args:
         await show_account_selection(message=update.message, kind="account")
@@ -437,6 +442,22 @@ async def account_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     text = format_account_details(account_id, profile, auth_user)
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def client_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Укажите имя или фамилию, например: /client Иван"
+        )
+        return
+
+    term = " ".join(context.args).strip()
+    await process_client_search(update.message, term)
 
 
 def build_accounts_keyboard(limit: int) -> InlineKeyboardMarkup:
@@ -498,6 +519,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif action == "account_show" and len(parts) >= 2:
         account_id = parts[1]
         await show_account_via_callback(query, account_id)
+    elif action == "client_info" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("Некорректный идентификатор клиента.")
+            return
+        await show_client_info(query, client_id)
     else:
         await query.edit_message_text("Неизвестное действие.")
 
@@ -747,6 +775,8 @@ def apply_client_profile(account_id: str, client_record: Dict[str, Any]) -> None
         profile_payload["birthDate"] = athlete_section.get("birthDate")
     if "gender" not in profile_payload and athlete_section.get("gender"):
         profile_payload["gender"] = athlete_section.get("gender")
+    if not profile_payload.get("birthDate"):
+        profile_payload["birthDate"] = "2000-01-01"
 
     if user_payload:
         LOGGER.info("Updating user %s with payload: %s", account_id, user_payload)
@@ -754,8 +784,8 @@ def apply_client_profile(account_id: str, client_record: Dict[str, Any]) -> None
         LOGGER.info("User update for %s completed", account_id)
     if profile_payload:
         LOGGER.info("Updating athlete %s with payload: %s", account_id, profile_payload)
-        client.update_profile(profile_payload, timeout=DEFAULT_TIMEOUT)
-        LOGGER.info("Athlete update for %s completed", account_id)
+        response = client.update_profile(profile_payload, timeout=DEFAULT_TIMEOUT)
+        LOGGER.info("Athlete update for %s response: %s", account_id, response)
 
 
 def format_client_summary(client_record: Dict[str, Any]) -> str:
@@ -796,6 +826,45 @@ def format_client_summary(client_record: Dict[str, Any]) -> str:
             pass
     if client_record.get("goal"):
         lines.append(f"Цель: {client_record['goal']}")
+    return "\n".join(lines)
+
+
+def format_client_button_label(client_record: Dict[str, Any]) -> str:
+    first_name = client_record.get("first_name") or ""
+    last_name = client_record.get("last_name") or ""
+    full_name = (first_name + " " + last_name).strip() or client_record.get("full_name") or "Без имени"
+    ftp = client_record.get("ftp")
+    if ftp:
+        try:
+            return f"{full_name} (FTP {int(float(ftp))})"
+        except (TypeError, ValueError):
+            pass
+    return full_name
+
+
+def format_client_details(client_record: Dict[str, Any]) -> str:
+    lines = [format_client_summary(client_record)]
+
+    pedals = client_record.get("pedals")
+    if pedals:
+        lines.append(f"Педали: {pedals}")
+    goal = client_record.get("goal")
+    if goal:
+        lines.append(f"Цель: {goal}")
+    saddle = client_record.get("saddle_height")
+    if saddle:
+        lines.append(f"Высота седла: {saddle}")
+    bike = client_record.get("favorite_bike")
+    if bike:
+        lines.append(f"Любимый велосипед: {bike}")
+    submitted = client_record.get("submitted_at")
+    if submitted:
+        if isinstance(submitted, datetime):
+            submitted_str = submitted.strftime("%Y-%m-%d %H:%M")
+        else:
+            submitted_str = str(submitted)
+        lines.append(f"Анкета заполнена: {submitted_str}")
+
     return "\n".join(lines)
 
 
@@ -1103,6 +1172,80 @@ async def show_account_via_callback(query, account_id: str) -> None:
     )
 
 
+async def show_client_info(query, client_id: int) -> None:
+    try:
+        record = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s", client_id)
+        await query.edit_message_text(f"Ошибка получения данных клиента: {exc}")
+        return
+
+    if not record:
+        await query.edit_message_text("Клиент не найден.")
+        return
+
+    text = format_client_details(record)
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(text="Закрыть", callback_data="noop")]]),
+    )
+
+
+async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+    if update.message.text.startswith("/"):
+        return
+    if not ensure_admin_message(update):
+        return
+    await process_client_search(update.message, update.message.text)
+
+
+async def process_client_search(message: Message, term: str) -> None:
+    term = (term or "").strip()
+    if not term:
+        await message.reply_text("Запрос не должен быть пустым.")
+        return
+    if len(term) < 2:
+        await message.reply_text("Уточните запрос (минимум 2 символа).")
+        return
+
+    try:
+        results = await asyncio.to_thread(search_clients, term, 15)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to search clients")
+        await message.reply_text(f"Ошибка поиска клиентов: {exc}")
+        return
+
+    if not results:
+        await message.reply_text("Ничего не найдено. Уточните запрос.")
+        return
+
+    if len(results) == 1:
+        await message.reply_text(
+            format_client_details(results[0]),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    keyboard_rows: List[List[InlineKeyboardButton]] = []
+    for record in results:
+        label = format_client_button_label(record)
+        keyboard_rows.append(
+            [InlineKeyboardButton(text=label, callback_data=f"client_info|{record['id']}")]
+        )
+
+    header = f"Найдено {len(results)} совпадений. Выберите клиента:"
+    if len(results) >= 15:
+        header += "\nПоказаны первые 15, уточните запрос для более точного результата."
+
+    await message.reply_text(
+        header,
+        reply_markup=InlineKeyboardMarkup(keyboard_rows),
+    )
+
+
 async def send_fit_file(query, context, account_id: str, activity_id: str) -> None:
     cache = context.user_data.setdefault("account_cache", {})
     if not isinstance(cache, dict):
@@ -1212,10 +1355,12 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("recent", recent_handler))
     application.add_handler(CommandHandler("latest", latest_handler))
     application.add_handler(CommandHandler("account", account_handler))
+    application.add_handler(CommandHandler("client", client_handler))
     application.add_handler(CommandHandler("setclient", setclient_handler))
     application.add_handler(CommandHandler("admins", admins_handler))
     application.add_handler(CommandHandler("addadmin", addadmin_handler))
     application.add_handler(CommandHandler("removeadmin", removeadmin_handler))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_search_handler))
     application.add_handler(CallbackQueryHandler(noop_handler, pattern="^noop$"))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_error_handler(on_error)
