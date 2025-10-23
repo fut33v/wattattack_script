@@ -2,3 +2,5 @@
 accounts.json
 notifier_state/
 .DS_Store
+__pycache__/
+data

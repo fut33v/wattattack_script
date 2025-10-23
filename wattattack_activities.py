@@ -97,6 +97,73 @@ class WattAttackClient:
             f"Failed to fetch profile ({response.status_code}): {message}"
         )
 
+    def update_profile(
+        self,
+        payload: Dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
+        """Update athlete profile details via the official API."""
+
+        response = self.session.put(
+            self._api_url("/athlete/update"),
+            json=payload,
+            timeout=timeout,
+        )
+
+        if response.status_code in {200, 400}:
+            try:
+                return response.json()
+            except ValueError:
+                return {"raw": response.text.strip()}
+
+        message = response.text.strip() or "unexpected response"
+        raise RuntimeError(
+            f"Failed to update profile ({response.status_code}): {message}"
+        )
+
+    def update_user(
+        self,
+        payload: Dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
+        """Update user account details (first name, last name, etc.)."""
+
+        response = self.session.put(
+            self._api_url("/user/update"),
+            json=payload,
+            timeout=timeout,
+        )
+
+        if response.status_code in {200, 400}:
+            try:
+                return response.json()
+            except ValueError:
+                return {"raw": response.text.strip()}
+
+        message = response.text.strip() or "unexpected response"
+        raise RuntimeError(
+            f"Failed to update user ({response.status_code}): {message}"
+        )
+
+    def auth_check(self, *, timeout: float | None = None) -> Dict[str, Any]:
+        """Return information about the authenticated user."""
+
+        response = self.session.get(
+            self._api_url("/auth/check"), timeout=timeout
+        )
+        if response.status_code in {200, 401}:
+            try:
+                return response.json()
+            except ValueError:
+                return {"raw": response.text.strip()}
+
+        message = response.text.strip() or "unexpected response"
+        raise RuntimeError(
+            f"Failed to check auth ({response.status_code}): {message}"
+        )
+
 
     def download_fit_file(
         self,

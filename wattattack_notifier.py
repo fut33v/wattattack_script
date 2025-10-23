@@ -14,17 +14,22 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 import requests
 
 from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
+from admin_repository import (
+    ensure_admin_table,
+    seed_admins_from_env,
+    get_admin_ids,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
 ACCOUNTS_ENV = "WATTATTACK_ACCOUNTS_FILE"
 STATE_ENV = "WATTATTACK_STATE_FILE"
-ADMINS_ENV = "TELEGRAM_ADMIN_IDS"
 DEFAULT_ACCOUNTS_PATH = Path("accounts.json")
 DEFAULT_STATE_PATH = Path("notifier_state.json")
 DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
 MAX_TRACKED_IDS = int(os.environ.get("WATTATTACK_TRACKED_LIMIT", "200"))
+DEFAULT_ADMIN_SEED = os.environ.get("TELEGRAM_ADMIN_IDS", "")
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -46,8 +51,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--admins",
-        default=os.environ.get(ADMINS_ENV, ""),
-        help="Comma-separated Telegram chat IDs that receive notifications",
+        default=DEFAULT_ADMIN_SEED,
+        help="Comma-separated admin IDs/юзернеймы для добавления в базу (опционально)",
     )
     parser.add_argument(
         "--token",
@@ -106,9 +111,6 @@ def load_state(path: Path) -> Dict[str, Any]:
 def save_state(path: Path, state: Dict[str, Any]) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
-
-def parse_admin_ids(raw: str) -> Sequence[str]:
-    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 def telegram_send_message(
@@ -313,7 +315,7 @@ def send_activity_fit(
     account_name: str,
     profile: Dict[str, Any],
     token: str,
-    admin_ids: Sequence[str],
+    admin_ids: Sequence[int],
     timeout: float,
 ) -> None:
     fit_id = activity.get("fitFileId")
@@ -325,7 +327,7 @@ def send_activity_fit(
             try:
                 telegram_send_message(
                     token,
-                    chat_id,
+                    str(chat_id),
                     caption,
                     timeout=timeout,
                 )
@@ -343,7 +345,7 @@ def send_activity_fit(
             try:
                 telegram_send_document(
                     token,
-                    chat_id,
+                    str(chat_id),
                     temp_file,
                     filename,
                     caption=caption,
@@ -357,7 +359,7 @@ def send_activity_fit(
             try:
                 telegram_send_message(
                     token,
-                    chat_id,
+                    str(chat_id),
                     f"Не удалось отправить FIT для активности {activity.get('id')}",
                     timeout=timeout,
                 )
@@ -380,9 +382,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         LOGGER.error("Telegram bot token not provided (set TELEGRAM_BOT_TOKEN or --token)")
         return 2
 
-    admin_ids = parse_admin_ids(args.admins)
+    ensure_admin_table()
+    seed_admins_from_env(args.admins)
+    admin_ids = get_admin_ids()
     if not admin_ids:
-        LOGGER.error("Admin chat IDs not provided (set TELEGRAM_ADMIN_IDS or --admins)")
+        LOGGER.error(
+            "Администраторы не настроены. Добавьте их через /addadmin или переменную TELEGRAM_ADMIN_IDS."
+        )
         return 2
 
     try:
@@ -428,6 +434,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Failed to fetch profile for %s: %s", account_id, exc)
             profile = {}
+
+        try:
+            auth_info = client.auth_check(timeout=args.timeout)
+            if isinstance(auth_info, dict) and isinstance(auth_info.get("user"), dict):
+                profile.setdefault("user", auth_info["user"])
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch auth info for %s: %s", account_id, exc)
 
         new_items: List[Dict[str, Any]] = []
         for activity in activities:

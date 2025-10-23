@@ -1,12 +1,26 @@
 version: "3.9"
 
 services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-wattattack}
+      POSTGRES_USER: ${DB_USER:-wattattack}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-wattattack}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "55432:5432"
+    restart: unless-stopped
+
   bot:
     build: .
     command: ["python", "wattattack_bot.py"]
     env_file: .env
     volumes:
       - ./accounts.json:/app/accounts.json:ro
+    depends_on:
+      - db
     restart: unless-stopped
 
   scheduler:
@@ -27,4 +41,9 @@ services:
     volumes:
       - ./accounts.json:/app/accounts.json:ro
       - ./notifier_state:/app/notifier_state
+    depends_on:
+      - db
     restart: unless-stopped
+
+volumes:
+  postgres_data:

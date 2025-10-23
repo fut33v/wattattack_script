@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -21,6 +21,15 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from client_repository import count_clients, get_client, list_clients
+from admin_repository import (
+    ensure_admin_table,
+    seed_admins_from_env,
+    list_admins as db_list_admins,
+    add_admin as db_add_admin,
+    remove_admin as db_remove_admin,
+    is_admin as db_is_admin,
+)
 from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
 
 LOGGER = logging.getLogger(__name__)
@@ -30,6 +39,7 @@ ACCOUNTS_ENV = "WATTATTACK_ACCOUNTS_FILE"
 DEFAULT_ACCOUNTS_PATH = Path("accounts.json")
 DEFAULT_RECENT_LIMIT = int(os.environ.get("WATTATTACK_RECENT_LIMIT", "5"))
 DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
+CLIENTS_PAGE_SIZE = int(os.environ.get("CLIENTS_PAGE_SIZE", "6"))
 
 
 @dataclass(frozen=True)
@@ -42,6 +52,89 @@ class AccountConfig:
 
 
 ACCOUNT_REGISTRY: Dict[str, AccountConfig] = {}
+
+
+def normalize_account_id(value: str) -> str:
+    return value.replace("_", "").lower()
+
+
+def resolve_account_identifier(raw_id: str) -> Optional[str]:
+    if raw_id in ACCOUNT_REGISTRY:
+        return raw_id
+    target = normalize_account_id(raw_id)
+    for account_id in ACCOUNT_REGISTRY:
+        if normalize_account_id(account_id) == target:
+            return account_id
+    return None
+
+
+def format_account_list() -> str:
+    lines: List[str] = []
+    for key in sorted(ACCOUNT_REGISTRY):
+        alias = normalize_account_id(key)
+        account_name = ACCOUNT_REGISTRY[key].name
+        lines.append(f"{alias} ({key}) — {account_name}")
+    return "\n".join(lines)
+
+
+def format_admin_list(admins: List[Dict[str, Any]]) -> str:
+    if not admins:
+        return "Администраторы не настроены."
+    lines = [format_admin_record(admin) for admin in admins]
+    return "\n".join(lines)
+
+
+def format_admin_record(record: Dict[str, Any]) -> str:
+    display_name = record.get("display_name")
+    username = record.get("username")
+    tg_id = record.get("tg_id")
+
+    parts: List[str] = []
+    if display_name:
+        parts.append(str(display_name))
+    if username:
+        handle = username if username.startswith("@") else f"@{username}"
+        parts.append(handle)
+    if tg_id:
+        parts.append(f"id={tg_id}")
+    return " ".join(parts) if parts else f"id={tg_id}" if tg_id else str(record.get("id"))
+
+
+def parse_admin_identifier(value: str) -> Tuple[Optional[int], Optional[str]]:
+    value = value.strip()
+    if not value:
+        return None, None
+    if value.startswith("@"):
+        value = value[1:]
+    if value.isdigit():
+        return int(value), None
+    return None, value
+
+
+def is_admin_user(user) -> bool:
+    if user is None:
+        return False
+    return db_is_admin(getattr(user, "id", None), getattr(user, "username", None))
+
+
+def ensure_admin_message(update: Update) -> bool:
+    if not update.message:
+        return False
+    if is_admin_user(update.message.from_user):
+        return True
+    try:
+        update.message.reply_text("Недостаточно прав для выполнения команды.")
+    except Exception:
+        pass
+    return False
+
+
+async def ensure_admin_callback(query) -> bool:
+    user = getattr(query, "from_user", None)
+    if is_admin_user(user):
+        return True
+    await query.edit_message_text("Недостаточно прав для выполнения действия.")
+    return False
 
 
 def load_accounts(config_path: Path) -> Dict[str, AccountConfig]:
@@ -73,6 +166,8 @@ def load_accounts(config_path: Path) -> Dict[str, AccountConfig]:
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
+    if not ensure_admin_message(update):
+        return
     await update.message.reply_text(
         "Выберите аккаунт WattAttack:",
         reply_markup=build_accounts_keyboard(DEFAULT_RECENT_LIMIT),
@@ -82,17 +177,26 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
+    if not ensure_admin_message(update):
+        return
     message = (
         "Использование:\n"
         "/start — показать список аккаунтов\n"
         "/recent <число> — предложить последние N активностей выбранного аккаунта\n"
-        "/latest — скачать последнюю активность по каждому аккаунту"
+        "/latest — скачать последнюю активность по каждому аккаунту\n"
+        "/setclient <аккаунт> — применить данные клиента из базы\n"
+        "/account <аккаунт> — показать текущие данные аккаунта\n"
+        "/admins — показать список администраторов\n"
+        "/addadmin <id|@user> — добавить администратора (можно ответом на сообщение)\n"
+        "/removeadmin <id|@user> — удалить администратора"
     )
     await update.message.reply_text(message)
 
 
 async def recent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
+        return
+    if not ensure_admin_message(update):
         return
     limit = DEFAULT_RECENT_LIMIT
     if context.args:
@@ -110,6 +214,8 @@ async def recent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
+        return
+    if not ensure_admin_message(update):
         return
 
     await update.message.reply_text("Собираю последние активности по аккаунтам...")
@@ -168,6 +274,171 @@ async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
 
 
+async def admins_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+    try:
+        admins = await asyncio.to_thread(db_list_admins)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load admins")
+        await update.message.reply_text(f"Ошибка получения списка администраторов: {exc}")
+        return
+
+    message = (
+        "Администраторы:\n" + format_admin_list(admins)
+        if admins
+        else "Администраторы не настроены."
+    )
+    await update.message.reply_text(message)
+
+
+async def addadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    identifier: Optional[str] = None
+    display_name: Optional[str] = None
+    target_user = None
+
+    if context.args:
+        identifier = context.args[0]
+        if len(context.args) > 1:
+            display_name = " ".join(context.args[1:])
+
+    if not identifier and update.message.reply_to_message:
+        target_user = update.message.reply_to_message.from_user
+        identifier = str(target_user.id)
+        display_name = display_name or target_user.full_name
+
+    if not identifier:
+        await update.message.reply_text(
+            "Укажите ID или @username (можно ответить на сообщение пользователя)."
+        )
+        return
+
+    tg_id, username = parse_admin_identifier(identifier)
+
+    if target_user is not None:
+        tg_id = target_user.id
+        username = target_user.username
+        display_name = display_name or target_user.full_name
+
+    try:
+        created, record = await asyncio.to_thread(
+            db_add_admin,
+            tg_id=tg_id,
+            username=username,
+            display_name=display_name,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to add admin")
+        await update.message.reply_text(f"Ошибка добавления администратора: {exc}")
+        return
+
+    status = "Добавлен" if created else "Обновлён"
+    summary = format_admin_record(record)
+    await update.message.reply_text(f"{status} администратор: {summary}")
+
+
+async def removeadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    identifier: Optional[str] = None
+    target_user = None
+
+    if context.args:
+        identifier = context.args[0]
+
+    if not identifier and update.message.reply_to_message:
+        target_user = update.message.reply_to_message.from_user
+        identifier = str(target_user.id)
+
+    if not identifier:
+        await update.message.reply_text(
+            "Укажите ID или @username (можно ответить на сообщение администратора)."
+        )
+        return
+
+    tg_id, username = parse_admin_identifier(identifier)
+    if target_user is not None:
+        tg_id = target_user.id
+        username = target_user.username
+
+    if tg_id is None and (username is None or not username):
+        await update.message.reply_text("Некорректный идентификатор администратора.")
+        return
+
+    try:
+        removed = await asyncio.to_thread(
+            db_remove_admin,
+            tg_id=tg_id,
+            username=username,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to remove admin")
+        await update.message.reply_text(f"Ошибка удаления администратора: {exc}")
+        return
+
+    if removed:
+        await update.message.reply_text("Администратор удалён.")
+    else:
+        await update.message.reply_text("Администратор не найден.")
+
+
+async def setclient_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    if not context.args:
+        await show_account_selection(message=update.message)
+        return
+
+    raw_account_id = context.args[0]
+    account_id = resolve_account_identifier(raw_account_id)
+    if account_id is None:
+        account_list = format_account_list()
+        await update.message.reply_text(
+            f"Аккаунт {raw_account_id} не найден. Доступные аккаунты:\n{account_list}"
+        )
+        return
+
+    await show_client_page(account_id, page=0, message=update.message)
+
+
+async def account_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    if not context.args:
+        await show_account_selection(message=update.message, kind="account")
+        return
+
+    raw_account_id = context.args[0]
+    account_id = resolve_account_identifier(raw_account_id)
+    if account_id is None:
+        await show_account_selection(message=update.message, kind="account")
+        return
+
+    try:
+        profile, auth_user = await asyncio.to_thread(fetch_account_information, account_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to fetch account info for %s", account_id)
+        await update.message.reply_text(f"Ошибка получения данных: {exc}")
+        return
+
+    text = format_account_details(account_id, profile, auth_user)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
 def build_accounts_keyboard(limit: int) -> InlineKeyboardMarkup:
     buttons: List[List[InlineKeyboardButton]] = []
     for account_id, account in ACCOUNT_REGISTRY.items():
@@ -189,6 +460,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not query.data:
         return
 
+    if not await ensure_admin_callback(query):
+        return
+
     parts = query.data.split("|")
     action = parts[0]
 
@@ -203,6 +477,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         account_id = parts[1]
         activity_id = parts[2]
         await send_fit_file(query, context, account_id, activity_id)
+    elif action == "setclient" and len(parts) >= 3:
+        account_id = parts[1]
+        try:
+            client_id = int(parts[2])
+        except ValueError:
+            await query.edit_message_text("Некорректный идентификатор клиента.")
+            return
+        await assign_client_to_account(query, context, account_id, client_id)
+    elif action == "setclient_page" and len(parts) >= 3:
+        account_id = parts[1]
+        try:
+            page = max(0, int(parts[2]))
+        except ValueError:
+            page = 0
+        await show_client_page(account_id, page, query=query)
+    elif action == "select_accounts" and len(parts) >= 2:
+        kind = parts[1]
+        await show_account_selection(query=query, kind=kind)
+    elif action == "account_show" and len(parts) >= 2:
+        account_id = parts[1]
+        await show_account_via_callback(query, account_id)
     else:
         await query.edit_message_text("Неизвестное действие.")
 
@@ -362,21 +657,227 @@ def extract_athlete_name(profile: Dict[str, Any]) -> str:
 
 
 def extract_athlete_field(profile: Dict[str, Any], field: str) -> str:
-    candidate = profile
+    containers = []
+    if isinstance(profile.get("athlete"), dict):
+        containers.append(profile["athlete"])
     if isinstance(profile.get("user"), dict):
-        candidate = profile["user"]
-    elif isinstance(profile.get("athlete"), dict):
-        candidate = profile["athlete"]
+        containers.append(profile["user"])
+    containers.append(profile)
 
-    if isinstance(candidate, dict):
-        value = candidate.get(field)
-        if value:
-            return str(value)
-    if isinstance(profile, dict):
-        value = profile.get(field)
-        if value:
-            return str(value)
+    for container in containers:
+        if isinstance(container, dict):
+            value = container.get(field)
+            if value is None and field == "birthDate":
+                value = container.get("birth_date")
+            if value not in (None, ""):
+                return str(value)
     return ""
+
+
+def split_full_name(full_name: str) -> Tuple[Optional[str], Optional[str]]:
+    if not full_name:
+        return None, None
+    parts = full_name.strip().split()
+    if not parts:
+        return None, None
+    first = parts[0]
+    last = " ".join(parts[1:]) or None
+    return first, last
+
+
+def apply_client_profile(account_id: str, client_record: Dict[str, Any]) -> None:
+    account = ACCOUNT_REGISTRY[account_id]
+    client = WattAttackClient(account.base_url)
+    client.login(account.email, account.password, timeout=DEFAULT_TIMEOUT)
+
+    existing_profile: Dict[str, Any] = {}
+    try:
+        existing_profile = client.fetch_profile(timeout=DEFAULT_TIMEOUT)
+        if not isinstance(existing_profile, dict):
+            existing_profile = {}
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to fetch current profile for %s: %s", account_id, exc)
+        existing_profile = {}
+
+    athlete_section = existing_profile.get("athlete") if isinstance(existing_profile, dict) else {}
+    if not isinstance(athlete_section, dict):
+        athlete_section = {}
+
+    first = client_record.get("first_name") or None
+    last = client_record.get("last_name") or None
+    if not first and not last:
+        first, last = split_full_name(client_record.get("full_name", ""))
+
+    user_payload: Dict[str, Any] = {}
+    if first:
+        user_payload["firstName"] = str(first)
+    if last:
+        user_payload["lastName"] = str(last)
+
+    profile_payload: Dict[str, Any] = {}
+    weight = client_record.get("weight")
+    height = client_record.get("height")
+    ftp = client_record.get("ftp")
+    gender_value = client_record.get("gender")
+
+    if weight is not None:
+        try:
+            profile_payload["weight"] = float(weight)
+        except (TypeError, ValueError):
+            pass
+    if height is not None:
+        try:
+            profile_payload["height"] = float(height)
+        except (TypeError, ValueError):
+            pass
+    if ftp is not None:
+        try:
+            profile_payload["ftp"] = int(float(ftp))
+        except (TypeError, ValueError):
+            pass
+    if gender_value:
+        gender_norm = str(gender_value).strip().lower()
+        if gender_norm in {"m", "male", "м", "муж", "мужской"}:
+            profile_payload["gender"] = "male"
+        elif gender_norm in {"f", "female", "ж", "жен", "женский"}:
+            profile_payload["gender"] = "female"
+
+    # Preserve existing required fields to avoid validation errors
+    if "birthDate" not in profile_payload and athlete_section.get("birthDate"):
+        profile_payload["birthDate"] = athlete_section.get("birthDate")
+    if "gender" not in profile_payload and athlete_section.get("gender"):
+        profile_payload["gender"] = athlete_section.get("gender")
+
+    if user_payload:
+        LOGGER.info("Updating user %s with payload: %s", account_id, user_payload)
+        client.update_user(user_payload, timeout=DEFAULT_TIMEOUT)
+        LOGGER.info("User update for %s completed", account_id)
+    if profile_payload:
+        LOGGER.info("Updating athlete %s with payload: %s", account_id, profile_payload)
+        client.update_profile(profile_payload, timeout=DEFAULT_TIMEOUT)
+        LOGGER.info("Athlete update for %s completed", account_id)
+
+
+def format_client_summary(client_record: Dict[str, Any]) -> str:
+    full_name = client_record.get("full_name")
+    first_name = client_record.get("first_name")
+    last_name = client_record.get("last_name")
+    if first_name or last_name:
+        header = " ".join(part for part in [first_name, last_name] if part).strip()
+    else:
+        header = full_name or ""
+    lines = [f"<b>{header}</b>"]
+    gender_value = client_record.get("gender")
+    if gender_value:
+        gender_norm = str(gender_value).strip().lower()
+        if gender_norm.startswith("m"):
+            lines.append(f"Пол: М ({gender_value})")
+        elif gender_norm.startswith("f"):
+            lines.append(f"Пол: Ж ({gender_value})")
+        else:
+            lines.append(f"Пол: {gender_value}")
+    weight = client_record.get("weight")
+    if weight is not None:
+        try:
+            lines.append(f"Вес: {float(weight):g} кг")
+        except (TypeError, ValueError):
+            pass
+    height = client_record.get("height")
+    if height is not None:
+        try:
+            lines.append(f"Рост: {float(height):g} см")
+        except (TypeError, ValueError):
+            pass
+    ftp = client_record.get("ftp")
+    if ftp is not None:
+        try:
+            lines.append(f"FTP: {int(float(ftp))} Вт")
+        except (TypeError, ValueError):
+            pass
+    if client_record.get("goal"):
+        lines.append(f"Цель: {client_record['goal']}")
+    return "\n".join(lines)
+
+
+def fetch_account_information(account_id: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    account = ACCOUNT_REGISTRY[account_id]
+    client = WattAttackClient(account.base_url)
+    client.login(account.email, account.password, timeout=DEFAULT_TIMEOUT)
+
+    profile: Dict[str, Any] = {}
+    try:
+        profile = client.fetch_profile(timeout=DEFAULT_TIMEOUT)
+        if not isinstance(profile, dict):
+            profile = {}
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to fetch profile for %s: %s", account_id, exc)
+        profile = {}
+
+    auth_user: Dict[str, Any] = {}
+    try:
+        auth_info = client.auth_check(timeout=DEFAULT_TIMEOUT)
+        if isinstance(auth_info, dict) and isinstance(auth_info.get("user"), dict):
+            auth_user = auth_info["user"]
+            profile.setdefault("user", auth_user)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to fetch auth info for %s: %s", account_id, exc)
+
+    return profile, auth_user
+
+
+def format_account_details(
+    account_id: str,
+    profile: Dict[str, Any],
+    auth_user: Dict[str, Any],
+) -> str:
+    account = ACCOUNT_REGISTRY[account_id]
+    lines = [f"<b>{account.name}</b> ({account_id})"]
+
+    first = auth_user.get("firstName") if auth_user else None
+    last = auth_user.get("lastName") if auth_user else None
+    if first or last:
+        name_str = " ".join(part for part in [first, last] if part)
+        if name_str:
+            lines.append(f"Имя: {name_str}")
+    else:
+        name = extract_athlete_name(profile)
+        if name:
+            lines.append(f"Имя: {name}")
+
+    email = auth_user.get("email") if auth_user else None
+    if email:
+        lines.append(f"Email: {email}")
+
+    gender = extract_athlete_field(profile, "gender")
+    if gender:
+        lines.append(f"Пол: {'М' if gender.upper().startswith('M') else 'Ж'} ({gender})")
+
+    weight = extract_athlete_field(profile, "weight")
+    if weight:
+        try:
+            lines.append(f"Вес: {float(weight):g} кг")
+        except (TypeError, ValueError):
+            lines.append(f"Вес: {weight} кг")
+
+    height = extract_athlete_field(profile, "height")
+    if height:
+        try:
+            lines.append(f"Рост: {float(height):g} см")
+        except (TypeError, ValueError):
+            lines.append(f"Рост: {height} см")
+
+    ftp = extract_athlete_field(profile, "ftp")
+    if ftp:
+        try:
+            lines.append(f"FTP: {int(float(ftp))} Вт")
+        except (TypeError, ValueError):
+            lines.append(f"FTP: {ftp} Вт")
+
+    birth_date = extract_athlete_field(profile, "birthDate")
+    if birth_date:
+        lines.append(f"Дата рождения: {birth_date}")
+
+    return "\n".join(lines)
 
 
 async def fetch_recent_activities(
@@ -406,9 +907,200 @@ async def fetch_recent_activities(
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Failed to fetch profile for %s: %s", account_id, exc)
+
+        try:
+            auth_info = client.auth_check(timeout=DEFAULT_TIMEOUT)
+            if isinstance(auth_info, dict) and isinstance(auth_info.get("user"), dict):
+                profile.setdefault("user", auth_info["user"])
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch auth info for %s: %s", account_id, exc)
+
         return activities[:limit], profile
 
     return await asyncio.to_thread(worker)
+
+
+async def show_client_page(
+    account_id: str,
+    page: int,
+    *,
+    message: Optional[Message] = None,
+    query=None,
+) -> None:
+    if account_id not in ACCOUNT_REGISTRY:
+        text = "Аккаунт не найден."
+        if query:
+            await query.edit_message_text(text)
+        elif message:
+            await message.reply_text(text)
+        return
+
+    try:
+        total = await asyncio.to_thread(count_clients)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to count clients")
+        text = f"Ошибка чтения базы клиентов: {exc}"
+        if query:
+            await query.edit_message_text(text)
+        elif message:
+            await message.reply_text(text)
+        return
+
+    if total <= 0:
+        text = "Список клиентов пуст."
+        if query:
+            await query.edit_message_text(text)
+        elif message:
+            await message.reply_text(text)
+        return
+
+    page_size = CLIENTS_PAGE_SIZE
+    max_page = max(0, (total - 1) // page_size)
+    page = max(0, min(page, max_page))
+    offset = page * page_size
+
+    try:
+        clients = await asyncio.to_thread(list_clients, page_size, offset)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load clients from DB")
+        text = f"Ошибка чтения базы клиентов: {exc}"
+        if query:
+            await query.edit_message_text(text)
+        elif message:
+            await message.reply_text(text)
+        return
+
+    keyboard_rows: List[List[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=client["full_name"],
+                callback_data=f"setclient|{account_id}|{client['id']}",
+            )
+        ]
+        for client in clients
+    ]
+
+    nav_row: List[InlineKeyboardButton] = [
+        InlineKeyboardButton(
+            text="← Выбор аккаунта",
+            callback_data="select_accounts|setclient",
+        )
+    ]
+    if page > 0:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="← Назад",
+                callback_data=f"setclient_page|{account_id}|{page-1}",
+            )
+        )
+    if page < max_page:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="Вперёд →",
+                callback_data=f"setclient_page|{account_id}|{page+1}",
+            )
+        )
+    if nav_row:
+        keyboard_rows.append(nav_row)
+
+    text = (
+        f"Выберите клиента для применения данных к {ACCOUNT_REGISTRY[account_id].name}:\n"
+        f"Страница {page + 1} из {max_page + 1} (всего {total})"
+    )
+
+    markup = InlineKeyboardMarkup(keyboard_rows)
+    if query:
+        await query.edit_message_text(text, reply_markup=markup)
+    elif message:
+        await message.reply_text(text, reply_markup=markup)
+
+
+async def show_account_selection(
+    *, message: Optional[Message] = None, query=None, kind: str = "setclient", account_id: Optional[str] = None
+) -> None:
+    keyboard_rows: List[List[InlineKeyboardButton]] = []
+    for account_id in sorted(ACCOUNT_REGISTRY):
+        alias = normalize_account_id(account_id)
+        label = f"{alias} — {ACCOUNT_REGISTRY[account_id].name}"
+        if kind == "setclient":
+            callback = f"setclient_page|{account_id}|0"
+        else:
+            callback = f"account_show|{account_id}"
+
+        keyboard_rows.append([InlineKeyboardButton(text=label, callback_data=callback)])
+
+    if kind == "setclient":
+        text = "Выберите аккаунт для применения данных клиента:"
+    else:
+        text = "Выберите аккаунт для просмотра данных:"
+    markup = InlineKeyboardMarkup(keyboard_rows)
+    if query:
+        await query.edit_message_text(text, reply_markup=markup)
+    elif message:
+        await message.reply_text(text, reply_markup=markup)
+
+
+async def assign_client_to_account(query, context, account_id: str, client_id: int) -> None:
+    if account_id not in ACCOUNT_REGISTRY:
+        await query.edit_message_text("Аккаунт не найден.")
+        return
+
+    try:
+        client_record = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to fetch client %s", client_id)
+        await query.edit_message_text(f"Ошибка чтения клиента: {exc}")
+        return
+
+    if not client_record:
+        await query.edit_message_text("Клиент не найден.")
+        return
+
+    try:
+        await asyncio.to_thread(apply_client_profile, account_id, client_record)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to apply client %s to %s", client_id, account_id)
+        await query.edit_message_text(f"Ошибка применения данных: {exc}")
+        return
+
+    summary = format_client_summary(client_record)
+    cache = context.user_data.get("account_cache")
+    if isinstance(cache, dict):
+        cache.pop(account_id, None)
+    await query.edit_message_text(
+        f"Данные клиента применены к {ACCOUNT_REGISTRY[account_id].name}:\n{summary}",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def show_account_via_callback(query, account_id: str) -> None:
+    account = resolve_account_identifier(account_id)
+    if account is None:
+        await query.edit_message_text("Аккаунт не найден.")
+        return
+
+    try:
+        profile, auth_user = await asyncio.to_thread(fetch_account_information, account)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to fetch account info for %s", account)
+        await query.edit_message_text(f"Ошибка получения данных: {exc}")
+        return
+
+    text = format_account_details(account, profile, auth_user)
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="← Выбор аккаунта",
+                        callback_data="select_accounts|account",
+                    )
+                ]
+            ]
+        ),
+    )
 
 
 async def send_fit_file(query, context, account_id: str, activity_id: str) -> None:
@@ -500,7 +1192,12 @@ async def download_fit_tempfile(account_id: str, fit_id: str) -> Path:
 
 
 async def noop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.callback_query.answer("Нет доступных файлов")
+    query = update.callback_query
+    if not query:
+        return
+    if not await ensure_admin_callback(query):
+        return
+    await query.answer("Нет доступных файлов")
 
 
 async def on_error(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -514,6 +1211,11 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("help", help_handler))
     application.add_handler(CommandHandler("recent", recent_handler))
     application.add_handler(CommandHandler("latest", latest_handler))
+    application.add_handler(CommandHandler("account", account_handler))
+    application.add_handler(CommandHandler("setclient", setclient_handler))
+    application.add_handler(CommandHandler("admins", admins_handler))
+    application.add_handler(CommandHandler("addadmin", addadmin_handler))
+    application.add_handler(CommandHandler("removeadmin", removeadmin_handler))
     application.add_handler(CallbackQueryHandler(noop_handler, pattern="^noop$"))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_error_handler(on_error)
@@ -532,6 +1234,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit(
             "TELEGRAM_BOT_TOKEN не задан. Установите переменную окружения и повторите запуск."
         )
+
+    ensure_admin_table()
+    seed_admins_from_env()
 
     accounts_path = Path(os.environ.get(ACCOUNTS_ENV, DEFAULT_ACCOUNTS_PATH))
     global ACCOUNT_REGISTRY
