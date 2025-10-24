@@ -43,6 +43,7 @@ DEFAULT_ACCOUNTS_PATH = Path("accounts.json")
 DEFAULT_RECENT_LIMIT = int(os.environ.get("WATTATTACK_RECENT_LIMIT", "5"))
 DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
 CLIENTS_PAGE_SIZE = int(os.environ.get("CLIENTS_PAGE_SIZE", "6"))
+DEFAULT_CLIENT_FTP = int(os.environ.get("WATTATTACK_DEFAULT_FTP", "150"))
 
 
 @dataclass(frozen=True)
@@ -809,11 +810,17 @@ def apply_client_profile(account_id: str, client_record: Dict[str, Any]) -> None
             profile_payload["height"] = float(height)
         except (TypeError, ValueError):
             pass
-    if ftp is not None:
-        try:
-            profile_payload["ftp"] = int(float(ftp))
-        except (TypeError, ValueError):
-            pass
+    ftp_value = ftp
+    if ftp_value is None:
+        ftp_value = DEFAULT_CLIENT_FTP
+    elif isinstance(ftp_value, str):
+        ftp_value = ftp_value.strip()
+        if not ftp_value:
+            ftp_value = DEFAULT_CLIENT_FTP
+    try:
+        profile_payload["ftp"] = int(float(ftp_value))
+    except (TypeError, ValueError):
+        profile_payload["ftp"] = DEFAULT_CLIENT_FTP
     if gender_value:
         gender_norm = str(gender_value).strip().lower()
         if gender_norm in {"m", "male", "м", "муж", "мужской"}:
