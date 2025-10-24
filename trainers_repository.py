@@ -31,6 +31,20 @@ def ensure_trainers_table() -> None:
         conn.commit()
 
 
+def get_trainer(trainer_id: int) -> Dict | None:
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT id, position, code, title, display_name, owner, axle_types, cassette, notes
+            FROM trainers
+            WHERE id = %s
+            """,
+            (trainer_id,),
+        )
+        row = cur.fetchone()
+    return row
+
+
 def truncate_trainers() -> None:
     with db_connection() as conn, dict_cursor(conn) as cur:
         cur.execute("TRUNCATE TABLE trainers")
@@ -134,3 +148,30 @@ def trainers_count() -> int:
         cur.execute("SELECT COUNT(*) AS cnt FROM trainers")
         row = cur.fetchone()
     return int(row.get("cnt", 0)) if row else 0
+
+
+EDITABLE_TRAINER_FIELDS = {
+    "axle_types": "axle_types",
+    "cassette": "cassette",
+}
+
+
+def update_trainer_fields(trainer_id: int, **fields: object) -> bool:
+    updates = {
+        EDITABLE_TRAINER_FIELDS[key]: value
+        for key, value in fields.items()
+        if key in EDITABLE_TRAINER_FIELDS
+    }
+    if not updates:
+        return False
+
+    assignments = ", ".join(f"{column} = %s" for column in updates)
+    values = list(updates.values())
+    values.append(trainer_id)
+
+    query = f"UPDATE trainers SET {assignments} WHERE id = %s"
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, values)
+        conn.commit()
+    return True

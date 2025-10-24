@@ -31,7 +31,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 
 ## Features
 - **Admin-only controls**: All commands, callbacks, and text handlers require admin status. Admins are stored centrally in the DB; `/addadmin` and `/removeadmin` manipulate them at runtime. Seed list comes from `TELEGRAM_ADMIN_IDS`.
-- **Client management**: CSV import normalizes name, gender, weight, height, FTP, pedals, goals, etc. `/client` and plain text search locate clients; `/setclient` applies their data to accounts (keeping mandatory fields like `birthDate` and gender). `/client` и карточки клиента показывают список доступных велосипедов, подходящих по росту. `/stands` выводит учёт станков, доступных администраторам. `/account` fetches up-to-date profile info from WattAttack.
+- **Client management**: CSV import normalizes name, gender, weight, height, FTP, pedals, goals, etc. `/client` and plain text search locate clients; `/setclient` applies their data to accounts (keeping mandatory fields like `birthDate` and gender). `/client` и карточки клиента показывают список доступных велосипедов и совместимых станков (подбор по росту, осям и кассетам). `/stands` выводит учёт станков и позволяет редактировать оси/кассеты из бота, `/bikes` отображает парк велосипедов и даёт менять допустимые значения роста. `/account` fetches up-to-date profile info from WattAttack.
 - **Activity notifications**: Notifier sends FIT files and metadata when new workouts appear. Admin list reused from the DB.
 - **Docker-ready**: `docker-compose.yml` provides services for bot (`bot`), scheduler (`scheduler`), and Postgres (`db`, exposed on host port 55432). Volume `postgres_data` persists DB state.
 
@@ -69,8 +69,9 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 ## Usage Notes
 - **Administrators**: Only admins can invoke commands or interact with inline keyboards. Non-admins receive “Недостаточно прав”.
 - **Client CSV**: Ensure the columns match `load_clients.py` mapping (e.g., “Имя”, “Фамилия”, “ПОЛ”, “Ваш вес”, etc.). `/uploadclients truncate` replaces all entries; otherwise rows are upserted.
-- **Bike inventory**: The CSV should match `load_bikes.py` expectations (ID, название, владелец, размер, рост от/до, передачи, эксцентрик/ось, кассета). Trainer CSV should follow `load_trainers.py` mapping (код, модель, отображаемое имя, хозяин, оси, кассета, комментарий). Use `/bikes <поиск>` для велосипедов и `/stands <поиск>` для станков. Карточки клиента показывают совместимые велосипеды и станки (подбор по росту, осям и кассетам).
+- **Bike inventory**: The CSV should match `load_bikes.py` expectations (ID, название, владелец, размер, рост от/до, передачи, эксцентрик/ось, кассета). Trainer CSV should follow `load_trainers.py` mapping (код, модель, отображаемое имя, хозяин, оси, кассета, комментарий). Use `/bikes <поиск>` для велосипедов и `/stands <поиск>` для станков; по кнопке станка можно отредактировать тип оси и кассету. Карточки клиента автоматически показывают совместимые велосипеды и станки.
 - **CSV uploads**: Команды `/uploadclients`, `/uploadbikes`, `/uploadstands` принимают CSV как документ (можно переслать, ответить на файл, использовать `truncate` для полной перезагрузки).
+- **Inventory editing**: Команды `/bikes` и `/stands` выводят списки с кнопками для редактирования допустимого роста велосипедов и параметров станков прямо в Telegram.
 - **Profile updates**: WattAttack requires `birthDate` and gender; bot defaults to `2000-01-01` if missing. Logs include payload and response for visibility.
 - **Notifier**: Draws admin IDs from DB (`admins` table). If empty, it logs an error at startup.
 - **Security**: `.env` and `accounts.json` are gitignored; keep credentials safe. PostgreSQL credentials supplied via env variables.

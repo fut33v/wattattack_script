@@ -47,12 +47,16 @@ from bikes_repository import (
     search_bikes,
     bikes_count,
     find_bikes_for_height,
+    get_bike,
+    update_bike_fields,
 )
 from trainers_repository import (
     ensure_trainers_table,
     list_trainers,
     search_trainers,
     trainers_count,
+    get_trainer,
+    update_trainer_fields,
 )
 from load_clients import load_clients_from_csv_bytes
 from load_bikes import load_bikes_from_csv_bytes
@@ -70,6 +74,8 @@ CLIENTS_PAGE_SIZE = int(os.environ.get("CLIENTS_PAGE_SIZE", "6"))
 DEFAULT_CLIENT_FTP = int(os.environ.get("WATTATTACK_DEFAULT_FTP", "150"))
 
 PENDING_UPLOAD_KEY = "pending_inventory_upload"
+PENDING_TRAINER_EDIT_KEY = "pending_trainer_edit"
+PENDING_BIKE_EDIT_KEY = "pending_bike_edit"
 UPLOAD_COMMAND_TYPES = {
     "/uploadclients": "clients",
     "/uploadbikes": "bikes",
@@ -410,8 +416,113 @@ def format_bike_suggestion(
     return "\n".join(lines)
 
 
+def format_bike_button_label(record: Dict[str, Any]) -> str:
+    title = (record.get("title") or "Без названия").strip()
+    size_label = (record.get("size_label") or "").strip()
+    heights = []
+    for key in ("height_min_cm", "height_max_cm"):
+        value = record.get(key)
+        formatted = _format_decimal_value(value)
+        if formatted:
+            heights.append(formatted)
+    height_part = "-".join(heights) + " см" if heights else ""
+    parts = [title]
+    if size_label:
+        parts.append(size_label)
+    if height_part:
+        parts.append(height_part)
+    return " · ".join(part for part in parts if part)
+
+
+def format_bike_details(
+    record: Dict[str, Any],
+    trainers: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    title = html.escape(record.get("title") or "Без названия")
+    lines = [f"🚲 <b>{title}</b>"]
+
+    owner = record.get("owner")
+    if owner:
+        lines.append(f"• Владелец: {html.escape(str(owner))}")
+
+    size_label = (record.get("size_label") or "").strip()
+    frame_size = (record.get("frame_size_cm") or "").strip()
+    if size_label:
+        lines.append(f"• Размер: {html.escape(size_label)}")
+    if frame_size:
+        numeric = frame_size.replace(" ", "").replace(",", ".")
+        suffix = " см" if numeric.replace(".", "", 1).isdigit() else ""
+        lines.append(f"• Труба: {html.escape(frame_size)}{suffix}")
+
+    height_min = _format_decimal_value(record.get("height_min_cm"))
+    height_max = _format_decimal_value(record.get("height_max_cm"))
+    if height_min and height_max:
+        lines.append(f"• Рост: {height_min}–{height_max} см")
+    elif height_min:
+        lines.append(f"• Рост от {height_min} см")
+    elif height_max:
+        lines.append(f"• Рост до {height_max} см")
+
+    axle = record.get("axle_type")
+    if axle:
+        lines.append(f"• Ось: {html.escape(str(axle))}")
+    cassette = record.get("cassette")
+    if cassette:
+        lines.append(f"• Кассета: {html.escape(str(cassette))}")
+    gears = record.get("gears")
+    if gears:
+        lines.append(f"• Передачи: {html.escape(str(gears))}")
+
+    if trainers is not None:
+        if trainers:
+            lines.append("")
+            lines.append("🛠 Совместимые станки:")
+            for trainer in trainers:
+                lines.append(f"• {format_trainer_summary(trainer)}")
+        else:
+            lines.append("")
+            lines.append("🛠 Совместимые станки: нет записей")
+
+    return "\n".join(lines)
+
+
+def build_bike_info_markup(bike_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="📏 Рост от",
+                    callback_data=f"bike_edit|height_min_cm|{bike_id}",
+                ),
+                InlineKeyboardButton(
+                    text="📏 Рост до",
+                    callback_data=f"bike_edit|height_max_cm|{bike_id}",
+                ),
+            ],
+            [InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")],
+        ]
+    )
+
+
+def build_bike_edit_markup(bike_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="↩️ Назад",
+                    callback_data=f"bike_info|{bike_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=f"bike_edit_cancel|{bike_id}",
+                ),
+            ]
+        ]
+    )
+
+
 def format_trainer_record(record: Dict[str, Any]) -> str:
-    code = record.get("code") or ""
+    code = _format_trainer_code(record.get("code"))
     title = record.get("title") or ""
     display = record.get("display_name") or ""
 
@@ -444,6 +555,14 @@ def format_trainer_record(record: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_trainer_button_label(record: Dict[str, Any]) -> str:
+    code = _format_trainer_code(record.get("code"))
+    display = (record.get("display_name") or record.get("title") or "").strip()
+    if code and display and display.lower() != code.lower():
+        return f"{code} · {display}"
+    return code or display or f"id={record.get('id')}"
+
+
 def format_trainer_summary(record: Dict[str, Any]) -> str:
     code_raw = record.get("code")
     code_display = _format_trainer_code(code_raw) if code_raw else None
@@ -474,6 +593,84 @@ def format_trainer_summary(record: Dict[str, Any]) -> str:
     if details:
         return f"{base} ({'; '.join(details)})"
     return base
+
+
+def trainer_display_name(record: Dict[str, Any]) -> str:
+    display = (record.get("display_name") or "").strip()
+    if display:
+        return display
+    code = _format_trainer_code(record.get("code"))
+    if code:
+        return code
+    title = (record.get("title") or "").strip()
+    if title:
+        return title
+    return f"id={record.get('id')}"
+
+
+def format_trainer_details(record: Dict[str, Any]) -> str:
+    code = _format_trainer_code(record.get("code"))
+    title = (record.get("title") or "").strip()
+    display = (record.get("display_name") or "").strip()
+
+    header_parts: List[str] = []
+    if code:
+        header_parts.append(code)
+    if title and title.lower() != code.lower():
+        header_parts.append(title)
+    header = " — ".join(header_parts) if header_parts else (display or "Без названия")
+
+    lines = [f"🛠 <b>{html.escape(header)}</b>"]
+    if display:
+        lines.append(f"• Отображается как: {html.escape(display)}")
+    owner = record.get("owner")
+    if owner:
+        lines.append(f"• Владелец: {html.escape(str(owner))}")
+    axle = record.get("axle_types")
+    if axle:
+        lines.append(f"• Оси: {html.escape(str(axle))}")
+    cassette = record.get("cassette")
+    if cassette:
+        lines.append(f"• Кассета: {html.escape(str(cassette))}")
+    notes = record.get("notes")
+    if notes:
+        lines.append(f"• Комментарий: {html.escape(str(notes))}")
+    return "\n".join(lines)
+
+
+def build_trainer_info_markup(trainer_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="🔧 Оси",
+                    callback_data=f"trainer_edit|axle_types|{trainer_id}",
+                ),
+                InlineKeyboardButton(
+                    text="⚙️ Кассета",
+                    callback_data=f"trainer_edit|cassette|{trainer_id}",
+                ),
+            ],
+            [InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")],
+        ]
+    )
+
+
+def build_trainer_edit_markup(trainer_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="↩️ Назад",
+                    callback_data=f"trainer_info|{trainer_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=f"trainer_edit_cancel|{trainer_id}",
+                ),
+            ]
+        ]
+    )
 
 
 def parse_admin_identifier(value: str) -> Tuple[Optional[int], Optional[str]]:
@@ -1051,6 +1248,8 @@ async def stands_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not ensure_admin_message(update):
         return
 
+    context.user_data.pop(PENDING_TRAINER_EDIT_KEY, None)
+
     search_term = " ".join(context.args).strip() if context.args else ""
 
     try:
@@ -1089,8 +1288,24 @@ async def stands_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         header_lines.append("Используйте /stands &lt;поиск&gt; для фильтрации.")
 
     body = "\n\n".join(format_trainer_record(record) for record in trainers)
-    text = "\n\n".join(header_lines + [body])
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    text = "\n\n".join(header_lines + [body, "Выберите станок для настройки."])
+
+    keyboard_rows: List[List[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=format_trainer_button_label(record),
+                callback_data=f"trainer_info|{record['id']}",
+            )
+        ]
+        for record in trainers
+    ]
+    keyboard_rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")])
+
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(keyboard_rows),
+    )
 
 
 def build_accounts_keyboard(limit: int) -> InlineKeyboardMarkup:
@@ -1174,6 +1389,28 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
             return
         await cancel_client_edit(query, context, client_id)
+    elif action == "trainer_info" and len(parts) >= 2:
+        try:
+            trainer_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор станка.")
+            return
+        await show_trainer_info(query, context, trainer_id)
+    elif action == "trainer_edit" and len(parts) >= 3:
+        field = parts[1]
+        try:
+            trainer_id = int(parts[2])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор станка.")
+            return
+        await start_trainer_edit(query, context, trainer_id, field)
+    elif action == "trainer_edit_cancel" and len(parts) >= 2:
+        try:
+            trainer_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор станка.")
+            return
+        await cancel_trainer_edit(query, context, trainer_id)
     elif action == "noop":
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -1576,6 +1813,30 @@ CLIENT_EDIT_FIELDS: Dict[str, Dict[str, str]] = {
 }
 
 
+BIKE_EDIT_FIELDS: Dict[str, Dict[str, str]] = {
+    "height_min_cm": {
+        "label": "📏 Рост от",
+        "prompt": "Введите минимальный рост в сантиметрах (например, 165). Оставьте пустым для очистки.",
+    },
+    "height_max_cm": {
+        "label": "📏 Рост до",
+        "prompt": "Введите максимальный рост в сантиметрах (например, 185). Оставьте пустым для очистки.",
+    },
+}
+
+
+TRAINER_EDIT_FIELDS: Dict[str, Dict[str, str]] = {
+    "axle_types": {
+        "label": "🔧 Оси",
+        "prompt": "Введите типы осей через запятую (например, ЭКС, ОСЬ). Оставьте пустым для очистки.",
+    },
+    "cassette": {
+        "label": "⚙️ Кассета",
+        "prompt": "Введите доступные кассеты (например, 10/11). Оставьте пустым для очистки.",
+    },
+}
+
+
 def client_display_name(record: Dict[str, Any]) -> str:
     first = record.get("first_name")
     last = record.get("last_name")
@@ -1644,6 +1905,36 @@ def parse_client_edit_value(field: str, raw_value: str) -> object:
         if not value:
             raise ValueError("Значение не должно быть пустым.")
         return value
+    raise ValueError("Unsupported field.")
+
+
+def parse_bike_edit_value(field: str, raw_value: str) -> object:
+    value = (raw_value or "").strip()
+    if field in {"height_min_cm", "height_max_cm"}:
+        if not value:
+            return None
+        normalized = value.replace(",", ".")
+        number = float(normalized)
+        if number <= 0:
+            raise ValueError("Введите положительное число (см).")
+        return number
+    raise ValueError("Unsupported field.")
+
+
+def parse_trainer_edit_value(field: str, raw_value: str) -> object:
+    value = (raw_value or "").strip()
+    if field == "axle_types":
+        tokens = _normalize_tokens(value)
+        if not tokens:
+            return None
+        return ", ".join(token.upper() for token in tokens)
+    if field == "cassette":
+        digits = re.findall(r"\d+", value)
+        if digits:
+            return "/".join(digits)
+        if not value:
+            return None
+        raise ValueError("Введите одно или несколько чисел (например, 10/11).")
     raise ValueError("Unsupported field.")
 
 
@@ -1802,6 +2093,328 @@ async def process_pending_client_edit(
     message_id = pending.get("message_id")
     if isinstance(chat_id, int) and isinstance(message_id, int):
         await render_client_info_message(context, chat_id, message_id, client_id)
+
+    return True
+
+
+async def render_bike_info_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    bike_id: int,
+) -> None:
+    try:
+        record = await asyncio.to_thread(get_bike, bike_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load bike %s", bike_id)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"❌ Ошибка получения данных велосипеда: {exc}",
+        )
+        return
+
+    if not record:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="🔍 Велосипед не найден.",
+        )
+        return
+
+    trainers: Optional[List[Dict[str, Any]]] = None
+    try:
+        trainer_inventory = await asyncio.to_thread(_load_trainer_inventory)
+        suggestions = _build_trainer_suggestions([record], trainer_inventory)
+        trainers = suggestions.get(record.get("id"), []) if suggestions else []
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to load trainers for bike %s: %s", bike_id, exc)
+        trainers = None
+
+    text = format_bike_details(record, trainers)
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_bike_info_markup(bike_id),
+    )
+
+
+async def show_bike_info(query, context: ContextTypes.DEFAULT_TYPE, bike_id: int) -> None:
+    context.user_data.pop(PENDING_BIKE_EDIT_KEY, None)
+    await render_bike_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        bike_id,
+    )
+
+
+async def start_bike_edit(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    bike_id: int,
+    field: str,
+) -> None:
+    metadata = BIKE_EDIT_FIELDS.get(field)
+    if metadata is None:
+        await query.answer("Поле недоступно для редактирования.", show_alert=True)
+        return
+
+    try:
+        record = await asyncio.to_thread(get_bike, bike_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load bike %s", bike_id)
+        await query.edit_message_text(f"❌ Ошибка получения данных велосипеда: {exc}")
+        return
+
+    if not record:
+        await query.edit_message_text("🔍 Велосипед не найден.")
+        return
+
+    trainers: Optional[List[Dict[str, Any]]] = None
+    try:
+        trainer_inventory = await asyncio.to_thread(_load_trainer_inventory)
+        suggestions = _build_trainer_suggestions([record], trainer_inventory)
+        trainers = suggestions.get(record.get("id"), []) if suggestions else []
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to load trainers for bike %s: %s", bike_id, exc)
+        trainers = None
+
+    details_text = format_bike_details(record, trainers)
+    prompt = metadata["prompt"]
+    bike_name = (record.get("title") or f"id={record.get('id')}").strip()
+
+    context.user_data[PENDING_BIKE_EDIT_KEY] = {
+        "bike_id": bike_id,
+        "field": field,
+        "chat_id": query.message.chat_id,
+        "message_id": query.message.message_id,
+        "label": metadata["label"],
+        "bike_name": bike_name,
+    }
+
+    await query.edit_message_text(
+        f"{details_text}\n\n✏️ <i>{html.escape(prompt)}</i>\n🚲 <i>Велосипед: {html.escape(bike_name)}</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_bike_edit_markup(bike_id),
+    )
+
+
+async def cancel_bike_edit(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    bike_id: int,
+) -> None:
+    pending = context.user_data.get(PENDING_BIKE_EDIT_KEY)
+    if (
+        pending
+        and pending.get("chat_id") == query.message.chat_id
+        and pending.get("message_id") == query.message.message_id
+    ):
+        context.user_data.pop(PENDING_BIKE_EDIT_KEY, None)
+
+    await render_bike_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        bike_id,
+    )
+
+
+async def process_pending_bike_edit(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    pending: Dict[str, Any],
+) -> bool:
+    field = pending.get("field")
+    bike_id = pending.get("bike_id")
+
+    if field not in BIKE_EDIT_FIELDS or not isinstance(bike_id, int):
+        context.user_data.pop(PENDING_BIKE_EDIT_KEY, None)
+        await message.reply_text("⚠️ Изменение этого поля недоступно.")
+        return True
+
+    metadata = BIKE_EDIT_FIELDS[field]
+
+    try:
+        new_value = parse_bike_edit_value(field, message.text or "")
+    except Exception as exc:  # noqa: BLE001
+        await message.reply_text(f"⚠️ {exc}")
+        return True
+
+    try:
+        await asyncio.to_thread(update_bike_fields, bike_id, **{field: new_value})
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to update bike %s field %s", bike_id, field)
+        await message.reply_text(f"❌ Не удалось обновить данные: {exc}")
+        return True
+
+    context.user_data.pop(PENDING_BIKE_EDIT_KEY, None)
+
+    bike_name = pending.get("bike_name")
+    if bike_name:
+        await message.reply_text(f"✅ {metadata['label']} для {bike_name} обновлены.")
+    else:
+        await message.reply_text(f"✅ {metadata['label']} обновлены.")
+
+    chat_id = pending.get("chat_id")
+    message_id = pending.get("message_id")
+    if isinstance(chat_id, int) and isinstance(message_id, int):
+        await render_bike_info_message(context, chat_id, message_id, bike_id)
+
+    return True
+
+
+async def render_trainer_info_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    trainer_id: int,
+) -> None:
+    try:
+        record = await asyncio.to_thread(get_trainer, trainer_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load trainer %s", trainer_id)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"❌ Ошибка получения данных станка: {exc}",
+        )
+        return
+
+    if not record:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="🔍 Станок не найден.",
+        )
+        return
+
+    text = format_trainer_details(record)
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_trainer_info_markup(trainer_id),
+    )
+
+
+async def show_trainer_info(query, context: ContextTypes.DEFAULT_TYPE, trainer_id: int) -> None:
+    context.user_data.pop(PENDING_TRAINER_EDIT_KEY, None)
+    await render_trainer_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        trainer_id,
+    )
+
+
+async def start_trainer_edit(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    trainer_id: int,
+    field: str,
+) -> None:
+    metadata = TRAINER_EDIT_FIELDS.get(field)
+    if metadata is None:
+        await query.answer("Поле недоступно для редактирования.", show_alert=True)
+        return
+
+    try:
+        record = await asyncio.to_thread(get_trainer, trainer_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load trainer %s", trainer_id)
+        await query.edit_message_text(f"❌ Ошибка получения данных станка: {exc}")
+        return
+
+    if not record:
+        await query.edit_message_text("🔍 Станок не найден.")
+        return
+
+    details_text = format_trainer_details(record)
+    prompt = metadata["prompt"]
+    trainer_name = trainer_display_name(record)
+
+    context.user_data[PENDING_TRAINER_EDIT_KEY] = {
+        "trainer_id": trainer_id,
+        "field": field,
+        "chat_id": query.message.chat_id,
+        "message_id": query.message.message_id,
+        "label": metadata["label"],
+        "trainer_name": trainer_name,
+    }
+
+    await query.edit_message_text(
+        f"{details_text}\n\n✏️ <i>{html.escape(prompt)}</i>\n🛠 <i>Станок: {html.escape(trainer_name)}</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_trainer_edit_markup(trainer_id),
+    )
+
+
+async def cancel_trainer_edit(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    trainer_id: int,
+) -> None:
+    pending = context.user_data.get(PENDING_TRAINER_EDIT_KEY)
+    if (
+        pending
+        and pending.get("chat_id") == query.message.chat_id
+        and pending.get("message_id") == query.message.message_id
+    ):
+        context.user_data.pop(PENDING_TRAINER_EDIT_KEY, None)
+
+    await render_trainer_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        trainer_id,
+    )
+
+
+async def process_pending_trainer_edit(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    pending: Dict[str, Any],
+) -> bool:
+    field = pending.get("field")
+    trainer_id = pending.get("trainer_id")
+
+    if field not in TRAINER_EDIT_FIELDS or not isinstance(trainer_id, int):
+        context.user_data.pop(PENDING_TRAINER_EDIT_KEY, None)
+        await message.reply_text("⚠️ Изменение этого поля недоступно.")
+        return True
+
+    metadata = TRAINER_EDIT_FIELDS[field]
+
+    try:
+        new_value = parse_trainer_edit_value(field, message.text or "")
+    except Exception as exc:  # noqa: BLE001
+        await message.reply_text(f"⚠️ {exc}")
+        return True
+
+    try:
+        await asyncio.to_thread(update_trainer_fields, trainer_id, **{field: new_value})
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to update trainer %s field %s", trainer_id, field)
+        await message.reply_text(f"❌ Не удалось обновить данные: {exc}")
+        return True
+
+    context.user_data.pop(PENDING_TRAINER_EDIT_KEY, None)
+
+    trainer_name = pending.get("trainer_name")
+    if trainer_name:
+        await message.reply_text(f"✅ {metadata['label']} для {trainer_name} обновлены.")
+    else:
+        await message.reply_text(f"✅ {metadata['label']} обновлены.")
+
+    chat_id = pending.get("chat_id")
+    message_id = pending.get("message_id")
+    if isinstance(chat_id, int) and isinstance(message_id, int):
+        await render_trainer_info_message(context, chat_id, message_id, trainer_id)
 
     return True
 def fetch_account_information(account_id: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -2126,6 +2739,16 @@ async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if not ensure_admin_message(update):
         return
+    bike_pending = context.user_data.get(PENDING_BIKE_EDIT_KEY)
+    if bike_pending:
+        handled = await process_pending_bike_edit(update.message, context, bike_pending)
+        if handled:
+            return
+    trainer_pending = context.user_data.get(PENDING_TRAINER_EDIT_KEY)
+    if trainer_pending:
+        handled = await process_pending_trainer_edit(update.message, context, trainer_pending)
+        if handled:
+            return
     pending = context.user_data.get("pending_client_edit")
     if pending:
         handled = await process_pending_client_edit(update.message, context, pending)

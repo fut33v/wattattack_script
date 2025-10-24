@@ -33,6 +33,21 @@ def ensure_bikes_table() -> None:
         conn.commit()
 
 
+def get_bike(bike_id: int) -> Dict | None:
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT id, position, title, owner, size_label, frame_size_cm,
+                   height_min_cm, height_max_cm, gears, axle_type, cassette
+            FROM bikes
+            WHERE id = %s
+            """,
+            (bike_id,),
+        )
+        row = cur.fetchone()
+    return row
+
+
 def truncate_bikes() -> None:
     with db_connection() as conn, dict_cursor(conn) as cur:
         cur.execute("TRUNCATE TABLE bikes")
@@ -138,6 +153,33 @@ def bikes_count() -> int:
         cur.execute("SELECT COUNT(*) AS cnt FROM bikes")
         row = cur.fetchone()
     return int(row.get("cnt", 0)) if row else 0
+
+
+EDITABLE_BIKE_FIELDS = {
+    "height_min_cm": "height_min_cm",
+    "height_max_cm": "height_max_cm",
+}
+
+
+def update_bike_fields(bike_id: int, **fields: object) -> bool:
+    updates = {
+        EDITABLE_BIKE_FIELDS[key]: value
+        for key, value in fields.items()
+        if key in EDITABLE_BIKE_FIELDS
+    }
+    if not updates:
+        return False
+
+    assignments = ", ".join(f"{column} = %s" for column in updates)
+    values = list(updates.values())
+    values.append(bike_id)
+
+    query = f"UPDATE bikes SET {assignments} WHERE id = %s"
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, values)
+        conn.commit()
+    return True
 
 
 def find_bikes_for_height(height_cm: float, limit: int = 10) -> List[Dict]:
