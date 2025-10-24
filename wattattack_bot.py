@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
@@ -23,7 +24,13 @@ from telegram.ext import (
     filters,
 )
 
-from client_repository import count_clients, get_client, list_clients, search_clients
+from client_repository import (
+    count_clients,
+    get_client,
+    list_clients,
+    search_clients,
+    update_client_fields,
+)
 from admin_repository import (
     ensure_admin_table,
     seed_admins_from_env,
@@ -576,7 +583,28 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except ValueError:
             await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
             return
-        await show_client_info(query, client_id)
+        await show_client_info(query, context, client_id)
+    elif action == "client_edit" and len(parts) >= 3:
+        field = parts[1]
+        try:
+            client_id = int(parts[2])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+            return
+        await start_client_edit(query, context, client_id, field)
+    elif action == "client_edit_cancel" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+            return
+        await cancel_client_edit(query, context, client_id)
+    elif action == "noop":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("noop action ignored for message %s", query.message)
+        return
     else:
         await query.edit_message_text("❓ Неизвестное действие.")
 
@@ -929,6 +957,241 @@ def format_client_details(client_record: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+CLIENT_EDIT_FIELDS: Dict[str, Dict[str, str]] = {
+    "ftp": {
+        "label": "⚡ FTP",
+        "prompt": "Введите новое значение FTP в ваттах (например, 250).",
+    },
+    "weight": {
+        "label": "⚖️ Вес",
+        "prompt": "Введите вес в килограммах (например, 72.5).",
+    },
+    "favorite_bike": {
+        "label": "🚲 Любимый велосипед",
+        "prompt": "Введите название любимого велосипеда.",
+    },
+    "pedals": {
+        "label": "🚴‍♂️ Педали",
+        "prompt": "Введите информацию о педалях.",
+    },
+}
+
+
+def client_display_name(record: Dict[str, Any]) -> str:
+    first = record.get("first_name")
+    last = record.get("last_name")
+    if first or last:
+        return " ".join(part for part in [first, last] if part).strip()
+    return record.get("full_name") or f"id={record.get('id')}"
+
+
+def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="⚡ Изменить FTP",
+                    callback_data=f"client_edit|ftp|{client_id}",
+                ),
+                InlineKeyboardButton(
+                    text="⚖️ Изменить вес",
+                    callback_data=f"client_edit|weight|{client_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚲 Любимый велосипед",
+                    callback_data=f"client_edit|favorite_bike|{client_id}",
+                ),
+                InlineKeyboardButton(
+                    text="🚴‍♂️ Педали",
+                    callback_data=f"client_edit|pedals|{client_id}",
+                ),
+            ],
+            [InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")],
+        ]
+    )
+
+
+def build_client_edit_markup(client_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="↩️ Назад",
+                    callback_data=f"client_info|{client_id}",
+                ),
+                InlineKeyboardButton(text="❌ Отмена", callback_data=f"client_edit_cancel|{client_id}"),
+            ]
+        ]
+    )
+
+
+def parse_client_edit_value(field: str, raw_value: str) -> object:
+    value = (raw_value or "").strip()
+    if field == "ftp":
+        normalized = value.replace(",", ".")
+        ftp_value = int(float(normalized))
+        if ftp_value <= 0:
+            raise ValueError("Введите положительное число (Вт).")
+        return ftp_value
+    if field == "weight":
+        normalized = value.replace(",", ".")
+        weight_value = float(normalized)
+        if weight_value <= 0:
+            raise ValueError("Введите положительное число (кг).")
+        return weight_value
+    if field in {"favorite_bike", "pedals"}:
+        if not value:
+            raise ValueError("Значение не должно быть пустым.")
+        return value
+    raise ValueError("Unsupported field.")
+
+
+async def render_client_info_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    client_id: int,
+) -> None:
+    try:
+        record = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s", client_id)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"❌ Ошибка получения данных клиента: {exc}",
+        )
+        return
+
+    if not record:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="🔍 Клиент не найден.",
+        )
+        return
+
+    text = format_client_details(record)
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_client_info_markup(client_id),
+    )
+
+
+async def start_client_edit(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    field: str,
+) -> None:
+    metadata = CLIENT_EDIT_FIELDS.get(field)
+    if metadata is None:
+        await query.answer("Поле недоступно для редактирования.", show_alert=True)
+        return
+
+    try:
+        record = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s", client_id)
+        await query.edit_message_text(f"❌ Ошибка получения данных клиента: {exc}")
+        return
+
+    if not record:
+        await query.edit_message_text("🔍 Клиент не найден.")
+        return
+
+    display_name = client_display_name(record)
+    prompt = metadata["prompt"]
+    text = (
+        f"{format_client_details(record)}\n\n"
+        f"✏️ <i>{html.escape(prompt)}</i>\n"
+        f"👤 <i>Клиент: {html.escape(display_name)}</i>"
+    )
+
+    context.user_data["pending_client_edit"] = {
+        "client_id": client_id,
+        "field": field,
+        "chat_id": query.message.chat_id,
+        "message_id": query.message.message_id,
+        "label": metadata["label"],
+        "client_name": display_name,
+    }
+
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_client_edit_markup(client_id),
+    )
+
+
+async def cancel_client_edit(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+) -> None:
+    pending = context.user_data.get("pending_client_edit")
+    if (
+        pending
+        and pending.get("chat_id") == query.message.chat_id
+        and pending.get("message_id") == query.message.message_id
+    ):
+        context.user_data.pop("pending_client_edit", None)
+
+    await render_client_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        client_id,
+    )
+
+
+async def process_pending_client_edit(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    pending: Dict[str, Any],
+) -> bool:
+    field = pending.get("field")
+    client_id = pending.get("client_id")
+
+    if field not in CLIENT_EDIT_FIELDS or not isinstance(client_id, int):
+        context.user_data.pop("pending_client_edit", None)
+        await message.reply_text("⚠️ Изменение этого поля недоступно.")
+        return True
+
+    metadata = CLIENT_EDIT_FIELDS[field]
+
+    try:
+        new_value = parse_client_edit_value(field, message.text or "")
+    except Exception as exc:  # noqa: BLE001
+        await message.reply_text(f"⚠️ {exc}")
+        return True
+
+    try:
+        await asyncio.to_thread(update_client_fields, client_id, **{field: new_value})
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to update client %s field %s", client_id, field)
+        await message.reply_text(f"❌ Не удалось обновить данные: {exc}")
+        return True
+
+    context.user_data.pop("pending_client_edit", None)
+
+    client_name = pending.get("client_name")
+    if client_name:
+        await message.reply_text(f"✅ {metadata['label']} для {client_name} обновлено.")
+    else:
+        await message.reply_text(f"✅ {metadata['label']} обновлено.")
+
+    chat_id = pending.get("chat_id")
+    message_id = pending.get("message_id")
+    if isinstance(chat_id, int) and isinstance(message_id, int):
+        await render_client_info_message(context, chat_id, message_id, client_id)
+
+    return True
 def fetch_account_information(account_id: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     account = ACCOUNT_REGISTRY[account_id]
     client = WattAttackClient(account.base_url)
@@ -1234,23 +1497,13 @@ async def show_account_via_callback(query, account_id: str) -> None:
     )
 
 
-async def show_client_info(query, client_id: int) -> None:
-    try:
-        record = await asyncio.to_thread(get_client, client_id)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to load client %s", client_id)
-        await query.edit_message_text(f"❌ Ошибка получения данных клиента: {exc}")
-        return
-
-    if not record:
-        await query.edit_message_text("🔍 Клиент не найден.")
-        return
-
-    text = format_client_details(record)
-    await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(text="Закрыть", callback_data="noop")]]),
+async def show_client_info(query, context: ContextTypes.DEFAULT_TYPE, client_id: int) -> None:
+    context.user_data.pop("pending_client_edit", None)
+    await render_client_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        client_id,
     )
 
 
@@ -1261,6 +1514,11 @@ async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if not ensure_admin_message(update):
         return
+    pending = context.user_data.get("pending_client_edit")
+    if pending:
+        handled = await process_pending_client_edit(update.message, context, pending)
+        if handled:
+            return
     await process_client_search(update.message, update.message.text)
 
 
@@ -1314,6 +1572,7 @@ async def process_client_search(message: Message, term: str) -> None:
         await message.reply_text(
             format_client_details(results[0]),
             parse_mode=ParseMode.HTML,
+            reply_markup=build_client_info_markup(results[0]["id"]),
         )
         return
 

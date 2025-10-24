@@ -5,6 +5,12 @@ from typing import Dict, List, Optional
 
 from db_utils import db_connection, dict_cursor
 
+EDITABLE_FIELDS = {
+    "weight": "weight",
+    "ftp": "ftp",
+    "favorite_bike": "favorite_bike",
+    "pedals": "pedals",
+}
 
 def list_clients(limit: int, offset: int = 0) -> List[Dict]:
     query = (
@@ -46,3 +52,20 @@ def search_clients(term: str, limit: int = 20) -> List[Dict]:
         cur.execute(query, (pattern, pattern, pattern, limit))
         rows = cur.fetchall()
     return rows
+
+
+def update_client_fields(client_id: int, **fields: object) -> bool:
+    updates = {EDITABLE_FIELDS[key]: value for key, value in fields.items() if key in EDITABLE_FIELDS}
+    if not updates:
+        return False
+
+    assignments = ", ".join(f"{column} = %s" for column in updates)
+    values = list(updates.values())
+    values.append(client_id)
+
+    query = f"UPDATE clients SET {assignments} WHERE id = %s"
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, values)
+        conn.commit()
+    return True
