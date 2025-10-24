@@ -9,22 +9,29 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
   - `/recent <n>` – fetch recent workouts for a selected account.
   - `/latest` – download latest workout FIT for each account.
   - `/account <id>` – show current WattAttack profile data.
+  - `/bikes [поиск]` – list available bikes from the shared inventory (supports search term).
   - `/client <query>` – search clients by name/surname.
   - `/setclient <id>` – apply selected client’s data to a WattAttack account.
   - `/uploadclients [truncate]` – import clients from CSV (reply or inline); supports truncation.
+  - `/uploadbikes [truncate]` – import bicycles from CSV (reply or inline); supports truncation.
+  - `/uploadstands [truncate]` – import trainer inventory from CSV (reply or inline); supports truncation.
   - `/admins`, `/addadmin`, `/removeadmin` – manage bot administrators.
   - Inline menus for account/client selection and ad-hoc text client search (admins only).
 - **wattattack_notifier.py** – Periodic notifier that watches WattAttack for new activities and sends FIT files with metadata to admins.
 - **wattattack_activities.py** – API wrapper for WattAttack endpoints (`/auth/login`, `/activities`, `/athlete/update`, `/user/update`, `/auth/check`).
 - **load_clients.py** – CLI loader to import clients from CSV into PostgreSQL (with optional `--truncate`).
+- **load_bikes.py** – CLI loader for the bicycle inventory CSV (with optional `--truncate`).
+- **load_trainers.py** – CLI loader for the trainer inventory CSV (with optional `--truncate`).
 - **admin_repository.py** – Admin management (table creation, seeding from env, CRUD helpers).
 - **client_repository.py** – Client access helpers (list, search, get by id). 
+- **bikes_repository.py** – Bicycle inventory access helpers (table creation, search/list helpers).
+- **trainers_repository.py** – Trainer inventory access helpers (table creation, search/list helpers).
 - **db_utils.py** – PostgreSQL connection helpers.
 - **wattattack_profile_set.py** – CLI tool for updating WattAttack profile values (name, weight, FTP, etc.).
 
 ## Features
 - **Admin-only controls**: All commands, callbacks, and text handlers require admin status. Admins are stored centrally in the DB; `/addadmin` and `/removeadmin` manipulate them at runtime. Seed list comes from `TELEGRAM_ADMIN_IDS`.
-- **Client management**: CSV import normalizes name, gender, weight, height, FTP, pedals, goals, etc. `/client` and plain text search locate clients; `/setclient` applies their data to accounts (keeping mandatory fields like `birthDate` and gender). `/account` fetches up-to-date profile info from WattAttack.
+- **Client management**: CSV import normalizes name, gender, weight, height, FTP, pedals, goals, etc. `/client` and plain text search locate clients; `/setclient` applies their data to accounts (keeping mandatory fields like `birthDate` and gender). `/client` и карточки клиента показывают список доступных велосипедов, подходящих по росту. `/stands` выводит учёт станков, доступных администраторам. `/account` fetches up-to-date profile info from WattAttack.
 - **Activity notifications**: Notifier sends FIT files and metadata when new workouts appear. Admin list reused from the DB.
 - **Docker-ready**: `docker-compose.yml` provides services for bot (`bot`), scheduler (`scheduler`), and Postgres (`db`, exposed on host port 55432). Volume `postgres_data` persists DB state.
 
@@ -36,7 +43,10 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
    - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`.
    - Optional timeouts/page size (see `.env.example`).
 3. Start services: `docker-compose up -d db bot scheduler` (or run bot locally via `python wattattack_bot.py`).
-4. Import clients: `python3 load_clients.py --truncate` or send CSV via `/uploadclients` command.
+4. Import reference data:
+   - Clients: `python3 load_clients.py --truncate` or send CSV via `/uploadclients`.
+   - Bikes: `python3 load_bikes.py --truncate` to load the inventory CSV from `data/`.
+   - Stands: `python3 load_trainers.py --truncate` to import the trainer inventory.
 5. Configure bot commands in BotFather:
    ```
    start - показать список аккаунтов
@@ -45,8 +55,12 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
    latest - последняя активность каждого аккаунта
    setclient - применить данные клиента к аккаунту
    account - показать текущие данные аккаунта
+   bikes - показать доступные велосипеды
+   stands - показать доступные станки
    client - найти клиента по БД
    uploadclients - загрузить CSV клиентов
+   uploadbikes - загрузить CSV велосипедов
+   uploadstands - загрузить CSV станков
    admins - показать список администраторов
    addadmin - добавить администратора
    removeadmin - удалить администратора
@@ -55,16 +69,19 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 ## Usage Notes
 - **Administrators**: Only admins can invoke commands or interact with inline keyboards. Non-admins receive “Недостаточно прав”.
 - **Client CSV**: Ensure the columns match `load_clients.py` mapping (e.g., “Имя”, “Фамилия”, “ПОЛ”, “Ваш вес”, etc.). `/uploadclients truncate` replaces all entries; otherwise rows are upserted.
+- **Bike inventory**: The CSV should match `load_bikes.py` expectations (ID, название, владелец, размер, рост от/до, передачи, эксцентрик/ось, кассета). Trainer CSV should follow `load_trainers.py` mapping (код, модель, отображаемое имя, хозяин, оси, кассета, комментарий). Use `/bikes <поиск>` для велосипедов и `/stands <поиск>` для станков. Карточки клиента показывают совместимые велосипеды и станки (подбор по росту, осям и кассетам).
+- **CSV uploads**: Команды `/uploadclients`, `/uploadbikes`, `/uploadstands` принимают CSV как документ (можно переслать, ответить на файл, использовать `truncate` для полной перезагрузки).
 - **Profile updates**: WattAttack requires `birthDate` and gender; bot defaults to `2000-01-01` if missing. Logs include payload and response for visibility.
 - **Notifier**: Draws admin IDs from DB (`admins` table). If empty, it logs an error at startup.
 - **Security**: `.env` and `accounts.json` are gitignored; keep credentials safe. PostgreSQL credentials supplied via env variables.
 
 ## Utilities
 - `load_clients.py` – standalone importer (CLI). Returns counts of inserted/updated rows.
+- `load_bikes.py` – bicycle inventory importer (CLI) with optional truncation.
+- `load_trainers.py` – trainer inventory importer (CLI) with optional truncation.
 - `wattattack_profile_set.py` – direct CLI profile updater (authentication required).
 - `wattattack_profile_debug.py` – helper to inspect `/api/v1/athlete` vs `/cabinet` data.
 
 ## Future Enhancements
 - Additional validation or persona fields if WattAttack adds more profile requirements.
 - Schema migrations can be handled via a migration tool if functionality expands.
-

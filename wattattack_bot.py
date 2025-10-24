@@ -10,7 +10,9 @@ import os
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
@@ -39,7 +41,22 @@ from admin_repository import (
     remove_admin as db_remove_admin,
     is_admin as db_is_admin,
 )
+from bikes_repository import (
+    ensure_bikes_table,
+    list_bikes,
+    search_bikes,
+    bikes_count,
+    find_bikes_for_height,
+)
+from trainers_repository import (
+    ensure_trainers_table,
+    list_trainers,
+    search_trainers,
+    trainers_count,
+)
 from load_clients import load_clients_from_csv_bytes
+from load_bikes import load_bikes_from_csv_bytes
+from load_trainers import load_trainers_from_csv_bytes
 from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
 
 LOGGER = logging.getLogger(__name__)
@@ -51,6 +68,13 @@ DEFAULT_RECENT_LIMIT = int(os.environ.get("WATTATTACK_RECENT_LIMIT", "5"))
 DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
 CLIENTS_PAGE_SIZE = int(os.environ.get("CLIENTS_PAGE_SIZE", "6"))
 DEFAULT_CLIENT_FTP = int(os.environ.get("WATTATTACK_DEFAULT_FTP", "150"))
+
+PENDING_UPLOAD_KEY = "pending_inventory_upload"
+UPLOAD_COMMAND_TYPES = {
+    "/uploadclients": "clients",
+    "/uploadbikes": "bikes",
+    "/uploadstands": "stands",
+}
 
 
 @dataclass(frozen=True)
@@ -109,6 +133,347 @@ def format_admin_record(record: Dict[str, Any]) -> str:
     if tg_id:
         parts.append(f"id={tg_id}")
     return " ".join(parts) if parts else f"id={tg_id}" if tg_id else str(record.get("id"))
+
+
+def _set_pending_upload(user_data: Dict, upload_type: str, truncate: bool) -> None:
+    user_data[PENDING_UPLOAD_KEY] = {"type": upload_type, "truncate": truncate}
+
+
+def _pop_pending_upload(user_data: Dict) -> Optional[Dict[str, Any]]:
+    value = user_data.get(PENDING_UPLOAD_KEY)
+    if value is not None:
+        user_data.pop(PENDING_UPLOAD_KEY, None)
+    return value
+
+
+def _normalize_tokens(value: str) -> List[str]:
+    tokens = [token for token in re.split(r"[,\s/;]+", value.strip()) if token]
+    return tokens
+
+
+def _format_trainer_code(code: Optional[str]) -> str:
+    if not code:
+        return ""
+    value = str(code).strip()
+    match = re.match(r"^([^\d]*)(\d+)(.*)$", value)
+    if not match:
+        return value
+    prefix, digits, suffix = match.groups()
+    padded = digits.zfill(2)
+    return f"{prefix}{padded}{suffix}"
+
+
+def _parse_axle_types(value: Any) -> set[str]:
+    if not value:
+        return set()
+    if isinstance(value, str):
+        return {token.upper() for token in _normalize_tokens(value)}
+    return set()
+
+
+def _parse_cassette_values(value: Any) -> set[int]:
+    if not value:
+        return set()
+    if isinstance(value, (int, float)):
+        return {int(round(float(value)))}
+    tokens = re.split(r"[^\d]+", str(value))
+    cassette_values = set()
+    for token in tokens:
+        if not token:
+            continue
+        try:
+            cassette_values.add(int(token))
+        except ValueError:
+            continue
+    return cassette_values
+
+
+def _load_trainer_inventory() -> List[Dict[str, Any]]:
+    ensure_trainers_table()
+    return list_trainers()
+
+
+def _is_trainer_compatible(bike: Dict[str, Any], trainer: Dict[str, Any]) -> bool:
+    bike_axles = _parse_axle_types(bike.get("axle_type"))
+    trainer_axles = _parse_axle_types(trainer.get("axle_types"))
+    if bike_axles and trainer_axles and not (bike_axles & trainer_axles):
+        return False
+    if bike_axles and not trainer_axles:
+        # Trainer axle types unknown, assume compatible
+        pass
+
+    bike_cassettes = _parse_cassette_values(bike.get("cassette"))
+    trainer_cassettes = _parse_cassette_values(trainer.get("cassette"))
+    if bike_cassettes:
+        if trainer_cassettes and not (bike_cassettes & trainer_cassettes):
+            return False
+        # If trainer cassette unknown, assume compatibility
+    return True
+
+
+def _build_trainer_suggestions(
+    bikes: List[Dict[str, Any]], trainers: List[Dict[str, Any]]
+) -> Dict[int, List[Dict[str, Any]]]:
+    suggestions: Dict[int, List[Dict[str, Any]]] = {}
+    for bike in bikes:
+        bike_id = bike.get("id")
+        if not isinstance(bike_id, int):
+            continue
+        bike_axles = _parse_axle_types(bike.get("axle_type"))
+        matches: List[tuple] = []
+        for trainer in trainers:
+            if not _is_trainer_compatible(bike, trainer):
+                continue
+            trainer_axles = _parse_axle_types(trainer.get("axle_types"))
+            shared_axles = bike_axles & trainer_axles if bike_axles and trainer_axles else set()
+            matches.append(
+                (
+                    trainer,
+                    -len(shared_axles),  # More shared axles first
+                    0 if trainer_axles else 1,  # Known axle types preferred
+                    trainer.get("code") or "",
+                )
+            )
+        matches.sort(key=lambda item: (item[1], item[2], item[3]))
+        suggestions[bike_id] = [item[0] for item in matches]
+    return suggestions
+
+
+def _format_decimal_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        if value == value.to_integral_value():
+            return str(int(value))
+        return format(value.normalize(), "f").rstrip("0").rstrip(".")
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number.is_integer():
+            return str(int(number))
+        return f"{number:.1f}".rstrip("0").rstrip(".")
+    try:
+        number = float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return str(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.1f}".rstrip("0").rstrip(".")
+
+
+def _parse_height_cm(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", ".")
+        if not cleaned:
+            return None
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _load_bike_suggestions(height_cm: float, limit: int) -> List[Dict[str, Any]]:
+    ensure_bikes_table()
+    return find_bikes_for_height(height_cm, limit)
+
+
+async def get_bike_suggestions_for_client(
+    client_record: Dict[str, Any], limit: int = 5
+) -> Tuple[List[Dict[str, Any]], Optional[float], List[Dict[str, Any]]]:
+    height_cm = _parse_height_cm(client_record.get("height"))
+    if height_cm is None:
+        return [], None, []
+    try:
+        bikes = await asyncio.to_thread(_load_bike_suggestions, height_cm, limit)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning(
+            "Failed to load bikes for client %s (height=%s): %s",
+            client_record.get("id"),
+            height_cm,
+            exc,
+        )
+        return [], height_cm, []
+
+    trainers: List[Dict[str, Any]] = []
+    if bikes:
+        try:
+            trainers = await asyncio.to_thread(_load_trainer_inventory)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to load trainers inventory: %s", exc)
+            trainers = []
+    return bikes, height_cm, trainers
+
+
+def format_bike_record(record: Dict[str, Any]) -> str:
+    title = html.escape(record.get("title") or "Без названия")
+    lines = [f"🚲 <b>{title}</b>"]
+
+    owner = record.get("owner")
+    if owner:
+        lines.append(f"• Владелец: {html.escape(str(owner))}")
+
+    size_label = (record.get("size_label") or "").strip()
+    frame_size = (record.get("frame_size_cm") or "").strip()
+    if size_label and frame_size:
+        numeric = frame_size.replace(" ", "").replace(",", ".")
+        suffix = " см" if numeric.replace(".", "", 1).isdigit() else ""
+        lines.append(
+            f"• Размер: {html.escape(size_label)} (труба {html.escape(frame_size)}{suffix})"
+        )
+    elif size_label:
+        lines.append(f"• Размер: {html.escape(size_label)}")
+    elif frame_size:
+        numeric = frame_size.replace(" ", "").replace(",", ".")
+        suffix = " см" if numeric.replace(".", "", 1).isdigit() else ""
+        lines.append(f"• Труба: {html.escape(frame_size)}{suffix}")
+
+    height_min = _format_decimal_value(record.get("height_min_cm"))
+    height_max = _format_decimal_value(record.get("height_max_cm"))
+    if height_min and height_max:
+        lines.append(f"• Рост: {height_min}–{height_max} см")
+    elif height_min:
+        lines.append(f"• Рост от {height_min} см")
+    elif height_max:
+        lines.append(f"• Рост до {height_max} см")
+
+    technical_parts: List[str] = []
+    gears = record.get("gears")
+    if gears:
+        technical_parts.append(f"Передачи: {html.escape(str(gears))}")
+    axle = record.get("axle_type")
+    if axle:
+        technical_parts.append(f"Ось: {html.escape(str(axle))}")
+    cassette = record.get("cassette")
+    if cassette:
+        technical_parts.append(f"Кассета: {html.escape(str(cassette))}")
+    if technical_parts:
+        lines.append(f"• {'; '.join(technical_parts)}")
+
+    return "\n".join(lines)
+
+
+def format_bike_suggestion(
+    record: Dict[str, Any],
+    trainers: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    title = html.escape(record.get("title") or "Без названия")
+    details: List[str] = []
+
+    size_label = (record.get("size_label") or "").strip()
+    frame_size = (record.get("frame_size_cm") or "").strip()
+    size_parts: List[str] = []
+    if size_label:
+        size_parts.append(html.escape(size_label))
+    if frame_size:
+        numeric = frame_size.replace(" ", "").replace(",", ".")
+        suffix = " см" if numeric.replace(".", "", 1).isdigit() else ""
+        size_parts.append(f"{html.escape(frame_size)}{suffix}")
+    if size_parts:
+        details.append(" / ".join(size_parts))
+
+    height_min = _format_decimal_value(record.get("height_min_cm"))
+    height_max = _format_decimal_value(record.get("height_max_cm"))
+    if height_min and height_max:
+        details.append(f"{height_min}–{height_max} см")
+    elif height_min:
+        details.append(f"от {height_min} см")
+    elif height_max:
+        details.append(f"до {height_max} см")
+
+    axle = record.get("axle_type")
+    if axle:
+        details.append(f"ось {html.escape(str(axle))}")
+    cassette = record.get("cassette")
+    if cassette:
+        details.append(f"кассета {html.escape(str(cassette))}")
+    gears = record.get("gears")
+    if gears:
+        details.append(f"{html.escape(str(gears))} передач")
+
+    descriptor = "; ".join(details)
+    lines = [f"• <b>{title}</b>" + (f" — {descriptor}" if descriptor else "")]
+
+    if trainers is not None:
+        if trainers:
+            lines.append("    ↳ Станки:")
+            for trainer in trainers:
+                lines.append(f"        • {format_trainer_summary(trainer)}")
+        else:
+            lines.append("    ↳ Станки: нет совместимых станков")
+
+    return "\n".join(lines)
+
+
+def format_trainer_record(record: Dict[str, Any]) -> str:
+    code = record.get("code") or ""
+    title = record.get("title") or ""
+    display = record.get("display_name") or ""
+
+    header_parts = [part for part in [code.strip(), title.strip()] if part]
+    if not header_parts and display:
+        header_parts.append(display.strip())
+    header = " — ".join(header_parts) if header_parts else (display.strip() or "Без названия")
+
+    lines = [f"🛠 <b>{html.escape(header)}</b>"]
+
+    if display:
+        lines.append(f"• Отображается как: {html.escape(display)}")
+
+    owner = record.get("owner")
+    if owner:
+        lines.append(f"• Владелец: {html.escape(str(owner))}")
+
+    axle_types = record.get("axle_types")
+    if axle_types:
+        lines.append(f"• Оси: {html.escape(str(axle_types))}")
+
+    cassette = record.get("cassette")
+    if cassette:
+        lines.append(f"• Кассета: {html.escape(str(cassette))}")
+
+    notes = record.get("notes")
+    if notes:
+        lines.append(f"• Комментарий: {html.escape(str(notes))}")
+
+    return "\n".join(lines)
+
+
+def format_trainer_summary(record: Dict[str, Any]) -> str:
+    code_raw = record.get("code")
+    code_display = _format_trainer_code(code_raw) if code_raw else None
+    name_raw = (
+        record.get("display_name")
+        or record.get("title")
+        or code_display
+        or "Без названия"
+    )
+    details: List[str] = []
+    axle_types = record.get("axle_types")
+    if axle_types:
+        details.append(f"оси {html.escape(str(axle_types))}")
+    cassette = record.get("cassette")
+    if cassette:
+        details.append(f"кассета {html.escape(str(cassette))}")
+    code_part = html.escape(code_display) if code_display else ""
+    name_part = html.escape(str(name_raw))
+
+    if code_display:
+        if name_raw and isinstance(name_raw, str) and name_raw.strip().lower() != code_display.strip().lower():
+            base = f"{code_part} — {name_part}"
+        else:
+            base = code_part
+    else:
+        base = name_part
+
+    if details:
+        return f"{base} ({'; '.join(details)})"
+    return base
 
 
 def parse_admin_identifier(value: str) -> Tuple[Optional[int], Optional[str]]:
@@ -173,6 +538,64 @@ async def process_clients_document(
     )
 
 
+async def process_bikes_document(
+    document, message: Message, truncate: bool = False
+) -> None:
+    try:
+        file = await document.get_file()
+        data = await file.download_as_bytearray()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to download bikes CSV file")
+        await message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
+        return
+
+    try:
+        inserted, updated = await asyncio.to_thread(
+            load_bikes_from_csv_bytes,
+            bytes(data),
+            truncate,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to import bikes")
+        await message.reply_text(f"❌ Ошибка импорта велосипедов: {exc}")
+        return
+
+    await message.reply_text(
+        "✅ Велосипеды импортированы. Добавлено: {0}, обновлено: {1}.".format(
+            inserted, updated
+        )
+    )
+
+
+async def process_trainers_document(
+    document, message: Message, truncate: bool = False
+) -> None:
+    try:
+        file = await document.get_file()
+        data = await file.download_as_bytearray()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to download trainers CSV file")
+        await message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
+        return
+
+    try:
+        inserted, updated = await asyncio.to_thread(
+            load_trainers_from_csv_bytes,
+            bytes(data),
+            truncate,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to import trainers")
+        await message.reply_text(f"❌ Ошибка импорта станков: {exc}")
+        return
+
+    await message.reply_text(
+        "✅ Станки импортированы. Добавлено: {0}, обновлено: {1}.".format(
+            inserted, updated
+        )
+    )
+
+
 def load_accounts(config_path: Path) -> Dict[str, AccountConfig]:
     if not config_path.exists():
         raise FileNotFoundError(
@@ -222,7 +645,12 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/latest — скачать последнюю активность по каждому аккаунту\n"
         "/setclient <аккаунт> — применить данные клиента из базы\n"
         "/account <аккаунт> — показать текущие данные аккаунта\n"
+        "/bikes [поиск] — показать доступные велосипеды\n"
+        "/stands [поиск] — показать доступные станки\n"
         "/client <имя/фамилия> — найти клиента по БД\n"
+        "/uploadclients [truncate] — загрузить CSV клиентов\n"
+        "/uploadbikes [truncate] — загрузить CSV велосипедов\n"
+        "/uploadstands [truncate] — загрузить CSV станков\n"
         "/admins — показать список администраторов\n"
         "/addadmin <id|@user> — добавить администратора (можно ответом на сообщение)\n"
         "/removeadmin <id|@user> — удалить администратора"
@@ -440,6 +868,7 @@ async def uploadclients_handler(update: Update, context: ContextTypes.DEFAULT_TY
         truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in context.args)
 
     if update.message.reply_to_message and update.message.reply_to_message.document:
+        _pop_pending_upload(context.user_data)
         await process_clients_document(
             update.message.reply_to_message.document,
             update.message,
@@ -447,9 +876,59 @@ async def uploadclients_handler(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    context.user_data["awaiting_csv_upload"] = {"truncate": truncate}
+    _set_pending_upload(context.user_data, "clients", truncate)
     await update.message.reply_text(
         "📄 Пришлите CSV файл (как документ). Можно указать /uploadclients truncate для полной перезагрузки."
+    )
+
+
+async def uploadbikes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    truncate = False
+    if context.args:
+        truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in context.args)
+
+    if update.message.reply_to_message and update.message.reply_to_message.document:
+        _pop_pending_upload(context.user_data)
+        await process_bikes_document(
+            update.message.reply_to_message.document,
+            update.message,
+            truncate=truncate,
+        )
+        return
+
+    _set_pending_upload(context.user_data, "bikes", truncate)
+    await update.message.reply_text(
+        "📄 Пришлите CSV файл (как документ). Можно указать /uploadbikes truncate для полной перезагрузки."
+    )
+
+
+async def uploadstands_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    truncate = False
+    if context.args:
+        truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in context.args)
+
+    if update.message.reply_to_message and update.message.reply_to_message.document:
+        _pop_pending_upload(context.user_data)
+        await process_trainers_document(
+            update.message.reply_to_message.document,
+            update.message,
+            truncate=truncate,
+        )
+        return
+
+    _set_pending_upload(context.user_data, "stands", truncate)
+    await update.message.reply_text(
+        "📄 Пришлите CSV файл (как документ). Можно указать /uploadstands truncate для полной перезагрузки."
     )
 
 
@@ -516,6 +995,102 @@ async def client_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     term = " ".join(context.args).strip()
     await process_client_search(update.message, term)
+
+
+async def bikes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    search_term = " ".join(context.args).strip() if context.args else ""
+
+    try:
+        await asyncio.to_thread(ensure_bikes_table)
+        if search_term:
+            bikes = await asyncio.to_thread(search_bikes, search_term, 30)
+            total_count = len(bikes)
+        else:
+            bikes = await asyncio.to_thread(list_bikes, 50)
+            total_count = await asyncio.to_thread(bikes_count)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to fetch bikes")
+        await update.message.reply_text(
+            f"❌ Ошибка получения списка велосипедов: {exc}"
+        )
+        return
+
+    if not bikes:
+        if search_term:
+            await update.message.reply_text(
+                f"🚫 Велосипеды по запросу «{search_term}» не найдены."
+            )
+        else:
+            await update.message.reply_text("🚫 В базе нет доступных велосипедов.")
+        return
+
+    header_lines: List[str] = []
+    if search_term:
+        header_lines.append(
+            f"🔍 Найдено {total_count} велосипедов по запросу «{html.escape(search_term)}»."
+        )
+    else:
+        header_lines.append(f"🚲 В базе велосипедов: {total_count}.")
+        if total_count > len(bikes):
+            header_lines.append(f"Показаны первые {len(bikes)} записей.")
+        header_lines.append("Используйте /bikes &lt;поиск&gt; для фильтрации.")
+
+    body = "\n\n".join(format_bike_record(record) for record in bikes)
+    text = "\n\n".join(header_lines + [body])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def stands_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    search_term = " ".join(context.args).strip() if context.args else ""
+
+    try:
+        await asyncio.to_thread(ensure_trainers_table)
+        if search_term:
+            trainers = await asyncio.to_thread(search_trainers, search_term, 30)
+            total_count = len(trainers)
+        else:
+            trainers = await asyncio.to_thread(list_trainers, 50)
+            total_count = await asyncio.to_thread(trainers_count)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to fetch trainers")
+        await update.message.reply_text(
+            f"❌ Ошибка получения списка станков: {exc}"
+        )
+        return
+
+    if not trainers:
+        if search_term:
+            await update.message.reply_text(
+                f"🚫 Станки по запросу «{search_term}» не найдены."
+            )
+        else:
+            await update.message.reply_text("🚫 В базе нет станков.")
+        return
+
+    header_lines: List[str] = []
+    if search_term:
+        header_lines.append(
+            f"🔍 Найдено {total_count} станков по запросу «{html.escape(search_term)}»."
+        )
+    else:
+        header_lines.append(f"🛠 Всего станков: {total_count}.")
+        if total_count > len(trainers):
+            header_lines.append(f"Показаны первые {len(trainers)} записей.")
+        header_lines.append("Используйте /stands &lt;поиск&gt; для фильтрации.")
+
+    body = "\n\n".join(format_trainer_record(record) for record in trainers)
+    text = "\n\n".join(header_lines + [body])
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
 def build_accounts_keyboard(limit: int) -> InlineKeyboardMarkup:
@@ -929,7 +1504,12 @@ def format_client_button_label(client_record: Dict[str, Any]) -> str:
     return full_name
 
 
-def format_client_details(client_record: Dict[str, Any]) -> str:
+def format_client_details(
+    client_record: Dict[str, Any],
+    bike_suggestions: Optional[List[Dict[str, Any]]] = None,
+    height_cm: Optional[float] = None,
+    trainer_suggestions: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+) -> str:
     summary = format_client_summary(client_record)
     lines = [summary]
     has_goal_in_summary = any("Цель:" in line for line in summary.splitlines())
@@ -953,6 +1533,25 @@ def format_client_details(client_record: Dict[str, Any]) -> str:
         else:
             submitted_str = str(submitted)
         lines.append(f"🗓️ Анкета заполнена: {submitted_str}")
+
+    suggestions = bike_suggestions or []
+    if suggestions:
+        lines.append("")
+        lines.append("🚴 Подходящие велосипеды:")
+        for bike_record in suggestions:
+            if trainer_suggestions is not None and isinstance(trainer_suggestions, dict):
+                trainers_for_bike = trainer_suggestions.get(
+                    bike_record.get("id"), []
+                ) or []
+            else:
+                trainers_for_bike = None
+            lines.append(format_bike_suggestion(bike_record, trainers_for_bike))
+    elif height_cm is not None:
+        height_label = _format_decimal_value(height_cm) or f"{height_cm:g}"
+        lines.append("")
+        lines.append(
+            f"🚴 Подходящие велосипеды: не найдено записей для роста {height_label} см."
+        )
 
     return "\n".join(lines)
 
@@ -1073,7 +1672,13 @@ async def render_client_info_message(
         )
         return
 
-    text = format_client_details(record)
+    bike_suggestions, height_cm, trainer_inventory = await get_bike_suggestions_for_client(record)
+    trainer_map = (
+        _build_trainer_suggestions(bike_suggestions, trainer_inventory)
+        if bike_suggestions and trainer_inventory
+        else None
+    )
+    text = format_client_details(record, bike_suggestions, height_cm, trainer_map)
     await context.bot.edit_message_text(
         chat_id=chat_id,
         message_id=message_id,
@@ -1105,10 +1710,17 @@ async def start_client_edit(
         await query.edit_message_text("🔍 Клиент не найден.")
         return
 
+    bike_suggestions, height_cm, trainer_inventory = await get_bike_suggestions_for_client(record)
+    trainer_map = (
+        _build_trainer_suggestions(bike_suggestions, trainer_inventory)
+        if bike_suggestions and trainer_inventory
+        else None
+    )
+    details_text = format_client_details(record, bike_suggestions, height_cm, trainer_map)
     display_name = client_display_name(record)
     prompt = metadata["prompt"]
     text = (
-        f"{format_client_details(record)}\n\n"
+        f"{details_text}\n\n"
         f"✏️ <i>{html.escape(prompt)}</i>\n"
         f"👤 <i>Клиент: {html.escape(display_name)}</i>"
     )
@@ -1530,22 +2142,39 @@ async def document_upload_handler(update: Update, context: ContextTypes.DEFAULT_
 
     document = update.message.document
     caption = update.message.caption or ""
+    command = None
+    args: List[str] = []
+
+    stripped = caption.strip()
+    if stripped.startswith("/"):
+        parts = stripped.split()
+        command = parts[0].lower()
+        args = parts[1:]
+
+    upload_type: Optional[str] = None
     truncate = False
 
-    if caption.lower().startswith("/uploadclients"):
-        args = caption.split()[1:]
+    if command and command in UPLOAD_COMMAND_TYPES:
+        upload_type = UPLOAD_COMMAND_TYPES[command]
         truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in args)
+        _pop_pending_upload(context.user_data)
     else:
-        pending = context.user_data.pop("awaiting_csv_upload", None)
+        pending = _pop_pending_upload(context.user_data)
         if pending:
+            upload_type = pending.get("type")
             truncate = pending.get("truncate", False)
-        else:
-            await update.message.reply_text(
-                "ℹ️ Чтобы импортировать клиентов, используйте команду /uploadclients или добавьте её в подпись к файлу."
-            )
-            return
 
-    await process_clients_document(document, update.message, truncate)
+    if upload_type == "clients":
+        await process_clients_document(document, update.message, truncate)
+    elif upload_type == "bikes":
+        await process_bikes_document(document, update.message, truncate)
+    elif upload_type == "stands":
+        await process_trainers_document(document, update.message, truncate)
+    else:
+        await update.message.reply_text(
+            "ℹ️ Чтобы импортировать данные, используйте /uploadclients, /uploadbikes, /uploadstands "
+            "или добавьте команду в подпись к файлу."
+        )
 
 
 async def process_client_search(message: Message, term: str) -> None:
@@ -1569,10 +2198,17 @@ async def process_client_search(message: Message, term: str) -> None:
         return
 
     if len(results) == 1:
+        record = results[0]
+        bike_suggestions, height_cm, trainer_inventory = await get_bike_suggestions_for_client(record)
+        trainer_map = (
+            _build_trainer_suggestions(bike_suggestions, trainer_inventory)
+            if bike_suggestions and trainer_inventory
+            else None
+        )
         await message.reply_text(
-            format_client_details(results[0]),
+            format_client_details(record, bike_suggestions, height_cm, trainer_map),
             parse_mode=ParseMode.HTML,
-            reply_markup=build_client_info_markup(results[0]["id"]),
+            reply_markup=build_client_info_markup(record["id"]),
         )
         return
 
@@ -1703,11 +2339,15 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("latest", latest_handler))
     application.add_handler(CommandHandler("account", account_handler))
     application.add_handler(CommandHandler("client", client_handler))
+    application.add_handler(CommandHandler("bikes", bikes_handler))
+    application.add_handler(CommandHandler("stands", stands_handler))
     application.add_handler(CommandHandler("setclient", setclient_handler))
     application.add_handler(CommandHandler("admins", admins_handler))
     application.add_handler(CommandHandler("addadmin", addadmin_handler))
     application.add_handler(CommandHandler("removeadmin", removeadmin_handler))
     application.add_handler(CommandHandler("uploadclients", uploadclients_handler))
+    application.add_handler(CommandHandler("uploadbikes", uploadbikes_handler))
+    application.add_handler(CommandHandler("uploadstands", uploadstands_handler))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_search_handler))
     csv_filter = (filters.Document.MimeType("text/csv") | filters.Document.FileExtension("csv"))
     application.add_handler(
