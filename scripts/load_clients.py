@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List
 
-from db_utils import db_connection, dict_cursor
+from repositories.db_utils import db_connection, dict_cursor
 
 DEFAULT_CSV = Path("data")
 

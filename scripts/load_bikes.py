@@ -8,7 +8,11 @@ from io import StringIO
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple, TypedDict
 
-from bikes_repository import ensure_bikes_table, truncate_bikes, upsert_bikes
+from repositories.bikes_repository import (
+    ensure_bikes_table,
+    truncate_bikes,
+    upsert_bikes,
+)
 
 DEFAULT_DATA_DIR = Path("data")
 

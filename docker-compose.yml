@@ -15,7 +15,7 @@ services:
 
   bot:
     build: .
-    command: ["python", "wattattack_bot.py"]
+    command: ["python", "-m", "wattattackbot"]
     env_file: .env
     volumes:
       - ./accounts.json:/app/accounts.json:ro
@@ -23,12 +23,19 @@ services:
       - db
     restart: unless-stopped
 
+  krutilkavnbot:
+    build: .
+    command: ["python", "-m", "krutilkavnbot.main"]
+    env_file: .env
+    restart: unless-stopped
+
   scheduler:
     build: .
     command:
       [
         "python",
-        "wattattack_scheduler.py",
+        "-m",
+        "wattattackscheduler",
         "--interval",
         "${WATTATTACK_INTERVAL_SECONDS:-1800}",
         "--notifier-args",

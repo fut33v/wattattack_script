@@ -8,7 +8,11 @@ from io import StringIO
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple, TypedDict
 
-from trainers_repository import ensure_trainers_table, truncate_trainers, upsert_trainers
+from repositories.trainers_repository import (
+    ensure_trainers_table,
+    truncate_trainers,
+    upsert_trainers,
+)
 
 DEFAULT_DATA_DIR = Path("data")
 

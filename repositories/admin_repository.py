@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional, Tuple
 
-from db_utils import db_connection, dict_cursor
+from .db_utils import db_connection, dict_cursor
 
 
 def _sanitize_username(username: Optional[str]) -> Optional[str]:

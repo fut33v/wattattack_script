@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 import requests
 
 from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
-from admin_repository import (
+from repositories.admin_repository import (
     ensure_admin_table,
     seed_admins_from_env,
     get_admin_ids,

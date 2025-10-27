@@ -21,14 +21,16 @@ WattAttack Bot Suite
 - Уведомлять администраторов о новых активностях с автоматической отправкой FIT-файлов.
 
 ## Основные модули / компоненты
-- `wattattack_bot.py` – основной бот (команды, inline-навигация, поиск клиентов, управление администраторами).
-- `wattattack_notifier.py` – периодический нотификатор новых тренировок.
+- `wattattackbot/` – основной бот (команды, inline-навигация, поиск клиентов, управление администраторами).
+- `wattattackscheduler/` – пакет со скедулером и нотификатором новых тренировок.
 - `wattattack_activities.py` – обёртка над API WattAttack.
-- `load_clients.py` – импорт клиентов из CSV в БД.
-- `client_repository.py` – операции с таблицей клиентов (листинг, поиск, получение).
-- `admin_repository.py` – хранение и управление администраторами.
-- `db_utils.py` – подключение к PostgreSQL.
-- `wattattack_profile_set.py` / `wattattack_profile_debug.py` – вспомогательные CLI-скрипты.
+- `scripts/load_clients.py` – импорт клиентов из CSV в БД.
+- `repositories/client_repository.py` – операции с таблицей клиентов (листинг, поиск, получение).
+- `repositories/admin_repository.py` – хранение и управление администраторами.
+- `repositories/bikes_repository.py` / `repositories/trainers_repository.py` – учёт велосипедов и станков.
+- `repositories/db_utils.py` – подключение к PostgreSQL.
+- `scripts/load_bikes.py` / `scripts/load_trainers.py` – импорт инвентаря из CSV в БД.
+- `scripts/wattattack_profile_set.py` / `scripts/wattattack_profile_debug.py` – вспомогательные CLI-скрипты.
 
 ## Ключевые структуры данных
 - Таблица `clients` (PostgreSQL) – хранение данных клиента: имя, фамилия, вес, рост, FTP, пол, дополнительные поля.
@@ -38,7 +40,7 @@ WattAttack Bot Suite
 
 ## Архитектура
 - Бот реализован как асинхронный Telegram-процесс (python-telegram-bot). Потоки данных: команда/сообщение → обработчик команды → репозиторий/DB → API WattAttack → ответ пользователю.
-- Нотификатор: планировщик (`wattattack_scheduler.py`) циклически вызывает `wattattack_notifier.py`, который обращается к API WattAttack и БД, затем отправляет сообщения через Telegram API.
+- Нотификатор: планировщик (`wattattackscheduler/scheduler.py`) циклически вызывает `wattattackscheduler/notifier.py`, который обращается к API WattAttack и БД, затем отправляет сообщения через Telegram API.
 - Данные хранятся в PostgreSQL; импорт CSV обновляет таблицы; бот/нотификатор читают их через репозитории.
 
 ## Стиль кода и конвенции

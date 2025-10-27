@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Iterable
 
-from wattattack_notifier import main as notifier_main
+from .notifier import main as notifier_main
 
 DEFAULT_INTERVAL = int(os.environ.get("WATTATTACK_INTERVAL_SECONDS", str(30 * 60)))
 
@@ -20,7 +20,7 @@ STOP_REQUESTED = False
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Periodically run wattattack_notifier without cron.",
+        description="Periodically run wattattackscheduler.notifier without cron.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -42,7 +42,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--notifier-args",
         nargs=argparse.REMAINDER,
-        help="Arguments forwarded to wattattack_notifier.py (prefix with --notifier-args)",
+        help="Arguments forwarded to the notifier (prefix with --notifier-args)",
     )
     return parser.parse_args(argv)
 

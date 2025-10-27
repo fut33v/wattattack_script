@@ -14,4 +14,4 @@ ENV WATTATTACK_ACCOUNTS_FILE=/app/accounts.json \
     WATTATTACK_HTTP_TIMEOUT=30 \
     WATTATTACK_RECENT_LIMIT=5
 
-CMD ["python", "wattattack_bot.py"]
+CMD ["python", "-m", "wattattackbot"]

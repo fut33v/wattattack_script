@@ -26,14 +26,14 @@ from telegram.ext import (
     filters,
 )
 
-from client_repository import (
+from repositories.client_repository import (
     count_clients,
     get_client,
     list_clients,
     search_clients,
     update_client_fields,
 )
-from admin_repository import (
+from repositories.admin_repository import (
     ensure_admin_table,
     seed_admins_from_env,
     list_admins as db_list_admins,
@@ -41,7 +41,7 @@ from admin_repository import (
     remove_admin as db_remove_admin,
     is_admin as db_is_admin,
 )
-from bikes_repository import (
+from repositories.bikes_repository import (
     ensure_bikes_table,
     list_bikes,
     search_bikes,
@@ -50,7 +50,7 @@ from bikes_repository import (
     get_bike,
     update_bike_fields,
 )
-from trainers_repository import (
+from repositories.trainers_repository import (
     ensure_trainers_table,
     list_trainers,
     search_trainers,
@@ -58,9 +58,9 @@ from trainers_repository import (
     get_trainer,
     update_trainer_fields,
 )
-from load_clients import load_clients_from_csv_bytes
-from load_bikes import load_bikes_from_csv_bytes
-from load_trainers import load_trainers_from_csv_bytes
+from scripts.load_clients import load_clients_from_csv_bytes
+from scripts.load_bikes import load_bikes_from_csv_bytes
+from scripts.load_trainers import load_trainers_from_csv_bytes
 from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
 
 LOGGER = logging.getLogger(__name__)
@@ -557,10 +557,15 @@ def format_trainer_record(record: Dict[str, Any]) -> str:
 
 def format_trainer_button_label(record: Dict[str, Any]) -> str:
     code = _format_trainer_code(record.get("code"))
-    display = (record.get("display_name") or record.get("title") or "").strip()
-    if code and display and display.lower() != code.lower():
-        return f"{code} · {display}"
-    return code or display or f"id={record.get('id')}"
+    title = (record.get("title") or "").strip()
+    display = (record.get("display_name") or "").strip()
+    if code and title and title.lower() != code.lower():
+        return f"{code} · {title}"
+    if title:
+        return title
+    if code:
+        return code
+    return display or f"id={record.get('id')}"
 
 
 def format_trainer_summary(record: Dict[str, Any]) -> str:
@@ -651,25 +656,25 @@ def build_trainer_info_markup(trainer_id: int) -> InlineKeyboardMarkup:
                     callback_data=f"trainer_edit|cassette|{trainer_id}",
                 ),
             ],
-            [InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")],
+            [
+                InlineKeyboardButton(
+                    text="↩️ К списку",
+                    callback_data="stands_list",
+                ),
+                InlineKeyboardButton(text="❌ Закрыть", callback_data="stands_close"),
+            ],
         ]
     )
 
 
 def build_trainer_edit_markup(trainer_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    text="↩️ Назад",
-                    callback_data=f"trainer_info|{trainer_id}",
-                ),
-                InlineKeyboardButton(
-                    text="❌ Отмена",
-                    callback_data=f"trainer_edit_cancel|{trainer_id}",
-                ),
-            ]
-        ]
+        [[
+            InlineKeyboardButton(
+                text="↩️ Назад",
+                callback_data=f"trainer_info|{trainer_id}",
+            )
+        ]]
     )
 
 
@@ -1248,18 +1253,13 @@ async def stands_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not ensure_admin_message(update):
         return
 
-    context.user_data.pop(PENDING_TRAINER_EDIT_KEY, None)
-
     search_term = " ".join(context.args).strip() if context.args else ""
+    context.user_data.pop(PENDING_TRAINER_EDIT_KEY, None)
+    context.user_data.pop(PENDING_BIKE_EDIT_KEY, None)
+    context.user_data["last_stands_search"] = search_term
 
     try:
-        await asyncio.to_thread(ensure_trainers_table)
-        if search_term:
-            trainers = await asyncio.to_thread(search_trainers, search_term, 30)
-            total_count = len(trainers)
-        else:
-            trainers = await asyncio.to_thread(list_trainers, 50)
-            total_count = await asyncio.to_thread(trainers_count)
+        text, markup = await build_stands_view(search_term)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to fetch trainers")
         await update.message.reply_text(
@@ -1267,45 +1267,14 @@ async def stands_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    if not trainers:
-        if search_term:
-            await update.message.reply_text(
-                f"🚫 Станки по запросу «{search_term}» не найдены."
-            )
-        else:
-            await update.message.reply_text("🚫 В базе нет станков.")
-        return
-
-    header_lines: List[str] = []
-    if search_term:
-        header_lines.append(
-            f"🔍 Найдено {total_count} станков по запросу «{html.escape(search_term)}»."
-        )
+    if markup is None:
+        await update.message.reply_text(text)
     else:
-        header_lines.append(f"🛠 Всего станков: {total_count}.")
-        if total_count > len(trainers):
-            header_lines.append(f"Показаны первые {len(trainers)} записей.")
-        header_lines.append("Используйте /stands &lt;поиск&gt; для фильтрации.")
-
-    body = "\n\n".join(format_trainer_record(record) for record in trainers)
-    text = "\n\n".join(header_lines + [body, "Выберите станок для настройки."])
-
-    keyboard_rows: List[List[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(
-                text=format_trainer_button_label(record),
-                callback_data=f"trainer_info|{record['id']}",
-            )
-        ]
-        for record in trainers
-    ]
-    keyboard_rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")])
-
-    await update.message.reply_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(keyboard_rows),
-    )
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
 
 
 def build_accounts_keyboard(limit: int) -> InlineKeyboardMarkup:
@@ -1423,6 +1392,50 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text("⚠️ Некорректный идентификатор станка.")
             return
         await cancel_trainer_edit(query, context, trainer_id)
+    elif action == "trainer_set_axle" and len(parts) >= 3:
+        axle_value = parts[1].upper()
+        if axle_value not in {"ОСЬ", "ЭКС"}:
+            await query.answer("Некорректное значение", show_alert=True)
+            return
+        try:
+            trainer_id = int(parts[2])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор станка.")
+            return
+        try:
+            await asyncio.to_thread(update_trainer_fields, trainer_id, axle_types=axle_value)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to update trainer %s axle", trainer_id)
+            await query.edit_message_text(f"❌ Не удалось обновить ось: {exc}")
+            return
+        await query.answer("Ось обновлена")
+        await show_trainer_info(query, context, trainer_id)
+    elif action == "stands_list":
+        search_term = context.user_data.get("last_stands_search", "")
+        try:
+            text, markup = await build_stands_view(search_term)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to fetch trainers")
+            await query.edit_message_text(f"❌ Ошибка получения списка станков: {exc}")
+            return
+
+        context.user_data.pop(PENDING_TRAINER_EDIT_KEY, None)
+        context.user_data.pop(PENDING_BIKE_EDIT_KEY, None)
+
+        if markup is None:
+            await query.edit_message_text(text)
+        else:
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            )
+    elif action == "stands_close":
+        try:
+            await query.message.delete()
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("stands_close delete failed for message %s", query.message)
+        return
     elif action == "noop":
         try:
             await query.edit_message_reply_markup(reply_markup=None)
@@ -1820,8 +1833,8 @@ BIKE_EDIT_FIELDS: Dict[str, Dict[str, str]] = {
 
 TRAINER_EDIT_FIELDS: Dict[str, Dict[str, str]] = {
     "axle_types": {
-        "label": "🔧 Оси",
-        "prompt": "Введите типы осей через запятую (например, ЭКС, ОСЬ). Оставьте пустым для очистки.",
+        "label": "🔧 Ось",
+        "prompt": "Выберите тип оси: ОСЬ или ЭКС.",
     },
     "cassette": {
         "label": "⚙️ Кассета",
@@ -1937,6 +1950,53 @@ def parse_trainer_edit_value(field: str, raw_value: str) -> object:
     raise ValueError("Unsupported field.")
 
 
+async def build_stands_view(search_term: str) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+    await asyncio.to_thread(ensure_trainers_table)
+    if search_term:
+        trainers = await asyncio.to_thread(search_trainers, search_term, 30)
+        total_count = len(trainers)
+    else:
+        trainers = await asyncio.to_thread(list_trainers, 50)
+        total_count = await asyncio.to_thread(trainers_count)
+
+    if not trainers:
+        if search_term:
+            return (
+                f"🚫 Станки по запросу «{html.escape(search_term)}» не найдены.",
+                None,
+            )
+        return ("🚫 В базе нет станков.", None)
+
+    header_lines: List[str] = []
+    if search_term:
+        header_lines.append(
+            f"🔍 Найдено {total_count} станков по запросу «{html.escape(search_term)}»."
+        )
+    else:
+        header_lines.append(f"🛠 Всего станков: {total_count}.")
+        if total_count > len(trainers):
+            header_lines.append(f"Показаны первые {len(trainers)} записей.")
+        header_lines.append("Используйте /stands &lt;поиск&gt; для фильтрации.")
+
+    body = "\n\n".join(format_trainer_record(record) for record in trainers)
+    text = "\n\n".join(header_lines + [body, "Выберите станок для настройки."])
+
+    keyboard_rows: List[List[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=format_trainer_button_label(record),
+                callback_data=f"trainer_info|{record['id']}",
+            )
+        ]
+        for record in trainers
+    ]
+    keyboard_rows.append(
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="stands_close")]
+    )
+
+    return text, InlineKeyboardMarkup(keyboard_rows)
+
+
 async def render_client_info_message(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
@@ -1962,13 +2022,7 @@ async def render_client_info_message(
         )
         return
 
-    bike_suggestions, height_cm, trainer_inventory = await get_bike_suggestions_for_client(record)
-    trainer_map = (
-        _build_trainer_suggestions(bike_suggestions, trainer_inventory)
-        if bike_suggestions and trainer_inventory
-        else None
-    )
-    text = format_client_details(record, bike_suggestions, height_cm, trainer_map)
+    text = format_client_details(record)
     await context.bot.edit_message_text(
         chat_id=chat_id,
         message_id=message_id,
@@ -2409,8 +2463,37 @@ async def start_trainer_edit(
         return
 
     details_text = format_trainer_details(record)
-    prompt = metadata["prompt"]
     trainer_name = trainer_display_name(record)
+
+    if field == "axle_types":
+        buttons = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="ОСЬ",
+                        callback_data=f"trainer_set_axle|ОСЬ|{trainer_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="ЭКС",
+                        callback_data=f"trainer_set_axle|ЭКС|{trainer_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="↩️ Назад",
+                        callback_data=f"trainer_info|{trainer_id}",
+                    ),
+                ],
+            ]
+        )
+        await query.edit_message_text(
+            f"{details_text}\n\n✏️ <i>Выберите тип оси:</i>\n🛠 <i>Станок: {html.escape(trainer_name)}</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=buttons,
+        )
+        return
+
+    prompt = metadata["prompt"]
 
     context.user_data[PENDING_TRAINER_EDIT_KEY] = {
         "trainer_id": trainer_id,

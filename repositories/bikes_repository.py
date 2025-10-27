@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, List, Tuple
 
-from db_utils import db_connection, dict_cursor
+from .db_utils import db_connection, dict_cursor
 
 
 def ensure_bikes_table() -> None:
