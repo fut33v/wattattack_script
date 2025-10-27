@@ -1389,6 +1389,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
             return
         await cancel_client_edit(query, context, client_id)
+    elif action == "client_bikes" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+            return
+        await render_client_bike_suggestions(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
+            client_id,
+        )
     elif action == "trainer_info" and len(parts) >= 2:
         try:
             trainer_id = int(parts[1])
@@ -1771,25 +1783,6 @@ def format_client_details(
             submitted_str = str(submitted)
         lines.append(f"🗓️ Анкета заполнена: {submitted_str}")
 
-    suggestions = bike_suggestions or []
-    if suggestions:
-        lines.append("")
-        lines.append("🚴 Подходящие велосипеды:")
-        for bike_record in suggestions:
-            if trainer_suggestions is not None and isinstance(trainer_suggestions, dict):
-                trainers_for_bike = trainer_suggestions.get(
-                    bike_record.get("id"), []
-                ) or []
-            else:
-                trainers_for_bike = None
-            lines.append(format_bike_suggestion(bike_record, trainers_for_bike))
-    elif height_cm is not None:
-        height_label = _format_decimal_value(height_cm) or f"{height_cm:g}"
-        lines.append("")
-        lines.append(
-            f"🚴 Подходящие велосипеды: не найдено записей для роста {height_label} см."
-        )
-
     return "\n".join(lines)
 
 
@@ -1867,6 +1860,12 @@ def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
                     text="🚴‍♂️ Педали",
                     callback_data=f"client_edit|pedals|{client_id}",
                 ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚴 Подбор велосипедов",
+                    callback_data=f"client_bikes|{client_id}",
+                )
             ],
             [InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")],
         ]
@@ -1976,6 +1975,81 @@ async def render_client_info_message(
         text=text,
         parse_mode=ParseMode.HTML,
         reply_markup=build_client_info_markup(client_id),
+    )
+
+
+async def render_client_bike_suggestions(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    client_id: int,
+) -> None:
+    try:
+        record = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s", client_id)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"❌ Ошибка получения данных клиента: {exc}",
+        )
+        return
+
+    if not record:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="🔍 Клиент не найден.",
+        )
+        return
+
+    bike_suggestions, height_cm, trainer_inventory = await get_bike_suggestions_for_client(record)
+    trainer_map = (
+        _build_trainer_suggestions(bike_suggestions, trainer_inventory)
+        if bike_suggestions and trainer_inventory
+        else None
+    )
+
+    if not bike_suggestions:
+        height_label = _format_decimal_value(height_cm) or f"{height_cm:g}" if height_cm else None
+        if height_label:
+            text = f"🚴 Для роста {height_label} см подходящие велосипеды не найдены."
+        else:
+            text = "🚴 Рост клиента не указан, подбор невозможен."
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text="↩️ Назад", callback_data=f"client_info|{client_id}")]]
+            ),
+        )
+        return
+
+    detail_blocks: List[str] = []
+    for bike_record in bike_suggestions:
+        trainers_for_bike = (
+            trainer_map.get(bike_record.get("id"), []) if trainer_map else None
+        )
+        detail_blocks.append(format_bike_suggestion(bike_record, trainers_for_bike))
+
+    text = "\n\n".join(detail_blocks)
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="↩️ Назад",
+                        callback_data=f"client_info|{client_id}",
+                    ),
+                    InlineKeyboardButton(text="❌ Закрыть", callback_data="noop"),
+                ]
+            ]
+        ),
     )
 
 
