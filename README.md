@@ -28,7 +28,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 - **repositories/trainers_repository.py** – Trainer inventory access helpers (table creation, search/list helpers).
 - **repositories/db_utils.py** – PostgreSQL connection helpers.
 - **scripts/wattattack_profile_set.py** – CLI tool for updating WattAttack profile values (name, weight, FTP, etc.).
-- **krutilkavnbot/** – Minimal Telegram bot for clients; always replies with a greeting.
+- **krutilkavnbot/** – Telegram бот для клиентов: авторизация по фамилии и привязка Telegram-пользователей к записям клиентов.
 
 ## Features
 - **Admin-only controls**: All commands, callbacks, and text handlers require admin status. Admins are stored centrally in the DB; `/addadmin` and `/removeadmin` manipulate them at runtime. Seed list comes from `TELEGRAM_ADMIN_IDS`.
@@ -70,6 +70,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 
 ## Usage Notes
 - **Administrators**: Only admins can invoke commands or interact with inline keyboards. Non-admins receive “Недостаточно прав”.
+- **Client linking**: `krutilkavnbot` запоминает выбранного клиента в таблице `client_links` (создаётся автоматически). Пользователь может повторно пройти авторизацию и выбрать другую запись в любой момент — привязка вступает в силу только после подтверждения администратором.
 - **Client CSV**: Ensure the columns match `scripts/load_clients.py` mapping (e.g., “Имя”, “Фамилия”, “ПОЛ”, “Ваш вес”, etc.). `/uploadclients truncate` replaces all entries; otherwise rows are upserted.
 - **Bike inventory**: The CSV should match `scripts/load_bikes.py` expectations (ID, название, владелец, размер, рост от/до, передачи, эксцентрик/ось, кассета). Trainer CSV should follow `scripts/load_trainers.py` mapping (код, модель, отображаемое имя, хозяин, оси, кассета, комментарий). Use `/bikes <поиск>` для велосипедов и `/stands <поиск>` для станков; по кнопке станка можно отредактировать тип оси и кассету. Карточки клиента автоматически показывают совместимые велосипеды и станки.
 - **CSV uploads**: Команды `/uploadclients`, `/uploadbikes`, `/uploadstands` принимают CSV как документ (можно переслать, ответить на файл, использовать `truncate` для полной перезагрузки).
