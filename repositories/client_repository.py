@@ -1,6 +1,7 @@
 """Access helper for the clients database table."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from .db_utils import db_connection, dict_cursor
@@ -69,3 +70,64 @@ def update_client_fields(client_id: int, **fields: object) -> bool:
             cur.execute(query, values)
         conn.commit()
     return True
+
+
+def create_client(
+    *,
+    first_name: Optional[str],
+    last_name: Optional[str],
+    weight: Optional[float] = None,
+    height: Optional[float] = None,
+    gender: Optional[str] = None,
+    ftp: Optional[float] = None,
+    pedals: Optional[str] = None,
+    goal: Optional[str] = None,
+) -> Dict:
+    first_name_clean = (first_name or "").strip() or None
+    last_name_clean = (last_name or "").strip() or None
+
+    full_name_parts = [part for part in [first_name_clean, last_name_clean] if part]
+    full_name = " ".join(full_name_parts).strip()
+    if not full_name:
+        raise ValueError("first_name or last_name must be provided")
+
+    pedals_clean = (pedals or "").strip() or None
+    goal_clean = (goal or "").strip() or None
+    gender_clean = (gender or "").strip() or None
+
+    submitted_at = datetime.utcnow()
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            INSERT INTO clients (
+                submitted_at,
+                first_name,
+                last_name,
+                full_name,
+                gender,
+                weight,
+                height,
+                ftp,
+                pedals,
+                goal
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, first_name, last_name, full_name, gender, weight, height, ftp, pedals, goal, submitted_at
+            """,
+            (
+                submitted_at,
+                first_name_clean,
+                last_name_clean,
+                full_name,
+                gender_clean,
+                weight,
+                height,
+                ftp,
+                pedals_clean,
+                goal_clean,
+            ),
+        )
+        record = cur.fetchone()
+        conn.commit()
+    return record
