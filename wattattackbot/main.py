@@ -83,6 +83,7 @@ PENDING_UPLOAD_KEY = "pending_inventory_upload"
 PENDING_TRAINER_EDIT_KEY = "pending_trainer_edit"
 PENDING_BIKE_EDIT_KEY = "pending_bike_edit"
 PENDING_WORKOUT_UPLOAD_KEY = "pending_workout_upload"
+PENDING_COMBINATE_KEY = "pending_combinate"
 UPLOAD_COMMAND_TYPES = {
     "/uploadclients": "clients",
     "/uploadbikes": "bikes",
@@ -191,6 +192,14 @@ def _pop_pending_workout_upload(user_data: Dict[str, Any]) -> Optional[Dict[str,
     return value
 
 
+def _set_pending_combinate(user_data: Dict[str, Any], chat_id: int) -> None:
+    user_data[PENDING_COMBINATE_KEY] = {"chat_id": chat_id}
+
+
+def _clear_pending_combinate(user_data: Dict[str, Any]) -> None:
+    user_data.pop(PENDING_COMBINATE_KEY, None)
+
+
 def _normalize_tokens(value: str) -> List[str]:
     tokens = [token for token in re.split(r"[,\s/;]+", value.strip()) if token]
     return tokens
@@ -282,6 +291,62 @@ def _build_trainer_suggestions(
         matches.sort(key=lambda item: (item[1], item[2], item[3]))
         suggestions[bike_id] = [item[0] for item in matches]
     return suggestions
+
+
+def _bike_height_bounds(bike: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    return _parse_height_cm(bike.get("height_min_cm")), _parse_height_cm(bike.get("height_max_cm"))
+
+
+def _bike_height_distance(bike: Dict[str, Any], rider_height: float) -> float:
+    min_height, max_height = _bike_height_bounds(bike)
+    if min_height is not None and rider_height < min_height:
+        return float(min_height - rider_height)
+    if max_height is not None and rider_height > max_height:
+        return float(rider_height - max_height)
+    if min_height is not None and max_height is not None:
+        midpoint = (min_height + max_height) / 2.0
+        return abs(midpoint - rider_height)
+    if min_height is not None:
+        return abs(min_height - rider_height)
+    if max_height is not None:
+        return abs(max_height - rider_height)
+    return 0.0
+
+
+def _bike_height_matches(bike: Dict[str, Any], rider_height: float) -> bool:
+    min_height, max_height = _bike_height_bounds(bike)
+    if min_height is not None and rider_height < min_height:
+        return False
+    if max_height is not None and rider_height > max_height:
+        return False
+    return True
+
+
+def _split_html_message(text: str, limit: int = 4000) -> List[str]:
+    """Split long HTML messages without breaking mid-line."""
+    if len(text) <= limit:
+        return [text]
+    chunks: List[str] = []
+    buffer = ""
+    for line in text.splitlines():
+        candidate = f"{buffer}\n{line}" if buffer else line
+        if len(candidate) <= limit:
+            buffer = candidate
+            continue
+        if buffer:
+            chunks.append(buffer)
+            buffer = line
+        else:
+            # Single line longer than limit; hard split.
+            start = 0
+            while start < len(line):
+                end = min(start + limit, len(line))
+                chunks.append(line[start:end])
+                start = end
+            buffer = ""
+    if buffer:
+        chunks.append(buffer)
+    return chunks
 
 
 def _format_decimal_value(value: Any) -> Optional[str]:
@@ -996,6 +1061,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/latest — скачать последнюю активность по каждому аккаунту\n"
         "/setclient <аккаунт> — применить данные клиента из базы\n"
         "/account <аккаунт> — показать текущие данные аккаунта\n"
+        "/combinate — подобрать велосипеды и станки; фамилии пришлите отдельным сообщением\n"
         "/bikes [поиск] — показать доступные велосипеды\n"
         "/stands [поиск] — показать доступные станки\n"
         "/client <имя/фамилия> — найти клиента по БД\n"
@@ -1380,6 +1446,240 @@ async def account_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
+async def combinate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+    _set_pending_combinate(context.user_data, update.message.chat_id)
+
+    prompt = (
+        "📝 Пришлите фамилии клиентов отдельным сообщением (по одной фамилии на строку).\n"
+        "Если передумали, нажмите «Отмена»."
+    )
+    markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton(text="Отмена", callback_data="combinate_cancel")]]
+    )
+    await update.message.reply_text(prompt, reply_markup=markup)
+
+
+async def _process_combinate_text(
+    message: Message, context: ContextTypes.DEFAULT_TYPE, raw_text: str
+) -> bool:
+    cleaned = (raw_text or "").strip()
+    if not cleaned:
+        await message.reply_text("ℹ️ Укажите фамилии клиентов (по одной в строке).")
+        return False
+
+    candidate_lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if not candidate_lines:
+        await message.reply_text("ℹ️ Укажите фамилии клиентов (по одной в строке).")
+        return False
+
+    unique_terms: List[str] = list(dict.fromkeys(candidate_lines))
+
+    selected_clients: List[Dict[str, Any]] = []
+    ambiguous_terms: List[Tuple[str, List[Dict[str, Any]]]] = []
+    missing_terms: List[str] = []
+
+    for index, term in enumerate(unique_terms):
+        term_lower = term.lower()
+        try:
+            results = await asyncio.to_thread(search_clients, term, 15)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to search clients for %s", term)
+            await message.reply_text(f"❌ Ошибка поиска клиента «{term}»: {exc}")
+            return False
+
+        if not results:
+            missing_terms.append(term)
+            continue
+
+        scored_results: List[Tuple[int, Dict[str, Any]]] = []
+        for record in results:
+            last_name = (record.get("last_name") or "").strip().lower()
+            full_name = (record.get("full_name") or "").strip().lower()
+            score = 3
+            if last_name == term_lower or full_name == term_lower:
+                score = 0
+            elif term_lower and term_lower in last_name:
+                score = 1
+            elif term_lower and term_lower in full_name:
+                score = 2
+            scored_results.append((score, record))
+        scored_results.sort(key=lambda item: item[0])
+
+        if not scored_results:
+            missing_terms.append(term)
+            continue
+
+        best_score = scored_results[0][0]
+        best_matches = [record for score, record in scored_results if score == best_score]
+
+        if len(best_matches) == 1:
+            record = dict(best_matches[0])
+            record["_requested_term"] = term
+            record["_order_index"] = index
+            selected_clients.append(record)
+        else:
+            ambiguous_terms.append((term, best_matches[:5]))
+
+    if not selected_clients:
+        parts: List[str] = []
+        if missing_terms:
+            missing_text = ", ".join(missing_terms)
+            parts.append(f"🔍 Не найдено клиентов: {html.escape(missing_text)}.")
+        if ambiguous_terms:
+            lines = []
+            for term, matches in ambiguous_terms:
+                options = ", ".join(html.escape(client_display_name(item)) for item in matches)
+                lines.append(f"• {html.escape(term)} → {options}")
+            parts.append("❔ Уточните фамилии:\n" + "\n".join(lines))
+        if not parts:
+            parts.append("⚠️ Не удалось распознать ни одного клиента.")
+        await message.reply_text("\n".join(parts), parse_mode=ParseMode.HTML)
+        return False
+
+    try:
+        await asyncio.to_thread(ensure_bikes_table)
+        bikes = await asyncio.to_thread(list_bikes)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load bikes for combinate command")
+        await message.reply_text(f"❌ Ошибка чтения базы велосипедов: {exc}")
+        return False
+    if not bikes:
+        await message.reply_text("⚠️ В базе нет зарегистрированных велосипедов.")
+        return False
+
+    try:
+        await asyncio.to_thread(ensure_trainers_table)
+        trainers = await asyncio.to_thread(list_trainers)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load trainers for combinate command")
+        await message.reply_text(f"❌ Ошибка чтения базы станков: {exc}")
+        return False
+
+    trainer_suggestions_map = _build_trainer_suggestions(bikes, trainers) if trainers else {}
+
+    clients_sorted = sorted(selected_clients, key=lambda item: item.get("_order_index", 0))
+    clients_with_height: List[Tuple[Dict[str, Any], float]] = []
+    for record in clients_sorted:
+        height_value = _parse_height_cm(record.get("height"))
+        if height_value is not None:
+            clients_with_height.append((record, height_value))
+
+    height_map: Dict[int, float] = {}
+    for record, height_value in clients_with_height:
+        client_id = record.get("id")
+        if isinstance(client_id, int):
+            height_map[client_id] = height_value
+
+    def _format_bike_title(bike: Dict[str, Any]) -> str:
+        title = html.escape(bike.get("title") or "Без названия")
+        owner = bike.get("owner")
+        if owner:
+            return f"{title} ({html.escape(str(owner))})"
+        return title
+
+    def _format_trainer_label(trainer: Dict[str, Any]) -> str:
+        code = _format_trainer_code(trainer.get("code"))
+        display_name = trainer.get("display_name") or trainer.get("title")
+        if code and display_name:
+            return f"{code} — {display_name}"
+        if code:
+            return code
+        if display_name:
+            return str(display_name)
+        return "Без названия"
+
+    bike_candidates: Dict[int, List[Dict[str, Any]]] = {}
+    for record, height_value in clients_with_height:
+        client_id = record.get("id")
+        if not isinstance(client_id, int):
+            continue
+        matching_bikes = [bike for bike in bikes if _bike_height_matches(bike, height_value)]
+        pool = matching_bikes if matching_bikes else bikes
+        sorted_candidates = sorted(
+            pool,
+            key=lambda bike: (
+                _bike_height_distance(bike, height_value),
+                1 if bike.get("position") is None else 0,
+                bike.get("position") or 0,
+                (bike.get("title") or "").lower(),
+            ),
+        )
+        bike_candidates[client_id] = sorted_candidates[:5]
+
+    assignments: Dict[int, Dict[str, Any]] = {}
+    used_bike_ids: set[int] = set()
+    for record, height_value in sorted(clients_with_height, key=lambda item: item[1], reverse=True):
+        client_id = record.get("id")
+        if not isinstance(client_id, int):
+            continue
+        candidates = bike_candidates.get(client_id, [])
+        for bike in candidates:
+            bike_id = bike.get("id")
+            if isinstance(bike_id, int) and bike_id not in used_bike_ids:
+                assignments[client_id] = bike
+                used_bike_ids.add(bike_id)
+                break
+
+    lines: List[str] = []
+    lines.append("<b>🚲 Предложение рассадки</b>")
+    for record in clients_sorted:
+        display_name = client_display_name(record)
+        requested = record.get("_requested_term")
+        header = f"<b>{html.escape(display_name)}</b>"
+        if requested and requested.lower() != (display_name or "").lower():
+            header += f" <i>(запрос «{html.escape(str(requested))}»)</i>"
+        lines.append(header)
+
+        client_id = record.get("id")
+        height_value = height_map.get(client_id) if isinstance(client_id, int) else None
+        if height_value is None:
+            lines.append("• ⚠️ В анкете нет роста, подбор велосипеда невозможен.")
+            continue
+
+        lines.append(f"• 📏 Рост: {height_value:g} см")
+
+        assigned_bike = assignments.get(client_id) if isinstance(client_id, int) else None
+        if assigned_bike:
+            bike_title = _format_bike_title(assigned_bike)
+            lines.append(f"• ✅ Основной вариант: {bike_title}")
+
+            trainer_options = trainer_suggestions_map.get(assigned_bike.get("id")) or []
+            if trainer_options:
+                trainer_titles = [html.escape(_format_trainer_label(option)) for option in trainer_options[:3]]
+                lines.append(f"  └─ Станки: {', '.join(trainer_titles)}")
+        else:
+            lines.append("• ⚠️ Не удалось подобрать уникальный велосипед из доступных.")
+
+        alternatives = [
+            bike
+            for bike in bike_candidates.get(client_id, [])
+            if bike is not assignments.get(client_id)
+        ]
+        if alternatives:
+            alt_titles = [_format_bike_title(bike) for bike in alternatives[:3]]
+            lines.append(f"• 🔁 Альтернативы: {', '.join(alt_titles)}")
+
+    if missing_terms:
+        escaped = ", ".join(html.escape(term) for term in missing_terms)
+        lines.append(f"\n🔍 Не найдено клиентов по запросам: {escaped}.")
+
+    if ambiguous_terms:
+        lines.append("\n❔ Уточните следующие фамилии:")
+        for term, matches in ambiguous_terms:
+            options = ", ".join(html.escape(client_display_name(item)) for item in matches)
+            lines.append(f"• {html.escape(term)} → {options}")
+
+    full_text = "\n".join(lines)
+    for chunk in _split_html_message(full_text):
+        await message.reply_text(chunk, parse_mode=ParseMode.HTML)
+
+    return True
+
+
 async def client_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
@@ -1549,6 +1849,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.edit_message_text(
             f"📄 Пришлите файл тренировки ZWO для загрузки в {label}."
         )
+    elif action == "combinate_cancel":
+        _clear_pending_combinate(context.user_data)
+        await query.edit_message_text("⛔ Подбор рассадки отменён.")
+    elif action == "client_close":
+        pending_edit = context.user_data.get("pending_client_edit")
+        if (
+            pending_edit
+            and pending_edit.get("chat_id") == query.message.chat_id
+            and pending_edit.get("message_id") == query.message.message_id
+        ):
+            context.user_data.pop("pending_client_edit", None)
+        try:
+            await query.message.delete()
+        except Exception:  # noqa: BLE001
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("client_close action failed for message %s", query.message)
+        return
     elif action == "account_show" and len(parts) >= 2:
         target = parts[1]
         if target.upper() == "ALL":
@@ -2138,7 +2457,7 @@ def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
                     callback_data=f"client_bikes|{client_id}",
                 )
             ],
-            [InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")],
+            [InlineKeyboardButton(text="❌ Закрыть", callback_data="client_close")],
         ]
     )
 
@@ -2383,7 +2702,7 @@ async def render_client_bike_suggestions(
                         text="↩️ Назад",
                         callback_data=f"client_info|{client_id}",
                     ),
-                    InlineKeyboardButton(text="❌ Закрыть", callback_data="noop"),
+                    InlineKeyboardButton(text="❌ Закрыть", callback_data="client_close"),
                 ]
             ]
         ),
@@ -3211,6 +3530,12 @@ async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if not ensure_admin_message(update):
         return
+    combinate_pending = context.user_data.get(PENDING_COMBINATE_KEY)
+    if combinate_pending and combinate_pending.get("chat_id") == update.message.chat_id:
+        success = await _process_combinate_text(update.message, context, update.message.text)
+        if success:
+            _clear_pending_combinate(context.user_data)
+        return
     bike_pending = context.user_data.get(PENDING_BIKE_EDIT_KEY)
     if bike_pending:
         handled = await process_pending_bike_edit(update.message, context, bike_pending)
@@ -3476,6 +3801,7 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("recent", recent_handler))
     application.add_handler(CommandHandler("latest", latest_handler))
     application.add_handler(CommandHandler("account", account_handler))
+    application.add_handler(CommandHandler("combinate", combinate_handler))
     application.add_handler(CommandHandler("client", client_handler))
     application.add_handler(CommandHandler("bikes", bikes_handler))
     application.add_handler(CommandHandler("stands", stands_handler))
