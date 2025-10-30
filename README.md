@@ -4,11 +4,10 @@
 This repository contains a Telegram bot and supporting utilities for managing WattAttack athlete accounts, а также веб-приложение «Крутилка» для администраторов. The bot automates tasks such as applying client data (from a PostgreSQL-backed client database) to WattAttack user profiles, downloading FIT activity files for new workouts, and providing account information on demand. Supporting scripts handle CSV imports of client information and direct profile updates via the WattAttack web API.
 
 ## Components
-- **wattattackbot/** – Telegram bot package that interacts with WattAttack accounts:
+- **wattattackbot/** – Telegram bot package that manages WattAttack profiles, clients, and inventory:
   - `/start`, `/help` – navigation/help.
-  - `/recent <n>` – fetch recent workouts for a selected account.
-  - `/latest` – download latest workout FIT for each account.
   - `/account <id>` – show current WattAttack profile data.
+  - `/combinate` — подбор велосипеда/станка по параметрам клиента.
   - `/bikes [поиск]` – list available bikes from the shared inventory (supports search term).
   - `/client <query>` – search clients by name/surname.
   - `/setclient <id>` – apply selected client’s data to a WattAttack account.
@@ -18,6 +17,10 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
   - `/uploadworkout [all|account…]` – upload a ZWO workout file into one or more WattAttack libraries (parsing + metrics).
   - `/admins`, `/addadmin`, `/removeadmin` – manage bot administrators.
   - Inline menus for account/client selection and ad-hoc text client search (admins only).
+- **krutilkafitbot/** – Telegram bot dedicated to activity downloads:
+  - `/start`, `/help` – показать список аккаунтов и подсказки.
+  - `/recent <n>` – fetch recent workouts for a selected account.
+  - `/latest` – download latest workout FIT for each account.
 - **wattattackscheduler/** – Scheduler loop and notifier CLI that watch WattAttack for new activities and send FIT files with metadata to admins.
 - **wattattack_activities.py** – API wrapper for WattAttack endpoints (`/auth/login`, `/activities`, `/athlete/update`, `/user/update`, `/auth/check`, `/workouts/user-create`).
 - **wattattack_workouts.py** – ZWO workout parser, sanitizer, chart/metrics calculator, and payload builder for library uploads.
@@ -38,14 +41,15 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 - **Admin-only controls**: All commands, callbacks, and text handlers require admin status. Admins are stored centrally in the DB; `/addadmin` and `/removeadmin` manipulate them at runtime. Seed list comes from `TELEGRAM_ADMIN_IDS`.
 - **Client management**: CSV import normalizes name, gender, weight, height, FTP, pedals, goals, etc. `/client` and plain text search locate clients; `/setclient` applies their data to accounts (keeping mandatory fields like `birthDate` and gender). Карточка клиента включает отдельную кнопку для просмотра подобранных велосипедов и станков (учитываются рост, оси и кассеты). `/stands` выводит учёт станков и позволяет редактировать оси/кассеты из бота, `/bikes` показывает парк велосипедов и даёт менять допустимые значения роста. `/account` fetches up-to-date profile info from WattAttack.
 - **Workout uploads**: `/uploadworkout` parses ZWO files server-side, builds chart data and advanced power metrics (IF, NP, TSS, zone breakdown) using the athlete’s FTP when available, and pushes the workout into the selected WattAttack account(s).
-- **Activity notifications**: Notifier sends FIT files and metadata when new workouts appear. Admin list reused from the DB.
+- **Activity notifications**: Notifier (and krutilkafitbot) send FIT files and metadata when new workouts appear. Admin list reused from the DB.
 - **Docker-ready**: `docker-compose.yml` provides services for bot (`bot`), scheduler (`scheduler`), and Postgres (`db`, exposed on host port 55432). Volume `postgres_data` persists DB state.
 
 ## Setup
 1. Install backend dependencies: `pip install -r requirements.txt` (Python 3.11+).
 2. Install frontend dependencies: `cd webapp/frontend && npm install` (Node.js 18+), затем вернитесь в корень `cd ../..`.
 3. Copy `.env.example` to `.env` and configure:
-   - `TELEGRAM_BOT_TOKEN`, optional `TELEGRAM_ADMIN_IDS` seed.
+   - `TELEGRAM_BOT_TOKEN` для wattattackbot, optional `TELEGRAM_ADMIN_IDS` seed.
+   - `KRUTILKAFIT_BOT_TOKEN` — токен отдельного бота для скачивания активностей (если не указан, будет использован `TELEGRAM_BOT_TOKEN`).
    - `KRUTILKAVN_BOT_TOKEN` for the greeting bot (use `KRUTILKAVN_GREETING` to override the default message).
    - `WATTATTACK_ACCOUNTS_FILE` (JSON with email/password/base_url per account).
    - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`.
@@ -58,31 +62,38 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 4. Start services:
    - Backend/API: `docker-compose up -d db webapp` (или `uvicorn webapp.main:app --reload`) — сервис отдаёт API и собранную SPA «Крутилка».
    - Frontend (разработка): `cd webapp/frontend && npm run dev` — Vite поднимет SPA «Крутилка» на `http://localhost:5173` и проксирует вызовы к `:8000`.
-   - Telegram-боты: `docker-compose up -d bot scheduler krutilkavnbot` (как и прежде).
+   - Telegram-боты: `docker-compose up -d bot krutilkafitbot scheduler krutilkavnbot`.
    - Для production-образа `docker-compose up -d db webapp` автоматически соберёт фронтенд внутри Dockerfile (используется Node-стадия).
 5. Import reference data:
    - Clients: `python -m scripts.load_clients --truncate` or send CSV via `/uploadclients`.
    - Bikes: `python -m scripts.load_bikes --truncate` to load the inventory CSV from `data/`.
    - Stands: `python -m scripts.load_trainers --truncate` to import the trainer inventory.
 6. Configure bot commands in BotFather:
-   ```
-   start - показать список аккаунтов
-   help - подсказать доступные команды
-   recent - последние N активностей для аккаунта
-   latest - последняя активность каждого аккаунта
-   setclient - применить данные клиента к аккаунту
-   account - показать текущие данные аккаунта
-   bikes - показать доступные велосипеды
-   stands - показать доступные станки
-   client - найти клиента по БД
-   uploadclients - загрузить CSV клиентов
-   uploadbikes - загрузить CSV велосипедов
-   uploadstands - загрузить CSV станков
-   uploadworkout - загрузить тренировку ZWO в библиотеку
-   admins - показать список администраторов
-   addadmin - добавить администратора
-   removeadmin - удалить администратора
-   ```
+   - Для `wattattackbot`:
+     ```
+     start - краткое описание возможностей
+     help - подсказать доступные команды
+     setclient - применить данные клиента к аккаунту
+     account - показать текущие данные аккаунта
+     combinate - подобрать велосипеды и станки
+     bikes - показать доступные велосипеды
+     stands - показать доступные станки
+     client - найти клиента по БД
+     uploadclients - загрузить CSV клиентов
+     uploadbikes - загрузить CSV велосипедов
+     uploadstands - загрузить CSV станков
+     uploadworkout - загрузить тренировку ZWO
+     admins - список администраторов
+     addadmin - добавить администратора
+     removeadmin - удалить администратора
+     ```
+   - Для `krutilkafitbot`:
+     ```
+     start - показать список аккаунтов
+     help - подсказать доступные команды
+     recent - последние N активностей для аккаунта
+     latest - последняя активность каждого аккаунта
+     ```
 
 ## Usage Notes
 - **Administrators**: Only admins can invoke commands or interact with inline keyboards. Non-admins receive “Недостаточно прав”.

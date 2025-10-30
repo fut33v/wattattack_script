@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Telegram bot that exposes WattAttack activities for multiple accounts."""
+"""Telegram bot for managing WattAttack profiles, clients, and inventory."""
 from __future__ import annotations
 
 import asyncio
@@ -7,9 +7,7 @@ import html
 import json
 import logging
 import os
-import tempfile
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 import re
@@ -29,6 +27,7 @@ from telegram.ext import (
 from repositories.client_repository import (
     count_clients,
     get_client,
+    get_clients_stats,
     list_clients,
     search_clients,
     update_client_fields,
@@ -61,12 +60,20 @@ from repositories.trainers_repository import (
 from scripts.load_clients import load_clients_from_csv_bytes
 from scripts.load_bikes import load_bikes_from_csv_bytes
 from scripts.load_trainers import load_trainers_from_csv_bytes
-from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
+from wattattack_activities import WattAttackClient
 from wattattack_workouts import (
     build_workout_payload,
     calculate_workout_metrics,
     parse_zwo_workout,
     zwo_to_chart_data,
+)
+from wattattackbot.accounts import (
+    AccountConfig,
+    format_account_list as format_account_list_from_registry,
+    load_accounts,
+    normalize_account_id as normalize_account_id_value,
+    resolve_account_identifier as resolve_account_identifier_value,
+    resolve_account_tokens as resolve_account_tokens_value,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -74,7 +81,6 @@ LOGGER = logging.getLogger(__name__)
 BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
 ACCOUNTS_ENV = "WATTATTACK_ACCOUNTS_FILE"
 DEFAULT_ACCOUNTS_PATH = Path("accounts.json")
-DEFAULT_RECENT_LIMIT = int(os.environ.get("WATTATTACK_RECENT_LIMIT", "5"))
 DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
 CLIENTS_PAGE_SIZE = int(os.environ.get("CLIENTS_PAGE_SIZE", "6"))
 DEFAULT_CLIENT_FTP = int(os.environ.get("WATTATTACK_DEFAULT_FTP", "150"))
@@ -92,58 +98,23 @@ UPLOAD_COMMAND_TYPES = {
 WORKOUT_UPLOAD_COMMAND = "/uploadworkout"
 
 
-@dataclass(frozen=True)
-class AccountConfig:
-    identifier: str
-    name: str
-    email: str
-    password: str
-    base_url: str = DEFAULT_BASE_URL
-
-
 ACCOUNT_REGISTRY: Dict[str, AccountConfig] = {}
 
 
 def normalize_account_id(value: str) -> str:
-    return value.replace("_", "").lower()
+    return normalize_account_id_value(value)
 
 
 def resolve_account_identifier(raw_id: str) -> Optional[str]:
-    if raw_id in ACCOUNT_REGISTRY:
-        return raw_id
-    target = normalize_account_id(raw_id)
-    for account_id in ACCOUNT_REGISTRY:
-        if normalize_account_id(account_id) == target:
-            return account_id
-    return None
+    return resolve_account_identifier_value(ACCOUNT_REGISTRY, raw_id)
 
 
 def format_account_list() -> str:
-    lines: List[str] = []
-    for key in sorted(ACCOUNT_REGISTRY):
-        alias = normalize_account_id(key)
-        account_name = ACCOUNT_REGISTRY[key].name
-        lines.append(f"{alias} ({key}) — {account_name}")
-    return "\n".join(lines)
+    return format_account_list_from_registry(ACCOUNT_REGISTRY)
 
 
 def resolve_account_tokens(tokens: Iterable[str]) -> Tuple[List[str], List[str]]:
-    tokens = list(tokens)
-    if not tokens:
-        return [], []
-    lowered = [token.lower() for token in tokens]
-    if len(tokens) == 1 and lowered[0] in {"all", "*", "any"}:
-        return list(ACCOUNT_REGISTRY.keys()), []
-
-    resolved: List[str] = []
-    missing: List[str] = []
-    for token in tokens:
-        account_id = resolve_account_identifier(token)
-        if account_id is None:
-            missing.append(token)
-        elif account_id not in resolved:
-            resolved.append(account_id)
-    return resolved, missing
+    return resolve_account_tokens_value(ACCOUNT_REGISTRY, tokens)
 
 
 def format_admin_list(admins: List[Dict[str, Any]]) -> str:
@@ -240,6 +211,26 @@ def _parse_cassette_values(value: Any) -> set[int]:
         except ValueError:
             continue
     return cassette_values
+
+
+def _format_number(value: Optional[float]) -> str:
+    if value is None:
+        return ""
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def _format_metric_range(label: str, minimum: Optional[float], maximum: Optional[float], unit: str) -> str:
+    if minimum is None and maximum is None:
+        return f"{label}: нет данных."
+    if minimum is None:
+        return f"{label}: до {_format_number(maximum)} {unit}"
+    if maximum is None:
+        return f"{label}: от {_format_number(minimum)} {unit}"
+    if abs(maximum - minimum) < 1e-6:
+        return f"{label}: {_format_number(maximum)} {unit}"
+    return f"{label}: {_format_number(minimum)}–{_format_number(maximum)} {unit}"
 
 
 def _load_trainer_inventory() -> List[Dict[str, Any]]:
@@ -1012,40 +1003,14 @@ async def upload_workout_to_account(
     return True, message
 
 
-def load_accounts(config_path: Path) -> Dict[str, AccountConfig]:
-    if not config_path.exists():
-        raise FileNotFoundError(
-            f"Accounts config file not found: {config_path}. "
-            "Create it from the sample template."
-        )
-
-    raw_data = json.loads(config_path.read_text(encoding="utf-8"))
-    accounts: Dict[str, AccountConfig] = {}
-
-    for entry in raw_data:
-        identifier = entry["id"]
-        accounts[identifier] = AccountConfig(
-            identifier=identifier,
-            name=entry.get("name", identifier),
-            email=entry["email"],
-            password=entry["password"],
-            base_url=entry.get("base_url", DEFAULT_BASE_URL),
-        )
-
-    if not accounts:
-        raise ValueError("Accounts list is empty")
-
-    return accounts
-
-
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
     if not ensure_admin_message(update):
         return
     await update.message.reply_text(
-        "📋 Выберите аккаунт WattAttack:",
-        reply_markup=build_accounts_keyboard(DEFAULT_RECENT_LIMIT),
+        "👋 Этот бот управляет профилями WattAttack и клиентской базой. "
+        "Для скачивания активностей используйте бота krutilkafitbot.",
     )
 
 
@@ -1056,15 +1021,14 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     message = (
         "ℹ️ Использование:\n"
-        "/start — показать список аккаунтов\n"
-        "/recent <число> — предложить последние N активностей выбранного аккаунта\n"
-        "/latest — скачать последнюю активность по каждому аккаунту\n"
+        "/start — краткое описание возможностей\n"
         "/setclient <аккаунт> — применить данные клиента из базы\n"
         "/account <аккаунт> — показать текущие данные аккаунта\n"
         "/combinate — подобрать велосипеды и станки; фамилии пришлите отдельным сообщением\n"
         "/bikes [поиск] — показать доступные велосипеды\n"
         "/stands [поиск] — показать доступные станки\n"
         "/client <имя/фамилия> — найти клиента по БД\n"
+        "/stats — статистика по клиентской базе\n"
         "/uploadclients [truncate] — загрузить CSV клиентов\n"
         "/uploadbikes [truncate] — загрузить CSV велосипедов\n"
         "/uploadstands [truncate] — загрузить CSV станков\n"
@@ -1072,89 +1036,32 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/admins — показать список администраторов\n"
         "/addadmin <id|@user> — добавить администратора (можно ответом на сообщение)\n"
         "/removeadmin <id|@user> — удалить администратора"
+        "\n\nДля выгрузки активностей и FIT файлов используйте бота krutilkafitbot."
     )
     await update.message.reply_text(message)
 
 
-async def recent_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
     if not ensure_admin_message(update):
         return
-    limit = DEFAULT_RECENT_LIMIT
-    if context.args:
-        try:
-            limit = max(1, int(context.args[0]))
-        except ValueError:
-            await update.message.reply_text("ℹ️ Нужно указать число активностей, например: /recent 5")
-            return
-
-    await update.message.reply_text(
-        "📂 Выберите аккаунт:",
-        reply_markup=build_accounts_keyboard(limit),
-    )
-
-
-async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
+    try:
+        stats = await asyncio.to_thread(get_clients_stats)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load clients stats")
+        await update.message.reply_text(f"❌ Ошибка получения статистики клиентов: {exc}")
         return
 
-    await update.message.reply_text("⏳ Собираю последние активности по аккаунтам...")
-
-    cache = context.user_data.setdefault("account_cache", {})
-    if not isinstance(cache, dict):
-        cache = {}
-        context.user_data["account_cache"] = cache
-
-    for account_id, account in ACCOUNT_REGISTRY.items():
-        try:
-            activities, profile = await fetch_recent_activities(account_id, 1)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Failed to fetch latest activity for %s", account_id)
-            await update.message.reply_text(
-                f"⚠️ {account.name}: ошибка получения данных — {exc}",
-            )
-            continue
-
-        cache[account_id] = {"activities": activities, "profile": profile}
-
-        if not activities:
-            await update.message.reply_text(f"ℹ️ {account.name}: активностей пока нет.")
-            continue
-
-        activity = activities[0]
-        caption = format_activity_meta(activity, account.name, profile)
-        fit_id = activity.get("fitFileId")
-        if fit_id:
-            try:
-                temp_path = await download_fit_tempfile(account_id, str(fit_id))
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.exception("Fit download failed for %s", account_id)
-                await update.message.reply_text(
-                    f"⚠️ {account.name}: не удалось скачать FIT — {exc}",
-                )
-                continue
-
-            filename = f"activity_{activity.get('id')}.fit"
-            with temp_path.open("rb") as file_handle:
-                await update.message.reply_document(
-                    file_handle,
-                    filename=filename,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                )
-            temp_path.unlink(missing_ok=True)
-            try:
-                temp_path.parent.rmdir()
-            except OSError:
-                LOGGER.debug("Temp directory not removed: %s", temp_path.parent)
-        else:
-            await update.message.reply_text(
-                f"ℹ️ {account.name}: FIT недоступен\n{caption}",
-                parse_mode=ParseMode.HTML,
-            )
+    stats = stats or {}
+    total = int(stats.get("total") or 0)
+    lines = [
+        "📊 Статистика клиентов",
+        f"👥 Всего: {total}",
+        _format_metric_range("📏 Рост", stats.get("min_height"), stats.get("max_height"), "см"),
+        _format_metric_range("⚡ FTP", stats.get("min_ftp"), stats.get("max_ftp"), "Вт"),
+    ]
+    await update.message.reply_text("\n".join(lines))
 
 
 async def admins_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1774,20 +1681,6 @@ async def stands_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
-def build_accounts_keyboard(limit: int) -> InlineKeyboardMarkup:
-    buttons: List[List[InlineKeyboardButton]] = []
-    for account_id, account in ACCOUNT_REGISTRY.items():
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text=account.name,
-                    callback_data=f"acct|{account_id}|{limit}",
-                )
-            ]
-        )
-    return InlineKeyboardMarkup(buttons)
-
-
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -1801,18 +1694,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     parts = query.data.split("|")
     action = parts[0]
 
-    if action == "acct" and len(parts) >= 3:
-        account_id = parts[1]
-        try:
-            limit = max(1, int(parts[2]))
-        except ValueError:
-            limit = DEFAULT_RECENT_LIMIT
-        await send_recent_activities(query, context, account_id, limit)
-    elif action == "fit" and len(parts) >= 3:
-        account_id = parts[1]
-        activity_id = parts[2]
-        await send_fit_file(query, context, account_id, activity_id)
-    elif action == "setclient" and len(parts) >= 3:
+    if action == "setclient" and len(parts) >= 3:
         account_id = parts[1]
         try:
             client_id = int(parts[2])
@@ -2015,139 +1897,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     else:
         await query.edit_message_text("❓ Неизвестное действие.")
-
-
-async def send_recent_activities(query, context, account_id: str, limit: int) -> None:
-    if account_id not in ACCOUNT_REGISTRY:
-        await query.edit_message_text("⚠️ Аккаунт не найден.")
-        return
-
-    account = ACCOUNT_REGISTRY[account_id]
-
-    try:
-        activities, profile = await fetch_recent_activities(account_id, limit)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to fetch activities")
-        await query.edit_message_text(f"❌ Ошибка: {exc}")
-        return
-
-    cache = context.user_data.setdefault("account_cache", {})
-    if not isinstance(cache, dict):
-        cache = {}
-        context.user_data["account_cache"] = cache
-    cache[account_id] = {"activities": activities, "profile": profile}
-
-    text_lines = [f"<b>📈 {account.name}</b>"]
-    text_lines.append(f"🏁 Последние {min(limit, len(activities))} активностей:")
-    keyboard_rows: List[List[InlineKeyboardButton]] = []
-
-    for idx, activity in enumerate(activities[:limit], start=1):
-        description = format_activity_line(idx, activity)
-        text_lines.append(description)
-
-        fit_id = activity.get("fitFileId")
-        if fit_id:
-            button = InlineKeyboardButton(
-                text=f"Скачать #{idx}",
-                callback_data=f"fit|{account_id}|{activity.get('id')}",
-            )
-            keyboard_rows.append([button])
-
-    if not keyboard_rows:
-        keyboard_rows.append([InlineKeyboardButton(text="🚫 FIT недоступен", callback_data="noop")])
-
-    await query.edit_message_text(
-        "\n".join(text_lines),
-        reply_markup=InlineKeyboardMarkup(keyboard_rows),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
-
-
-def format_activity_line(index: int, activity: Dict[str, Any]) -> str:
-    date_str = format_start_time(activity)
-    distance = activity.get("distance", 0) or 0
-    try:
-        distance_km = float(distance) / 1000
-    except (TypeError, ValueError):
-        distance_km = 0.0
-    duration = format_duration(activity.get("elapsedTime"))
-    name = activity.get("mapNameRu") or activity.get("name") or "Без названия"
-
-    return f"<b>{index}.</b> 🚴‍♂️ {name} — {distance_km:.1f} км, {duration}, {date_str}"
-
-
-def format_duration(seconds: Optional[int]) -> str:
-    if not seconds:
-        return "?"
-    seconds = int(seconds)
-    hours, remainder = divmod(seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours:
-        return f"{hours}ч {minutes:02d}м"
-    return f"{minutes}м {seconds:02d}с"
-
-
-def format_start_time(activity: Dict[str, Any]) -> str:
-    start_time = activity.get("startTime")
-    if not start_time:
-        return "?"
-    try:
-        dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
-        dt = dt + timedelta(hours=3)
-        return dt.strftime("%Y-%m-%d %H:%M")
-    except ValueError:
-        return str(start_time)
-
-
-def format_activity_meta(
-    activity: Dict[str, Any],
-    account_name: Optional[str] = None,
-    profile: Optional[Dict[str, Any]] = None,
-) -> str:
-    name = activity.get("mapNameRu") or activity.get("name") or "Без названия"
-    date_str = format_start_time(activity)
-    distance = activity.get("distance", 0) or 0
-    try:
-        distance_km = float(distance) / 1000
-    except (TypeError, ValueError):
-        distance_km = 0.0
-    duration = format_duration(activity.get("elapsedTime"))
-    elevation = activity.get("totalElevationGain")
-    power_avg = activity.get("averageWatts")
-    cadence_avg = activity.get("averageCadence")
-    heartrate_avg = activity.get("averageHeartrate")
-
-    lines = []
-    if account_name:
-        lines.append(f"<b>📈 {account_name}</b>")
-    lines.append(f"<b>🚴‍♂️ {name}</b>")
-    athlete_name = extract_athlete_name(profile) if profile else ""
-    if athlete_name:
-        lines.append(f"👤 Атлет: {athlete_name}")
-    gender = extract_athlete_field(profile, "gender") if profile else ""
-    if gender:
-        gender_symbol = "🚹" if str(gender).upper().startswith("M") else "🚺"
-        lines.append(f"{gender_symbol} Пол: {'М' if str(gender).upper().startswith('M') else 'Ж'}")
-    weight = extract_athlete_field(profile, "weight") if profile else ""
-    if weight:
-        lines.append(f"⚖️ Вес: {weight} кг")
-    ftp_value = extract_athlete_field(profile, "ftp") if profile else ""
-    if ftp_value:
-        lines.append(f"⚡ FTP: {ftp_value} Вт")
-    lines.append(f"📅 Дата: {date_str}")
-    lines.append(f"🛣️ Дистанция: {distance_km:.1f} км")
-    lines.append(f"⏱️ Время: {duration}")
-    if elevation is not None:
-        lines.append(f"⛰️ Набор высоты: {elevation} м")
-    if power_avg:
-        lines.append(f"⚡ Средняя мощность: {power_avg} Вт")
-    if cadence_avg:
-        lines.append(f"🔄 Средний каденс: {cadence_avg} об/мин")
-    if heartrate_avg:
-        lines.append(f"❤️ Средний пульс: {heartrate_avg} уд/мин")
-
-    return "\n".join(lines)
 
 
 def extract_athlete_name(profile: Dict[str, Any]) -> str:
@@ -3250,46 +2999,6 @@ def format_account_details(
     return "\n".join(lines)
 
 
-async def fetch_recent_activities(
-    account_id: str, limit: int
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    account = ACCOUNT_REGISTRY[account_id]
-
-    def worker() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        client = WattAttackClient(account.base_url)
-        client.login(account.email, account.password, timeout=DEFAULT_TIMEOUT)
-        payload = client.fetch_activities(timeout=DEFAULT_TIMEOUT)
-        activities = payload.get("activities", [])
-        if not isinstance(activities, list):
-            activities = []
-
-        profile: Dict[str, Any] = {}
-        try:
-            profile = client.fetch_profile(timeout=DEFAULT_TIMEOUT)
-            if not isinstance(profile, dict):
-                profile = {}
-            athlete_name = extract_athlete_name(profile)
-            LOGGER.info(
-                "Fetched profile for %s: %s (keys=%s)",
-                account_id,
-                athlete_name or "<unknown>",
-                list(profile.keys()),
-            )
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Failed to fetch profile for %s: %s", account_id, exc)
-
-        try:
-            auth_info = client.auth_check(timeout=DEFAULT_TIMEOUT)
-            if isinstance(auth_info, dict) and isinstance(auth_info.get("user"), dict):
-                profile.setdefault("user", auth_info["user"])
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Failed to fetch auth info for %s: %s", account_id, exc)
-
-        return activities[:limit], profile
-
-    return await asyncio.to_thread(worker)
-
-
 async def show_client_page(
     account_id: str,
     page: int,
@@ -3692,94 +3401,6 @@ async def process_client_search(message: Message, term: str) -> None:
     )
 
 
-async def send_fit_file(query, context, account_id: str, activity_id: str) -> None:
-    cache = context.user_data.setdefault("account_cache", {})
-    if not isinstance(cache, dict):
-        cache = {}
-        context.user_data["account_cache"] = cache
-    account_cache: Dict[str, Any] = cache.get(account_id, {}) if isinstance(cache, dict) else {}
-    activities: List[Dict[str, Any]] = account_cache.get("activities", []) if isinstance(account_cache, dict) else []
-    profile: Optional[Dict[str, Any]] = account_cache.get("profile") if isinstance(account_cache, dict) else None
-    if profile is not None and not isinstance(profile, dict):
-        profile = None
-    account = ACCOUNT_REGISTRY.get(account_id)
-
-    activity = None
-    for item in activities:
-        if str(item.get("id")) == str(activity_id):
-            activity = item
-            break
-
-    if activity is None:
-        try:
-            activities, profile = await fetch_recent_activities(account_id, DEFAULT_RECENT_LIMIT)
-        except Exception as exc:  # noqa: BLE001
-            await query.edit_message_text(f"❌ Ошибка обновления списка: {exc}")
-            return
-        cache[account_id] = {"activities": activities, "profile": profile}
-        for item in activities:
-            if str(item.get("id")) == str(activity_id):
-                activity = item
-                break
-
-    if activity is None:
-        await query.edit_message_text("🔍 Активность не найдена.")
-        return
-
-    fit_id = activity.get("fitFileId")
-    if not fit_id:
-        caption = format_activity_meta(
-            activity,
-            account.name if account else None,
-            profile,
-        )
-        await query.edit_message_text(
-            "ℹ️ Для этой активности нет FIT файла.\n\n" + caption,
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
-    try:
-        temp_path = await download_fit_tempfile(account_id, str(fit_id))
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Fit download failed")
-        await query.edit_message_text(f"❌ Ошибка скачивания: {exc}")
-        return
-
-    filename = f"activity_{activity_id}.fit"
-    caption = format_activity_meta(
-        activity,
-        account.name if account else None,
-        profile,
-    )
-    with temp_path.open("rb") as file_handle:
-        await query.message.reply_document(
-            file_handle,
-            filename=filename,
-            caption=caption,
-            parse_mode=ParseMode.HTML,
-        )
-    temp_path.unlink(missing_ok=True)
-    try:
-        temp_path.parent.rmdir()
-    except OSError:
-        LOGGER.debug("Temp directory not removed: %s", temp_path.parent)
-
-
-async def download_fit_tempfile(account_id: str, fit_id: str) -> Path:
-    account = ACCOUNT_REGISTRY[account_id]
-    temp_dir = Path(tempfile.mkdtemp(prefix="wattattack_"))
-    temp_path = temp_dir / f"{fit_id}.fit"
-
-    def worker() -> None:
-        client = WattAttackClient(account.base_url)
-        client.login(account.email, account.password, timeout=DEFAULT_TIMEOUT)
-        client.download_fit_file(fit_id, temp_path, timeout=DEFAULT_TIMEOUT)
-
-    await asyncio.to_thread(worker)
-    return temp_path
-
-
 async def noop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
@@ -3798,11 +3419,10 @@ def build_application(token: str) -> Application:
 
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("help", help_handler))
-    application.add_handler(CommandHandler("recent", recent_handler))
-    application.add_handler(CommandHandler("latest", latest_handler))
     application.add_handler(CommandHandler("account", account_handler))
     application.add_handler(CommandHandler("combinate", combinate_handler))
     application.add_handler(CommandHandler("client", client_handler))
+    application.add_handler(CommandHandler("stats", stats_handler))
     application.add_handler(CommandHandler("bikes", bikes_handler))
     application.add_handler(CommandHandler("stands", stands_handler))
     application.add_handler(CommandHandler("setclient", setclient_handler))

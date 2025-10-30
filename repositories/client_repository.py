@@ -42,6 +42,40 @@ def count_clients() -> int:
     return int(row.get("cnt", 0)) if row else 0
 
 
+def get_clients_stats() -> Dict[str, Optional[float]]:
+    query = """
+        SELECT
+            COUNT(*) AS total,
+            MIN(height) AS min_height,
+            MAX(height) AS max_height,
+            MIN(ftp) AS min_ftp,
+            MAX(ftp) AS max_ftp
+        FROM clients
+    """
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(query)
+        row = cur.fetchone() or {}
+
+    def _to_float(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    total_value = row.get("total")
+    total = int(total_value) if total_value is not None else 0
+
+    return {
+        "total": total,
+        "min_height": _to_float(row.get("min_height")),
+        "max_height": _to_float(row.get("max_height")),
+        "min_ftp": _to_float(row.get("min_ftp")),
+        "max_ftp": _to_float(row.get("max_ftp")),
+    }
+
+
 def search_clients(term: str, limit: int = 20) -> List[Dict]:
     query = (
         "SELECT id, first_name, last_name, full_name, gender, weight, height, ftp, pedals, goal, saddle_height, favorite_bike, submitted_at "

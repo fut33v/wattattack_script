@@ -23,6 +23,16 @@ services:
       - db
     restart: unless-stopped
 
+  krutilkafitbot:
+    build: .
+    command: ["python", "-m", "krutilkafitbot"]
+    env_file: .env
+    volumes:
+      - ./accounts.json:/app/accounts.json:ro
+    depends_on:
+      - db
+    restart: unless-stopped
+
   krutilkavnbot:
     build: .
     command: ["python", "-m", "krutilkavnbot.main"]

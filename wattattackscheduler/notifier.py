@@ -22,7 +22,8 @@ from repositories.admin_repository import (
 
 LOGGER = logging.getLogger(__name__)
 
-BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
+BOT_TOKEN_ENV = "KRUTILKAFIT_BOT_TOKEN"
+BOT_TOKEN_FALLBACK_ENV = "TELEGRAM_BOT_TOKEN"
 ACCOUNTS_ENV = "WATTATTACK_ACCOUNTS_FILE"
 STATE_ENV = "WATTATTACK_STATE_FILE"
 DEFAULT_ACCOUNTS_PATH = Path("accounts.json")
@@ -56,7 +57,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--token",
-        default=os.environ.get(BOT_TOKEN_ENV, ""),
+        default=os.environ.get(BOT_TOKEN_ENV)
+        or os.environ.get(BOT_TOKEN_FALLBACK_ENV, ""),
         help="Telegram bot token. Falls back to TELEGRAM_BOT_TOKEN env variable",
     )
     parser.add_argument(
@@ -379,7 +381,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
 
     if not args.token:
-        LOGGER.error("Telegram bot token not provided (set TELEGRAM_BOT_TOKEN or --token)")
+        LOGGER.error(
+            "Telegram bot token not provided (set KRUTILKAFIT_BOT_TOKEN or --token)",
+        )
         return 2
 
     ensure_admin_table()
