@@ -1550,8 +1550,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"📄 Пришлите файл тренировки ZWO для загрузки в {label}."
         )
     elif action == "account_show" and len(parts) >= 2:
-        account_id = parts[1]
-        await show_account_via_callback(query, account_id)
+        target = parts[1]
+        if target.upper() == "ALL":
+            await show_all_accounts_via_callback(query)
+        else:
+            await show_account_via_callback(query, target)
     elif action == "client_info" and len(parts) >= 2:
         try:
             client_id = int(parts[1])
@@ -2899,10 +2902,6 @@ def format_account_details(
         if name:
             lines.append(f"🧑 Имя: {name}")
 
-    email = auth_user.get("email") if auth_user else None
-    if email:
-        lines.append(f"✉️ Email: {email}")
-
     gender = extract_athlete_field(profile, "gender")
     if gender:
         gender_symbol = "🚹" if gender.upper().startswith("M") else "🚺"
@@ -2928,10 +2927,6 @@ def format_account_details(
             lines.append(f"⚡ FTP: {int(float(ftp))} Вт")
         except (TypeError, ValueError):
             lines.append(f"⚡ FTP: {ftp} Вт")
-
-    birth_date = extract_athlete_field(profile, "birthDate")
-    if birth_date:
-        lines.append(f"🎂 Дата рождения: {birth_date}")
 
     return "\n".join(lines)
 
@@ -3087,6 +3082,10 @@ async def show_account_selection(
 
         keyboard_rows.append([InlineKeyboardButton(text=label, callback_data=callback)])
 
+    if kind == "account":
+        keyboard_rows.append(
+            [InlineKeyboardButton(text="Все аккаунты", callback_data="account_show|ALL")]
+        )
     if kind == "workout":
         keyboard_rows.append(
             [InlineKeyboardButton(text="Все аккаунты", callback_data="workout_select|ALL")]
@@ -3162,6 +3161,35 @@ async def show_account_via_callback(query, account_id: str) -> None:
                     )
                 ]
             ]
+        ),
+    )
+
+
+async def show_all_accounts_via_callback(query) -> None:
+    if not ACCOUNT_REGISTRY:
+        await query.edit_message_text("⚠️ Аккаунты не настроены.")
+        return
+
+    summaries: List[str] = []
+    for account_id in sorted(ACCOUNT_REGISTRY):
+        account = ACCOUNT_REGISTRY[account_id]
+        try:
+            profile, auth_user = await asyncio.to_thread(fetch_account_information, account_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to fetch account info for %s", account_id)
+            summaries.append(
+                f"<b>👤 {account.name}</b> ({account_id})\n"
+                f"⚠️ Ошибка получения данных: {html.escape(str(exc))}"
+            )
+            continue
+        summaries.append(format_account_details(account_id, profile, auth_user))
+
+    text = "\n\n".join(summaries) if summaries else "⚠️ Аккаунты не настроены."
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(text="← Выбор аккаунта", callback_data="select_accounts|account")]]
         ),
     )
 
