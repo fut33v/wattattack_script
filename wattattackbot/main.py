@@ -1343,6 +1343,39 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
             return
         await show_client_info(query, context, client_id)
+    elif action == "client_assign_prepare" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+            return
+        try:
+            record = await asyncio.to_thread(get_client, client_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to load client %s", client_id)
+            await query.edit_message_text(f"❌ Ошибка получения данных клиента: {exc}")
+            return
+
+        if not record:
+            await query.edit_message_text("🔍 Клиент не найден.")
+            return
+
+        client_name = html.escape(client_display_name(record))
+        account_list = format_account_list()
+        if account_list:
+            body = html.escape(account_list)
+        else:
+            body = "Аккаунты не настроены."
+        text = (
+            f"👤 <b>{client_name}</b>\n"
+            "Выберите аккаунт WattAttack для применения данных клиента:\n"
+            f"{body}"
+        )
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_client_assign_keyboard(client_id),
+        )
     elif action == "client_edit" and len(parts) >= 3:
         field = parts[1]
         try:
@@ -1856,6 +1889,12 @@ def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
+                    text="👥 Посадить на аккаунт",
+                    callback_data=f"client_assign_prepare|{client_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="⚡ Изменить FTP",
                     callback_data=f"client_edit|ftp|{client_id}",
                 ),
@@ -1883,6 +1922,31 @@ def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")],
         ]
     )
+
+
+def build_client_assign_keyboard(client_id: int) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    for account_id in sorted(ACCOUNT_REGISTRY):
+        account = ACCOUNT_REGISTRY[account_id]
+        alias = normalize_account_id(account_id)
+        label = f"{alias} — {account.name}"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"setclient|{account_id}|{client_id}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="↩️ Назад",
+                callback_data=f"client_info|{client_id}",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
 
 
 def build_client_edit_markup(client_id: int) -> InlineKeyboardMarkup:
