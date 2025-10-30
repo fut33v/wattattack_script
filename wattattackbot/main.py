@@ -62,6 +62,12 @@ from scripts.load_clients import load_clients_from_csv_bytes
 from scripts.load_bikes import load_bikes_from_csv_bytes
 from scripts.load_trainers import load_trainers_from_csv_bytes
 from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
+from wattattack_workouts import (
+    build_workout_payload,
+    calculate_workout_metrics,
+    parse_zwo_workout,
+    zwo_to_chart_data,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,11 +82,13 @@ DEFAULT_CLIENT_FTP = int(os.environ.get("WATTATTACK_DEFAULT_FTP", "150"))
 PENDING_UPLOAD_KEY = "pending_inventory_upload"
 PENDING_TRAINER_EDIT_KEY = "pending_trainer_edit"
 PENDING_BIKE_EDIT_KEY = "pending_bike_edit"
+PENDING_WORKOUT_UPLOAD_KEY = "pending_workout_upload"
 UPLOAD_COMMAND_TYPES = {
     "/uploadclients": "clients",
     "/uploadbikes": "bikes",
     "/uploadstands": "stands",
 }
+WORKOUT_UPLOAD_COMMAND = "/uploadworkout"
 
 
 @dataclass(frozen=True)
@@ -118,6 +126,25 @@ def format_account_list() -> str:
     return "\n".join(lines)
 
 
+def resolve_account_tokens(tokens: Iterable[str]) -> Tuple[List[str], List[str]]:
+    tokens = list(tokens)
+    if not tokens:
+        return [], []
+    lowered = [token.lower() for token in tokens]
+    if len(tokens) == 1 and lowered[0] in {"all", "*", "any"}:
+        return list(ACCOUNT_REGISTRY.keys()), []
+
+    resolved: List[str] = []
+    missing: List[str] = []
+    for token in tokens:
+        account_id = resolve_account_identifier(token)
+        if account_id is None:
+            missing.append(token)
+        elif account_id not in resolved:
+            resolved.append(account_id)
+    return resolved, missing
+
+
 def format_admin_list(admins: List[Dict[str, Any]]) -> str:
     if not admins:
         return "Администраторы не настроены."
@@ -149,6 +176,18 @@ def _pop_pending_upload(user_data: Dict) -> Optional[Dict[str, Any]]:
     value = user_data.get(PENDING_UPLOAD_KEY)
     if value is not None:
         user_data.pop(PENDING_UPLOAD_KEY, None)
+    return value
+
+
+def _set_pending_workout_upload(user_data: Dict[str, Any], account_ids: List[str]) -> None:
+    unique_ids = list(dict.fromkeys(account_ids))
+    user_data[PENDING_WORKOUT_UPLOAD_KEY] = {"account_ids": unique_ids}
+
+
+def _pop_pending_workout_upload(user_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    value = user_data.get(PENDING_WORKOUT_UPLOAD_KEY)
+    if value is not None:
+        user_data.pop(PENDING_WORKOUT_UPLOAD_KEY, None)
     return value
 
 
@@ -798,6 +837,116 @@ async def process_trainers_document(
     )
 
 
+async def process_workout_document(
+    document,
+    message: Message,
+    account_ids: List[str],
+) -> None:
+    try:
+        file = await document.get_file()
+        data = await file.download_as_bytearray()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to download workout file")
+        await message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
+        return
+
+    raw_bytes = bytes(data)
+    text: Optional[str] = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1251"):
+        try:
+            text = raw_bytes.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw_bytes.decode("utf-8", errors="ignore")
+
+    try:
+        workout = await asyncio.to_thread(parse_zwo_workout, text)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to parse ZWO workout")
+        await message.reply_text(f"❌ Ошибка обработки ZWO: {exc}")
+        return
+
+    try:
+        chart_data = await asyncio.to_thread(zwo_to_chart_data, workout)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to build chart data")
+        await message.reply_text(f"❌ Ошибка генерации графика тренировки: {exc}")
+        return
+
+    if not account_ids:
+        await message.reply_text("ℹ️ Не указан ни один аккаунт для загрузки.")
+        return
+
+    results: List[Tuple[str, bool, str]] = []
+    for account_id in account_ids:
+        if account_id not in ACCOUNT_REGISTRY:
+            results.append((account_id, False, "Аккаунт не найден"))
+            continue
+        success, info = await upload_workout_to_account(account_id, workout, chart_data)
+        results.append((account_id, success, info))
+
+    workout_name = workout.get("name") or (document.file_name or "тренировка")
+    header = f"📤 Загрузка тренировки «{workout_name}»:"
+    lines = [header]
+    for account_id, success, info in results:
+        account = ACCOUNT_REGISTRY.get(account_id)
+        account_label = account.name if account else account_id
+        prefix = "✅" if success else "❌"
+        lines.append(f"{prefix} {account_label}: {info}")
+
+    await message.reply_text("\n".join(lines))
+
+
+async def upload_workout_to_account(
+    account_id: str,
+    workout: Dict[str, Any],
+    chart_data: List[Dict[str, Any]],
+) -> Tuple[bool, str]:
+    def worker() -> Dict[str, Any]:
+        account = ACCOUNT_REGISTRY[account_id]
+        client = WattAttackClient(account.base_url)
+        client.login(account.email, account.password, timeout=DEFAULT_TIMEOUT)
+
+        ftp: Optional[float] = None
+        try:
+            profile = client.fetch_profile(timeout=DEFAULT_TIMEOUT)
+            ftp_raw = extract_athlete_field(profile, "ftp")
+            if ftp_raw not in (None, "", "—"):
+                ok, ftp_value = _parse_optional_float(str(ftp_raw))
+                if ok and ftp_value is not None and ftp_value > 0:
+                    ftp = ftp_value
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to fetch FTP for %s: %s", account_id, exc)
+
+        metrics = calculate_workout_metrics(workout, ftp)
+        payload = build_workout_payload(workout, chart_data, metrics)
+        return client.upload_workout(payload, timeout=DEFAULT_TIMEOUT)
+
+    try:
+        response = await asyncio.to_thread(worker)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to upload workout for %s", account_id)
+        return False, str(exc)
+
+    message = ""
+    workout_info: Dict[str, Any] = {}
+    if isinstance(response, dict):
+        message = response.get("message") or ""
+        workout_obj = response.get("workout")
+        if isinstance(workout_obj, dict):
+            workout_info = workout_obj
+
+    if not message:
+        message = "Загружено"
+    workout_id = workout_info.get("id") if isinstance(workout_info, dict) else None
+    if workout_id:
+        message = f"{message} (ID {workout_id})"
+
+    return True, message
+
+
 def load_accounts(config_path: Path) -> Dict[str, AccountConfig]:
     if not config_path.exists():
         raise FileNotFoundError(
@@ -853,6 +1002,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/uploadclients [truncate] — загрузить CSV клиентов\n"
         "/uploadbikes [truncate] — загрузить CSV велосипедов\n"
         "/uploadstands [truncate] — загрузить CSV станков\n"
+        "/uploadworkout [all|аккаунт] — загрузить тренировку ZWO в библиотеку\n"
         "/admins — показать список администраторов\n"
         "/addadmin <id|@user> — добавить администратора (можно ответом на сообщение)\n"
         "/removeadmin <id|@user> — удалить администратора"
@@ -1134,6 +1284,53 @@ async def uploadstands_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 
+async def uploadworkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    tokens = context.args or []
+    account_ids, missing = resolve_account_tokens(tokens)
+    if missing:
+        await update.message.reply_text(
+            "⚠️ Не удалось распознать аккаунты: {0}".format(", ".join(missing))
+        )
+        return
+
+    reply_document = None
+    if update.message.reply_to_message and update.message.reply_to_message.document:
+        reply_document = update.message.reply_to_message.document
+
+    if reply_document and (reply_document.file_name or "").lower().endswith(".zwo"):
+        if not account_ids:
+            await update.message.reply_text(
+                "ℹ️ Укажите аккаунт или all, например: /uploadworkout all (в ответ на файл)."
+            )
+            return
+        _pop_pending_workout_upload(context.user_data)
+        await process_workout_document(reply_document, update.message, account_ids)
+        return
+
+    if account_ids:
+        _pop_pending_workout_upload(context.user_data)
+        _set_pending_workout_upload(context.user_data, account_ids)
+        if len(account_ids) == len(ACCOUNT_REGISTRY):
+            target = "все аккаунты"
+        elif len(account_ids) == 1:
+            target = ACCOUNT_REGISTRY[account_ids[0]].name
+        else:
+            target = ", ".join(
+                ACCOUNT_REGISTRY[acc].name for acc in account_ids if acc in ACCOUNT_REGISTRY
+            )
+        await update.message.reply_text(
+            f"📄 Пришлите файл тренировки ZWO для загрузки в {target}."
+        )
+        return
+
+    await show_account_selection(message=update.message, kind="workout")
+
+
 async def setclient_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
@@ -1333,6 +1530,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif action == "select_accounts" and len(parts) >= 2:
         kind = parts[1]
         await show_account_selection(query=query, kind=kind)
+    elif action == "workout_select" and len(parts) >= 2:
+        target = parts[1]
+        if target.upper() == "ALL":
+            account_ids = list(ACCOUNT_REGISTRY.keys())
+            if not account_ids:
+                await query.edit_message_text("⚠️ Аккаунты не настроены.")
+                return
+            label = "все аккаунты"
+        else:
+            account_id = resolve_account_identifier(target)
+            if account_id is None:
+                await query.edit_message_text("⚠️ Аккаунт не найден.")
+                return
+            account_ids = [account_id]
+            label = ACCOUNT_REGISTRY[account_id].name
+        _set_pending_workout_upload(context.user_data, account_ids)
+        await query.edit_message_text(
+            f"📄 Пришлите файл тренировки ZWO для загрузки в {label}."
+        )
     elif action == "account_show" and len(parts) >= 2:
         account_id = parts[1]
         await show_account_via_callback(query, account_id)
@@ -2864,12 +3080,19 @@ async def show_account_selection(
         label = f"{alias} — {ACCOUNT_REGISTRY[account_id].name}"
         if kind == "setclient":
             callback = f"setclient_page|{account_id}|0"
+        elif kind == "workout":
+            callback = f"workout_select|{account_id}"
         else:
             callback = f"account_show|{account_id}"
 
         keyboard_rows.append([InlineKeyboardButton(text=label, callback_data=callback)])
 
-    if kind == "setclient":
+    if kind == "workout":
+        keyboard_rows.append(
+            [InlineKeyboardButton(text="Все аккаунты", callback_data="workout_select|ALL")]
+        )
+        text = "📤 Выберите аккаунт для загрузки тренировки:"
+    elif kind == "setclient":
         text = "👤 Выберите аккаунт для применения данных клиента:"
     else:
         text = "📊 Выберите аккаунт для просмотра данных:"
@@ -2978,6 +3201,49 @@ async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     await process_client_search(update.message, update.message.text)
 
 
+async def workout_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.document:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    document = update.message.document
+    file_name = (document.file_name or "").lower()
+    if not file_name.endswith(".zwo"):
+        return
+
+    caption = update.message.caption or ""
+    command = None
+    args: List[str] = []
+    stripped = caption.strip()
+    if stripped.startswith("/"):
+        parts = stripped.split()
+        command = parts[0].lower()
+        args = parts[1:]
+
+    account_ids: List[str] = []
+    if command == WORKOUT_UPLOAD_COMMAND:
+        account_ids, missing = resolve_account_tokens(args)
+        if missing:
+            await update.message.reply_text(
+                "⚠️ Не удалось распознать аккаунты: {0}".format(", ".join(missing))
+            )
+            return
+        _pop_pending_workout_upload(context.user_data)
+    else:
+        pending = _pop_pending_workout_upload(context.user_data)
+        if pending:
+            account_ids = list(pending.get("account_ids") or [])
+
+    if not account_ids:
+        await update.message.reply_text(
+            "ℹ️ Сначала выберите аккаунт командой /uploadworkout."
+        )
+        return
+
+    await process_workout_document(document, update.message, account_ids)
+
+
 async def document_upload_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.document:
         return
@@ -3016,8 +3282,8 @@ async def document_upload_handler(update: Update, context: ContextTypes.DEFAULT_
         await process_trainers_document(document, update.message, truncate)
     else:
         await update.message.reply_text(
-            "ℹ️ Чтобы импортировать данные, используйте /uploadclients, /uploadbikes, /uploadstands "
-            "или добавьте команду в подпись к файлу."
+            "ℹ️ Чтобы импортировать данные, используйте /uploadclients, /uploadbikes, /uploadstands, "
+            "/uploadworkout или добавьте команду в подпись к файлу."
         )
 
 
@@ -3192,7 +3458,14 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("uploadclients", uploadclients_handler))
     application.add_handler(CommandHandler("uploadbikes", uploadbikes_handler))
     application.add_handler(CommandHandler("uploadstands", uploadstands_handler))
+    application.add_handler(CommandHandler("uploadworkout", uploadworkout_handler))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_search_handler))
+    workout_filter = (
+        filters.Document.FileExtension("zwo") | filters.Document.FileExtension("ZWO")
+    )
+    application.add_handler(
+        MessageHandler(workout_filter, workout_document_handler)
+    )
     csv_filter = (filters.Document.MimeType("text/csv") | filters.Document.FileExtension("csv"))
     application.add_handler(
         MessageHandler(csv_filter, document_upload_handler)

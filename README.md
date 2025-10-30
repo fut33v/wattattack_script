@@ -15,10 +15,12 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
   - `/uploadclients [truncate]` – import clients from CSV (reply or inline); supports truncation.
   - `/uploadbikes [truncate]` – import bicycles from CSV (reply or inline); supports truncation.
   - `/uploadstands [truncate]` – import trainer inventory from CSV (reply or inline); supports truncation.
+  - `/uploadworkout [all|account…]` – upload a ZWO workout file into one or more WattAttack libraries (parsing + metrics).
   - `/admins`, `/addadmin`, `/removeadmin` – manage bot administrators.
   - Inline menus for account/client selection and ad-hoc text client search (admins only).
 - **wattattackscheduler/** – Scheduler loop and notifier CLI that watch WattAttack for new activities and send FIT files with metadata to admins.
-- **wattattack_activities.py** – API wrapper for WattAttack endpoints (`/auth/login`, `/activities`, `/athlete/update`, `/user/update`, `/auth/check`).
+- **wattattack_activities.py** – API wrapper for WattAttack endpoints (`/auth/login`, `/activities`, `/athlete/update`, `/user/update`, `/auth/check`, `/workouts/user-create`).
+- **wattattack_workouts.py** – ZWO workout parser, sanitizer, chart/metrics calculator, and payload builder for library uploads.
 - **scripts/load_clients.py** – CLI loader to import clients from CSV into PostgreSQL (with optional `--truncate`).
 - **scripts/load_bikes.py** – CLI loader for the bicycle inventory CSV (with optional `--truncate`).
 - **scripts/load_trainers.py** – CLI loader for the trainer inventory CSV (with optional `--truncate`).
@@ -35,6 +37,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 ## Features
 - **Admin-only controls**: All commands, callbacks, and text handlers require admin status. Admins are stored centrally in the DB; `/addadmin` and `/removeadmin` manipulate them at runtime. Seed list comes from `TELEGRAM_ADMIN_IDS`.
 - **Client management**: CSV import normalizes name, gender, weight, height, FTP, pedals, goals, etc. `/client` and plain text search locate clients; `/setclient` applies their data to accounts (keeping mandatory fields like `birthDate` and gender). Карточка клиента включает отдельную кнопку для просмотра подобранных велосипедов и станков (учитываются рост, оси и кассеты). `/stands` выводит учёт станков и позволяет редактировать оси/кассеты из бота, `/bikes` показывает парк велосипедов и даёт менять допустимые значения роста. `/account` fetches up-to-date profile info from WattAttack.
+- **Workout uploads**: `/uploadworkout` parses ZWO files server-side, builds chart data and advanced power metrics (IF, NP, TSS, zone breakdown) using the athlete’s FTP when available, and pushes the workout into the selected WattAttack account(s).
 - **Activity notifications**: Notifier sends FIT files and metadata when new workouts appear. Admin list reused from the DB.
 - **Docker-ready**: `docker-compose.yml` provides services for bot (`bot`), scheduler (`scheduler`), and Postgres (`db`, exposed on host port 55432). Volume `postgres_data` persists DB state.
 
@@ -75,6 +78,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
    uploadclients - загрузить CSV клиентов
    uploadbikes - загрузить CSV велосипедов
    uploadstands - загрузить CSV станков
+   uploadworkout - загрузить тренировку ZWO в библиотеку
    admins - показать список администраторов
    addadmin - добавить администратора
    removeadmin - удалить администратора

@@ -190,6 +190,42 @@ class WattAttackClient:
                 if chunk:
                     handle.write(chunk)
 
+    def upload_workout(
+        self,
+        payload: Dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
+        """Upload a parsed workout to the user's library."""
+
+        response = self.session.post(
+            self._api_url("/workouts/user-create"),
+            json=payload,
+            timeout=timeout,
+        )
+
+        if response.status_code == 201:
+            try:
+                return response.json()
+            except ValueError:
+                return {}
+
+        data = self._parse_json(response)
+        message = ""
+        if isinstance(data, dict):
+            message = data.get("message") or ""
+        if not message:
+            message = response.text.strip() or "unexpected response"
+
+        if response.status_code in {400, 401, 500}:
+            raise RuntimeError(
+                f"Failed to upload workout ({response.status_code}): {message}"
+            )
+
+        raise RuntimeError(
+            f"Failed to upload workout ({response.status_code}): {message}"
+        )
+
     @staticmethod
     def _parse_json(response: requests.Response) -> Dict[str, Any]:
         try:
