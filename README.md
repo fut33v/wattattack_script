@@ -1,7 +1,7 @@
 # WattAttack Bot Suite
 
 ## Overview
-This repository contains a Telegram bot and supporting utilities for managing WattAttack athlete accounts. The bot automates tasks such as applying client data (from a PostgreSQL-backed client database) to WattAttack user profiles, downloading FIT activity files for new workouts, and providing account information on demand. Supporting scripts handle CSV imports of client information and direct profile updates via the WattAttack web API.
+This repository contains a Telegram bot and supporting utilities for managing WattAttack athlete accounts, а также веб-приложение «Крутилка» для администраторов. The bot automates tasks such as applying client data (from a PostgreSQL-backed client database) to WattAttack user profiles, downloading FIT activity files for new workouts, and providing account information on demand. Supporting scripts handle CSV imports of client information and direct profile updates via the WattAttack web API.
 
 ## Components
 - **wattattackbot/** – Telegram bot package that interacts with WattAttack accounts:
@@ -29,6 +29,8 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 - **repositories/db_utils.py** – PostgreSQL connection helpers.
 - **scripts/wattattack_profile_set.py** – CLI tool for updating WattAttack profile values (name, weight, FTP, etc.).
 - **krutilkavnbot/** – Telegram бот для клиентов: авторизация по фамилии и привязка Telegram-пользователей к записям клиентов.
+- **webapp/frontend/** – одностраничное приложение «Крутилка» на React + Vite с React Query и современным UI для работы с API.
+- **webapp/** – FastAPI бэкенд (API + Telegram login) и современный React/Vite фронтенд для управления клиентами, велосипедами, тренажерами, связками и администраторами.
 
 ## Features
 - **Admin-only controls**: All commands, callbacks, and text handlers require admin status. Admins are stored centrally in the DB; `/addadmin` and `/removeadmin` manipulate them at runtime. Seed list comes from `TELEGRAM_ADMIN_IDS`.
@@ -37,19 +39,29 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 - **Docker-ready**: `docker-compose.yml` provides services for bot (`bot`), scheduler (`scheduler`), and Postgres (`db`, exposed on host port 55432). Volume `postgres_data` persists DB state.
 
 ## Setup
-1. Install dependencies: `pip install -r requirements.txt` (Python 3.11+).
-2. Copy `.env.example` to `.env` and configure:
+1. Install backend dependencies: `pip install -r requirements.txt` (Python 3.11+).
+2. Install frontend dependencies: `cd webapp/frontend && npm install` (Node.js 18+), затем вернитесь в корень `cd ../..`.
+3. Copy `.env.example` to `.env` and configure:
    - `TELEGRAM_BOT_TOKEN`, optional `TELEGRAM_ADMIN_IDS` seed.
    - `KRUTILKAVN_BOT_TOKEN` for the greeting bot (use `KRUTILKAVN_GREETING` to override the default message).
    - `WATTATTACK_ACCOUNTS_FILE` (JSON with email/password/base_url per account).
    - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`.
    - Optional timeouts/page size (see `.env.example`).
-3. Start services: `docker-compose up -d db bot scheduler krutilkavnbot` (or run components locally via `python -m wattattackbot`, `python -m wattattackscheduler`, `python -m krutilkavnbot.main`).
-4. Import reference data:
+   - `TELEGRAM_LOGIN_BOT_USERNAME` — username логин-бота без `@` (он же используется для виджета авторизации).
+   - `TELEGRAM_LOGIN_BOT_TOKEN` — токен логин-бота (по умолчанию берётся `KRUTILKAVN_BOT_TOKEN`, затем `TELEGRAM_BOT_TOKEN`, если переменная не задана).
+   - `WEBAPP_SECRET_KEY` — случайная строка для подписи cookie-сессий.
+   - `WEBAPP_BASE_URL` (опция) — базовый URL, с которого доступно приложение (используется в ссылках).
+   - `WEBAPP_CLIENTS_PAGE_SIZE` (опция) — размер страницы списка клиентов в вебе (по умолчанию 50).
+4. Start services:
+   - Backend/API: `docker-compose up -d db webapp` (или `uvicorn webapp.main:app --reload`) — сервис отдаёт API и собранную SPA «Крутилка».
+   - Frontend (разработка): `cd webapp/frontend && npm run dev` — Vite поднимет SPA «Крутилка» на `http://localhost:5173` и проксирует вызовы к `:8000`.
+   - Telegram-боты: `docker-compose up -d bot scheduler krutilkavnbot` (как и прежде).
+   - Для production-образа `docker-compose up -d db webapp` автоматически соберёт фронтенд внутри Dockerfile (используется Node-стадия).
+5. Import reference data:
    - Clients: `python -m scripts.load_clients --truncate` or send CSV via `/uploadclients`.
    - Bikes: `python -m scripts.load_bikes --truncate` to load the inventory CSV from `data/`.
    - Stands: `python -m scripts.load_trainers --truncate` to import the trainer inventory.
-5. Configure bot commands in BotFather:
+6. Configure bot commands in BotFather:
    ```
    start - показать список аккаунтов
    help - подсказать доступные команды
@@ -72,6 +84,12 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 - **Administrators**: Only admins can invoke commands or interact with inline keyboards. Non-admins receive “Недостаточно прав”.
 - **Client linking**: `krutilkavnbot` запоминает выбранного клиента в таблице `client_links` (создаётся автоматически). Пользователь может повторно пройти авторизацию и выбрать другую запись в любой момент — привязка вступает в силу только после подтверждения администратором.
 - **Client onboarding**: Если клиент не найден по фамилии или пользователь выбрал «Создать новую запись», бот проводит через мини-анкету (имя, фамилия, вес, рост, пол, FTP, педали, цель) и автоматически создаёт запись в базе; имя, фамилия, вес и рост обязательны, FTP по умолчанию 150, пол выбирается кнопками «М/Ж», педали — из фиксированного списка, необязательные поля (FTP и цель) можно пропустить кнопкой «ОК».
+
+## Web Admin (SPA «Крутилка»)
+- **Авторизация** выполняется через Telegram Login виджет. После успешного входа backend устанавливает cookie-сессию, а SPA работает через REST API (`/api/*`).
+- **API эндпоинты**: `/api/clients`, `/api/bikes`, `/api/trainers`, `/api/client-links`, `/api/admins`, `/api/summary`, `/api/session`.
+- **Разработка**: запускайте фронтенд (`npm run dev`) и бэкенд (`uvicorn webapp.main:app --reload`) параллельно. Vite проксирует запросы `/api`, `/auth`, `/logout` на порт 8000.
+- **Production**: `docker-compose up webapp` соберёт React-приложение «Крутилка», положит статические файлы в `webapp/frontend/dist` и обслужит их через FastAPI (`/app/*`).
 - **Client CSV**: Ensure the columns match `scripts/load_clients.py` mapping (e.g., “Имя”, “Фамилия”, “ПОЛ”, “Ваш вес”, etc.). `/uploadclients truncate` replaces all entries; otherwise rows are upserted.
 - **Bike inventory**: The CSV should match `scripts/load_bikes.py` expectations (ID, название, владелец, размер, рост от/до, передачи, эксцентрик/ось, кассета). Trainer CSV should follow `scripts/load_trainers.py` mapping (код, модель, отображаемое имя, хозяин, оси, кассета, комментарий). Use `/bikes <поиск>` для велосипедов и `/stands <поиск>` для станков; по кнопке станка можно отредактировать тип оси и кассету. Карточки клиента автоматически показывают совместимые велосипеды и станки.
 - **CSV uploads**: Команды `/uploadclients`, `/uploadbikes`, `/uploadstands` принимают CSV как документ (можно переслать, ответить на файл, использовать `truncate` для полной перезагрузки).

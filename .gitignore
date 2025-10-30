@@ -4,3 +4,5 @@ notifier_state/
 .DS_Store
 __pycache__/
 data
+webapp/frontend/node_modules/
+webapp/frontend/dist/

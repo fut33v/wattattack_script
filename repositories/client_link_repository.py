@@ -1,7 +1,7 @@
 """Manage associations between Telegram users and client records."""
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from .db_utils import db_connection, dict_cursor
 
@@ -95,3 +95,39 @@ def link_user_to_client(
         record = cur.fetchone()
         conn.commit()
     return record
+
+
+def list_links(limit: int | None = None, offset: int = 0) -> List[Dict]:
+    """Return all client links, optionally paginated."""
+
+    ensure_client_links_table()
+    query = (
+        "SELECT client_id, tg_user_id, tg_username, tg_full_name, created_at, updated_at "
+        "FROM client_links ORDER BY created_at DESC"
+    )
+    params: tuple = ()
+    if limit is not None:
+        query += " LIMIT %s OFFSET %s"
+        params = (limit, offset)
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(query, params)
+        rows = cur.fetchall()
+    return rows
+
+
+def remove_link(*, client_id: Optional[int] = None, tg_user_id: Optional[int] = None) -> bool:
+    """Delete a link either by client_id or tg_user_id."""
+
+    ensure_client_links_table()
+    if client_id is None and tg_user_id is None:
+        return False
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        if client_id is not None:
+            cur.execute("DELETE FROM client_links WHERE client_id = %s", (client_id,))
+        else:
+            cur.execute("DELETE FROM client_links WHERE tg_user_id = %s", (tg_user_id,))
+        deleted = cur.rowcount > 0
+        conn.commit()
+    return deleted

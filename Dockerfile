@@ -1,3 +1,11 @@
+FROM node:20-slim AS frontend-build
+
+WORKDIR /frontend
+COPY webapp/frontend/package.json ./
+RUN npm install
+COPY webapp/frontend ./
+RUN npm run build
+
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -9,6 +17,7 @@ COPY requirements.txt ./
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
+COPY --from=frontend-build /frontend/dist ./webapp/frontend/dist
 
 ENV WATTATTACK_ACCOUNTS_FILE=/app/accounts.json \
     WATTATTACK_HTTP_TIMEOUT=30 \
