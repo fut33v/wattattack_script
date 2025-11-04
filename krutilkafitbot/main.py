@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -120,6 +120,12 @@ async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not ensure_admin_message(update):
         return
 
+    user = update.effective_user
+    LOGGER.info(
+        "/latest requested by user id=%s username=%s",
+        getattr(user, "id", None),
+        getattr(user, "username", None),
+    )
     await update.message.reply_text("⏳ Собираю последние активности по аккаунтам...")
 
     cache = context.user_data.setdefault("account_cache", {})
@@ -128,6 +134,7 @@ async def latest_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data["account_cache"] = cache
 
     for account_id, account in ACCOUNT_REGISTRY.items():
+        LOGGER.info("Processing latest activities for account_id=%s name=%s", account_id, account.name)
         try:
             activities, profile = await fetch_recent_activities(account_id, 1)
         except Exception as exc:  # noqa: BLE001
@@ -231,6 +238,11 @@ async def send_recent_activities(query, context, account_id: str, limit: int) ->
     account = ACCOUNT_REGISTRY[account_id]
 
     try:
+        LOGGER.info(
+            "Fetching recent activities via callback for account_id=%s limit=%d",
+            account_id,
+            limit,
+        )
         activities, profile = await fetch_recent_activities(account_id, limit)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to fetch activities")
@@ -396,6 +408,58 @@ def extract_athlete_field(profile: Dict[str, Any], field: str) -> str:
     return ""
 
 
+def _coerce_timestamp(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        try:
+            return float(cleaned)
+        except ValueError:
+            pass
+        try:
+            dt = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    return None
+
+
+def _activity_timestamp(activity: Dict[str, Any]) -> float:
+    keys = (
+        "startTime",
+        "start_time",
+        "startDate",
+        "start_date",
+        "startTimestamp",
+        "createdAt",
+        "created_at",
+        "updatedAt",
+        "updated_at",
+    )
+    for key in keys:
+        ts = _coerce_timestamp(activity.get(key))
+        if ts is not None:
+            return ts
+
+    ts = _coerce_timestamp(activity.get("id"))
+    if ts is not None:
+        return ts
+
+    return float("-inf")
+
+
 async def fetch_recent_activities(
     account_id: str, limit: int
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -404,10 +468,53 @@ async def fetch_recent_activities(
     def worker() -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         client = WattAttackClient(account.base_url)
         client.login(account.email, account.password, timeout=DEFAULT_TIMEOUT)
-        payload = client.fetch_activities(timeout=DEFAULT_TIMEOUT)
-        activities = payload.get("activities", [])
-        if not isinstance(activities, list):
-            activities = []
+        fetch_limit = max(limit * 3, DEFAULT_RECENT_LIMIT * 2, 30)
+        activities, metadata = client.fetch_activity_feed(
+            limit=fetch_limit,
+            timeout=DEFAULT_TIMEOUT,
+        )
+        LOGGER.info(
+            "Account %s fetched %d activities (limit=%d). metadata_keys=%s",
+            account_id,
+            len(activities),
+            limit,
+            list(metadata.keys()),
+        )
+        strategy = metadata.get("_pagination_strategy")
+        if strategy:
+            LOGGER.info(
+                "Account %s used pagination strategy %s (page_size=%s)",
+                account_id,
+                strategy,
+                metadata.get("_pagination_page_size"),
+            )
+        if activities:
+            sample = [
+                {
+                    "id": item.get("id"),
+                    "startTime": item.get("startTime") or item.get("start_time"),
+                    "createdAt": item.get("createdAt") or item.get("created_at"),
+                    "fitFileId": item.get("fitFileId"),
+                }
+                for item in activities[: min(3, len(activities))]
+            ]
+            LOGGER.info("Account %s first activities (raw order) %s", account_id, sample)
+        activities = sorted(
+            activities,
+            key=_activity_timestamp,
+            reverse=True,
+        )
+        if activities:
+            sample_sorted = [
+                {
+                    "id": item.get("id"),
+                    "startTime": item.get("startTime") or item.get("start_time"),
+                    "createdAt": item.get("createdAt") or item.get("created_at"),
+                    "fitFileId": item.get("fitFileId"),
+                }
+                for item in activities[: min(3, len(activities))]
+            ]
+            LOGGER.info("Account %s first activities (sorted) %s", account_id, sample_sorted)
 
         profile: Dict[str, Any] = {}
         try:
@@ -453,6 +560,11 @@ async def send_fit_file(query, context, account_id: str, activity_id: str) -> No
 
     if activity is None:
         try:
+            LOGGER.info(
+                "Cache miss for activity_id=%s (account=%s); refreshing recent activities",
+                activity_id,
+                account_id,
+            )
             activities, profile = await fetch_recent_activities(account_id, DEFAULT_RECENT_LIMIT)
         except Exception as exc:  # noqa: BLE001
             await query.edit_message_text(f"❌ Ошибка обновления списка: {exc}")
@@ -575,4 +687,3 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

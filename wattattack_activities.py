@@ -5,15 +5,18 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import sys
+from dataclasses import dataclass
 from getpass import getpass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Tuple
 
 import requests
 
 DEFAULT_BASE_URL = "https://wattattack.com"
 API_PREFIX = "/api/v1"
+LOGGER = logging.getLogger(__name__)
 
 
 class WattAttackClient:
@@ -79,6 +82,126 @@ class WattAttackClient:
             )
 
         return response.json()
+
+    def fetch_activity_feed(
+        self,
+        *,
+        limit: int,
+        timeout: float | None = None,
+        page_size: int | None = None,
+        max_pages: int = 5,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        Return recent activities attempting to walk through paginated API responses.
+
+        The first element of the returned tuple is the activities list (deduplicated).
+        The second element contains non-activity fields from the initial payload
+        (totals, aggregations, etc.) preserved for backwards compatibility.
+        """
+
+        if limit <= 0:
+            return [], {}
+
+        initial_payload = self.fetch_activities(timeout=timeout)
+        activities = initial_payload.get("activities", [])
+        if not isinstance(activities, list):
+            LOGGER.debug("Activities payload is not a list, got %s", type(activities))
+            activities = []
+
+        metadata = {
+            key: value for key, value in initial_payload.items() if key != "activities"
+        }
+
+        collected: List[Dict[str, Any]] = list(activities)
+        seen_ids = {
+            str(item.get("id"))
+            for item in collected
+            if isinstance(item, dict) and item.get("id") is not None
+        }
+
+        effective_page_size = page_size or max(limit, len(collected), 50)
+        target = max(limit, effective_page_size)
+        if len(collected) >= target:
+            return collected[:target], metadata
+
+        strategies = _build_pagination_strategies()
+        for strategy in strategies:
+            start_index = strategy.start
+            page = start_index
+            attempts = 0
+            initial_count = len(collected)
+            progress = False
+
+            while len(collected) < target and attempts < max_pages:
+                params = strategy.build(page, effective_page_size)
+                if params is None:
+                    break
+
+                try:
+                    response = self.session.get(
+                        self._api_url("/activities"),
+                        params=params,
+                        timeout=timeout,
+                    )
+                except requests.RequestException as exc:
+                    LOGGER.debug(
+                        "Pagination strategy %s failed for page %s: %s",
+                        strategy.name,
+                        page,
+                        exc,
+                    )
+                    break
+
+                if response.status_code != 200:
+                    LOGGER.debug(
+                        "Pagination strategy %s returned HTTP %s for page %s",
+                        strategy.name,
+                        response.status_code,
+                        page,
+                    )
+                    break
+
+                payload = self._parse_json(response)
+                page_activities = payload.get("activities")
+                if not isinstance(page_activities, list) or not page_activities:
+                    break
+
+                new_items = 0
+                for item in page_activities:
+                    if not isinstance(item, dict):
+                        continue
+                    key = item.get("id")
+                    key_str = str(key) if key is not None else None
+                    if key_str and key_str not in seen_ids:
+                        collected.append(item)
+                        seen_ids.add(key_str)
+                        new_items += 1
+
+                if new_items:
+                    progress = True
+
+                attempts += 1
+                if len(collected) >= target:
+                    break
+
+                if new_items == 0 and page > start_index:
+                    break
+
+                page += 1
+
+            if progress:
+                metadata = dict(metadata)
+                metadata["_pagination_strategy"] = strategy.name
+                metadata["_pagination_page_size"] = effective_page_size
+                LOGGER.debug(
+                    "Pagination strategy %s added %d new activities (total=%d)",
+                    strategy.name,
+                    len(collected) - initial_count,
+                    len(collected),
+                )
+                break
+
+        return collected[:target], metadata
 
     def fetch_profile(self, *, timeout: float | None = None) -> Dict[str, Any]:
         """Return the athlete profile details for the current session."""
@@ -232,6 +355,42 @@ class WattAttackClient:
             return response.json()
         except ValueError:
             return {}
+
+
+@dataclass(frozen=True)
+class _PaginationStrategy:
+    name: str
+    build: Callable[[int, int], Dict[str, int]]
+    start: int = 1
+
+
+def _build_pagination_strategies() -> List[_PaginationStrategy]:
+    return [
+        _PaginationStrategy(
+            name="page_pageSize",
+            build=lambda page, size: {"page": page, "pageSize": size},
+        ),
+        _PaginationStrategy(
+            name="page_limit",
+            build=lambda page, size: {"page": page, "limit": size},
+        ),
+        _PaginationStrategy(
+            name="page_perPage",
+            build=lambda page, size: {"page": page, "perPage": size},
+        ),
+        _PaginationStrategy(
+            name="page_zero_pageSize",
+            build=lambda page, size: {"page": page - 1, "pageSize": size},
+        ),
+        _PaginationStrategy(
+            name="offset_limit",
+            build=lambda page, size: {"offset": (page - 1) * size, "limit": size},
+        ),
+        _PaginationStrategy(
+            name="skip_take",
+            build=lambda page, size: {"skip": (page - 1) * size, "take": size},
+        ),
+    ]
 
 
 def parse_args(argv: Iterable[str]) -> argparse.Namespace:
@@ -391,13 +550,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
+    activity_limit = 500
     try:
-        payload = client.fetch_activities(timeout=args.timeout)
+        activities, metadata = client.fetch_activity_feed(
+            limit=activity_limit,
+            timeout=args.timeout,
+        )
     except Exception as exc:  # noqa: BLE001 - surface useful message
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    activities = payload.get("activities", [])
+    payload = dict(metadata)
+    payload["activities"] = activities
     output_path, is_new_file = resolve_output_path(args.output)
 
     if args.format == "json":

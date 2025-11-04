@@ -421,15 +421,19 @@ def main(argv: Iterable[str] | None = None) -> int:
             continue
 
         try:
-            payload = client.fetch_activities(timeout=args.timeout)
+            activities, metadata = client.fetch_activity_feed(
+                limit=MAX_TRACKED_IDS,
+                timeout=args.timeout,
+            )
+            LOGGER.debug(
+                "Fetched %d activities for %s (strategy=%s)",
+                len(activities),
+                account_id,
+                metadata.get("_pagination_strategy"),
+            )
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Failed to fetch activities for %s", account_id)
             continue
-
-        activities = payload.get("activities", [])
-        if not isinstance(activities, list):
-            LOGGER.warning("Unexpected activities payload for %s", account_id)
-            activities = []
 
         try:
             profile = client.fetch_profile(timeout=args.timeout)

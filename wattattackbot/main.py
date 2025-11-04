@@ -84,6 +84,16 @@ DEFAULT_ACCOUNTS_PATH = Path("accounts.json")
 DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
 CLIENTS_PAGE_SIZE = int(os.environ.get("CLIENTS_PAGE_SIZE", "6"))
 DEFAULT_CLIENT_FTP = int(os.environ.get("WATTATTACK_DEFAULT_FTP", "150"))
+CLIENT_BIKE_PICK_PAGE_SIZE = int(os.environ.get("CLIENT_BIKE_PAGE_SIZE", "6"))
+
+PEDAL_OPTIONS: List[Tuple[str, str]] = [
+    ("топталки (под кроссовки)", "platform"),
+    ("контакты шоссе Look", "road_look"),
+    ("контакты шоссе Shimano", "road_shimano"),
+    ("контакты MTB Shimano", "mtb_shimano"),
+    ("принесу свои", "own"),
+]
+PEDAL_OPTION_LABEL_BY_CODE: Dict[str, str] = {code: label for label, code in PEDAL_OPTIONS}
 
 PENDING_UPLOAD_KEY = "pending_inventory_upload"
 PENDING_TRAINER_EDIT_KEY = "pending_trainer_edit"
@@ -1499,7 +1509,72 @@ async def _process_combinate_text(
             return str(display_name)
         return "Без названия"
 
+    def _normalize_bike_name(value: Any) -> str:
+        if not value:
+            return ""
+        return re.sub(r"\s+", " ", str(value).strip().lower())
+
+    def _match_favorite_bike(preferred_raw: Any) -> Optional[Dict[str, Any]]:
+        normalized = _normalize_bike_name(preferred_raw)
+        if not normalized:
+            return None
+
+        best_match: Optional[Tuple[int, Dict[str, Any]]] = None
+        for bike in bikes:
+            title_norm = _normalize_bike_name(bike.get("title"))
+            owner_norm = _normalize_bike_name(bike.get("owner"))
+            combined_norm = _normalize_bike_name(
+                f"{bike.get('title') or ''} {bike.get('owner') or ''}"
+            )
+
+            score: Optional[int] = None
+            if normalized and normalized == title_norm:
+                score = 0
+            elif normalized and normalized == combined_norm:
+                score = 1
+            elif normalized and title_norm and normalized in title_norm:
+                score = 2
+            elif normalized and combined_norm and normalized in combined_norm:
+                score = 3
+            elif normalized and owner_norm and normalized == owner_norm:
+                score = 4
+
+            if score is None:
+                continue
+
+            if best_match is None or score < best_match[0]:
+                best_match = (score, bike)
+
+        return best_match[1] if best_match else None
+
+    def _prioritize_preferred_bike(
+        candidates: List[Dict[str, Any]], preferred: Optional[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        if preferred is None:
+            return candidates[:5]
+
+        result: List[Dict[str, Any]] = []
+        seen_ids: set[int] = set()
+
+        preferred_id = preferred.get("id") if isinstance(preferred, dict) else None
+        if isinstance(preferred_id, int):
+            seen_ids.add(preferred_id)
+        result.append(preferred)
+
+        for bike in candidates:
+            bike_id = bike.get("id")
+            if isinstance(bike_id, int) and bike_id in seen_ids:
+                continue
+            if bike is preferred:
+                continue
+            result.append(bike)
+            if len(result) >= 5:
+                break
+
+        return result[:5]
+
     bike_candidates: Dict[int, List[Dict[str, Any]]] = {}
+    favorite_matches: Dict[int, Dict[str, Any]] = {}
     for record, height_value in clients_with_height:
         client_id = record.get("id")
         if not isinstance(client_id, int):
@@ -1515,7 +1590,11 @@ async def _process_combinate_text(
                 (bike.get("title") or "").lower(),
             ),
         )
-        bike_candidates[client_id] = sorted_candidates[:5]
+        preferred_bike_raw = record.get("favorite_bike")
+        preferred_bike = _match_favorite_bike(preferred_bike_raw) if preferred_bike_raw else None
+        if preferred_bike is not None:
+            favorite_matches[client_id] = preferred_bike
+        bike_candidates[client_id] = _prioritize_preferred_bike(sorted_candidates, preferred_bike)
 
     assignments: Dict[int, Dict[str, Any]] = {}
     used_bike_ids: set[int] = set()
@@ -1523,6 +1602,14 @@ async def _process_combinate_text(
         client_id = record.get("id")
         if not isinstance(client_id, int):
             continue
+        preferred_bike = favorite_matches.get(client_id)
+        if preferred_bike:
+            bike_id = preferred_bike.get("id")
+            if isinstance(bike_id, int) and bike_id not in used_bike_ids:
+                assignments[client_id] = preferred_bike
+                used_bike_ids.add(bike_id)
+                continue
+
         candidates = bike_candidates.get(client_id, [])
         for bike in candidates:
             bike_id = bike.get("id")
@@ -1550,16 +1637,23 @@ async def _process_combinate_text(
         lines.append(f"• 📏 Рост: {height_value:g} см")
 
         assigned_bike = assignments.get(client_id) if isinstance(client_id, int) else None
+        preferred_bike = favorite_matches.get(client_id) if isinstance(client_id, int) else None
+        assigned_is_preferred = assigned_bike is not None and assigned_bike is preferred_bike
         if assigned_bike:
             bike_title = _format_bike_title(assigned_bike)
-            lines.append(f"• ✅ Основной вариант: {bike_title}")
+            suffix = " (любимый)" if assigned_is_preferred else ""
+            lines.append(f"• ✅ Основной вариант: {bike_title}{suffix}")
 
             trainer_options = trainer_suggestions_map.get(assigned_bike.get("id")) or []
             if trainer_options:
                 trainer_titles = [html.escape(_format_trainer_label(option)) for option in trainer_options[:3]]
                 lines.append(f"  └─ Станки: {', '.join(trainer_titles)}")
         else:
-            lines.append("• ⚠️ Не удалось подобрать уникальный велосипед из доступных.")
+            if preferred_bike:
+                preferred_title = _format_bike_title(preferred_bike)
+                lines.append(f"• ⚠️ Любимый велосипед недоступен: {preferred_title}")
+            else:
+                lines.append("• ⚠️ Не удалось подобрать уникальный велосипед из доступных.")
 
         alternatives = [
             bike
@@ -1811,6 +1905,70 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
             return
         await cancel_client_edit(query, context, client_id)
+    elif action == "client_favbike_page" and len(parts) >= 3:
+        try:
+            client_id = int(parts[1])
+            page = max(0, int(parts[2]))
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректные параметры страницы.")
+            return
+        pending = context.user_data.get("pending_client_edit")
+        if isinstance(pending, dict) and pending.get("client_id") == client_id:
+            pending.update(
+                {
+                    "chat_id": query.message.chat_id,
+                    "message_id": query.message.message_id,
+                    "field": "favorite_bike",
+                    "mode": "picker",
+                }
+            )
+        else:
+            context.user_data["pending_client_edit"] = {
+                "client_id": client_id,
+                "field": "favorite_bike",
+                "chat_id": query.message.chat_id,
+                "message_id": query.message.message_id,
+                "label": CLIENT_EDIT_FIELDS["favorite_bike"]["label"],
+                "client_name": "",
+                "mode": "picker",
+            }
+        await render_client_favorite_bike_picker(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
+            client_id,
+            page=page,
+        )
+    elif action == "client_favbike_set" and len(parts) >= 3:
+        try:
+            client_id = int(parts[1])
+            bike_id = int(parts[2])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректные параметры велосипеда.")
+            return
+        await set_client_favorite_bike(query, context, client_id, bike_id)
+    elif action == "client_favbike_clear" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+            return
+        await clear_client_favorite_bike(query, context, client_id)
+    elif action == "client_pedals_set" and len(parts) >= 3:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+            return
+        pedal_code = parts[2]
+        await set_client_pedals(query, context, client_id, pedal_code)
+    elif action == "client_pedals_clear" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+            return
+        await clear_client_pedals(query, context, client_id)
     elif action == "client_bikes" and len(parts) >= 2:
         try:
             client_id = int(parts[1])
@@ -2130,11 +2288,11 @@ CLIENT_EDIT_FIELDS: Dict[str, Dict[str, str]] = {
     },
     "favorite_bike": {
         "label": "🚲 Любимый велосипед",
-        "prompt": "Введите название любимого велосипеда.",
+        "prompt": "Выберите велосипед из списка ниже или очистите текущий выбор.",
     },
     "pedals": {
         "label": "🚴‍♂️ Педали",
-        "prompt": "Введите информацию о педалях.",
+        "prompt": "Выберите тип педалей из списка ниже или очистите текущее значение.",
     },
 }
 
@@ -2247,6 +2405,413 @@ def build_client_edit_markup(client_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="❌ Отмена", callback_data=f"client_edit_cancel|{client_id}"),
             ]
         ]
+    )
+
+
+def _format_bike_choice_label(record: Dict[str, Any]) -> str:
+    title = str(record.get("title") or f"id={record.get('id')}")
+    size_label = record.get("size_label") or record.get("frame_size_cm")
+    owner = record.get("owner")
+
+    suffix_parts: List[str] = []
+    if size_label:
+        suffix_parts.append(str(size_label))
+    if owner:
+        suffix_parts.append(str(owner))
+
+    if suffix_parts:
+        return f"{title} • {' / '.join(part.strip() for part in suffix_parts if part)}"
+    return title
+
+
+def build_client_bike_picker_markup(
+    client_id: int,
+    bikes: List[Dict[str, Any]],
+    page: int,
+    total_count: int,
+) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+
+    if bikes:
+        for record in bikes:
+            label = _format_bike_choice_label(record)
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=label,
+                        callback_data=f"client_favbike_set|{client_id}|{record['id']}",
+                    )
+                ]
+            )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🚫 Велосипеды не найдены",
+                    callback_data="noop",
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🚫 Очистить выбор",
+                callback_data=f"client_favbike_clear|{client_id}",
+            )
+        ]
+    )
+
+    nav_row: List[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"client_favbike_page|{client_id}|{page - 1}",
+            )
+        )
+    if (page + 1) * CLIENT_BIKE_PICK_PAGE_SIZE < total_count:
+        nav_row.append(
+            InlineKeyboardButton(
+                text="➡️ Далее",
+                callback_data=f"client_favbike_page|{client_id}|{page + 1}",
+            )
+        )
+    if nav_row:
+        rows.append(nav_row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="↩️ Назад",
+                callback_data=f"client_info|{client_id}",
+            ),
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"client_edit_cancel|{client_id}",
+            ),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+async def render_client_favorite_bike_picker(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    client_id: int,
+    page: int = 0,
+) -> None:
+    try:
+        record = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s", client_id)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"❌ Ошибка получения данных клиента: {exc}",
+        )
+        return
+
+    if not record:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="🔍 Клиент не найден.",
+        )
+        return
+
+    bike_suggestions, height_cm, trainer_inventory = await get_bike_suggestions_for_client(record)
+    trainer_map = (
+        _build_trainer_suggestions(bike_suggestions, trainer_inventory)
+        if bike_suggestions and trainer_inventory
+        else None
+    )
+    details_text = format_client_details(record, bike_suggestions, height_cm, trainer_map)
+    display_name = client_display_name(record)
+    prompt = CLIENT_EDIT_FIELDS["favorite_bike"]["prompt"]
+
+    pending = context.user_data.get("pending_client_edit")
+    if isinstance(pending, dict) and pending.get("client_id") == client_id:
+        pending.setdefault("client_name", display_name)
+        pending["label"] = CLIENT_EDIT_FIELDS["favorite_bike"]["label"]
+        pending["mode"] = "picker"
+
+    try:
+        await asyncio.to_thread(ensure_bikes_table)
+        total_count = await asyncio.to_thread(bikes_count)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to prepare bikes list for client %s", client_id)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"❌ Ошибка получения списка велосипедов: {exc}",
+        )
+        return
+
+    limit = max(1, CLIENT_BIKE_PICK_PAGE_SIZE)
+    page = max(page, 0)
+    max_page = (total_count - 1) // limit if total_count else 0
+    if page > max_page:
+        page = max_page
+    offset = page * limit
+
+    try:
+        bikes = await asyncio.to_thread(list_bikes, limit, offset)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to fetch bikes page (page=%s) for client %s", page, client_id)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"❌ Ошибка получения списка велосипедов: {exc}",
+        )
+        return
+
+    text = (
+        f"{details_text}\n\n"
+        f"✏️ <i>{html.escape(prompt)}</i>\n"
+        f"👤 <i>Клиент: {html.escape(display_name)}</i>"
+    )
+
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_client_bike_picker_markup(client_id, bikes, page, total_count),
+    )
+
+
+def build_client_pedals_picker_markup(client_id: int) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"client_pedals_set|{client_id}|{code}",
+            )
+        ]
+        for label, code in PEDAL_OPTIONS
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🚫 Очистить выбор",
+                callback_data=f"client_pedals_clear|{client_id}",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="↩️ Назад",
+                callback_data=f"client_info|{client_id}",
+            ),
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"client_edit_cancel|{client_id}",
+            ),
+        ]
+    )
+    return InlineKeyboardMarkup(rows)
+
+
+async def render_client_pedals_picker(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    client_id: int,
+) -> None:
+    try:
+        record = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s", client_id)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"❌ Ошибка получения данных клиента: {exc}",
+        )
+        return
+
+    if not record:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="🔍 Клиент не найден.",
+        )
+        return
+
+    bike_suggestions, height_cm, trainer_inventory = await get_bike_suggestions_for_client(record)
+    trainer_map = (
+        _build_trainer_suggestions(bike_suggestions, trainer_inventory)
+        if bike_suggestions and trainer_inventory
+        else None
+    )
+    details_text = format_client_details(record, bike_suggestions, height_cm, trainer_map)
+    display_name = client_display_name(record)
+    prompt = CLIENT_EDIT_FIELDS["pedals"]["prompt"]
+
+    pending = context.user_data.get("pending_client_edit")
+    if isinstance(pending, dict) and pending.get("client_id") == client_id:
+        pending.setdefault("client_name", display_name)
+        pending["label"] = CLIENT_EDIT_FIELDS["pedals"]["label"]
+        pending["mode"] = "picker"
+
+    text = (
+        f"{details_text}\n\n"
+        f"✏️ <i>{html.escape(prompt)}</i>\n"
+        f"👤 <i>Клиент: {html.escape(display_name)}</i>"
+    )
+
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_client_pedals_picker_markup(client_id),
+    )
+
+
+async def set_client_pedals(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    pedal_code: str,
+) -> None:
+    label = PEDAL_OPTION_LABEL_BY_CODE.get(pedal_code)
+    if not label:
+        await query.answer("Неизвестный вариант педалей.", show_alert=True)
+        return
+
+    try:
+        await asyncio.to_thread(update_client_fields, client_id, pedals=label)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to update client %s pedals to %s", client_id, pedal_code)
+        await query.edit_message_text(f"❌ Не удалось обновить педали клиента: {exc}")
+        return
+
+    pending = context.user_data.get("pending_client_edit") or {}
+    client_name = pending.get("client_name")
+    field_label = CLIENT_EDIT_FIELDS["pedals"]["label"]
+    if client_name:
+        success_text = f"✅ {field_label} для {client_name} обновлены."
+    else:
+        success_text = f"✅ {field_label} обновлены."
+    await context.bot.send_message(chat_id=query.message.chat_id, text=success_text)
+
+    context.user_data.pop("pending_client_edit", None)
+    await query.answer("Педали обновлены.")
+    await render_client_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        client_id,
+    )
+
+
+async def clear_client_pedals(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+) -> None:
+    try:
+        await asyncio.to_thread(update_client_fields, client_id, pedals=None)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to clear pedals for client %s", client_id)
+        await query.edit_message_text(f"❌ Не удалось очистить педали клиента: {exc}")
+        return
+
+    pending = context.user_data.get("pending_client_edit") or {}
+    client_name = pending.get("client_name")
+    field_label = CLIENT_EDIT_FIELDS["pedals"]["label"]
+    if client_name:
+        success_text = f"✅ {field_label} для {client_name} очищены."
+    else:
+        success_text = f"✅ {field_label} очищены."
+    await context.bot.send_message(chat_id=query.message.chat_id, text=success_text)
+
+    context.user_data.pop("pending_client_edit", None)
+    await query.answer("Педали очищены.")
+    await render_client_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        client_id,
+    )
+
+
+async def set_client_favorite_bike(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    bike_id: int,
+) -> None:
+    try:
+        bike_record = await asyncio.to_thread(get_bike, bike_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load bike %s for client %s", bike_id, client_id)
+        await query.answer("Ошибка получения велосипеда.", show_alert=True)
+        return
+
+    if not bike_record:
+        await query.answer("Велосипед не найден.", show_alert=True)
+        return
+
+    bike_title = bike_record.get("title") or f"id={bike_id}"
+
+    try:
+        await asyncio.to_thread(update_client_fields, client_id, favorite_bike=bike_title)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to update client %s favorite bike to %s", client_id, bike_id)
+        await query.edit_message_text(f"❌ Не удалось обновить велосипед клиента: {exc}")
+        return
+
+    pending = context.user_data.get("pending_client_edit") or {}
+    client_name = pending.get("client_name")
+    label = CLIENT_EDIT_FIELDS["favorite_bike"]["label"]
+    if client_name:
+        success_text = f"✅ {label} для {client_name} обновлён."
+    else:
+        success_text = f"✅ {label} обновлён."
+    await context.bot.send_message(chat_id=query.message.chat_id, text=success_text)
+
+    context.user_data.pop("pending_client_edit", None)
+    await query.answer("Любимый велосипед обновлён.")
+    await render_client_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        client_id,
+    )
+
+
+async def clear_client_favorite_bike(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+) -> None:
+    try:
+        await asyncio.to_thread(update_client_fields, client_id, favorite_bike=None)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to clear favorite bike for client %s", client_id)
+        await query.edit_message_text(f"❌ Не удалось очистить велосипед клиента: {exc}")
+        return
+
+    pending = context.user_data.get("pending_client_edit") or {}
+    client_name = pending.get("client_name")
+    label = CLIENT_EDIT_FIELDS["favorite_bike"]["label"]
+    if client_name:
+        success_text = f"✅ {label} для {client_name} очищен."
+    else:
+        success_text = f"✅ {label} очищен."
+    await context.bot.send_message(chat_id=query.message.chat_id, text=success_text)
+
+    context.user_data.pop("pending_client_edit", None)
+    await query.answer("Любимый велосипед очищен.")
+    await render_client_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        client_id,
     )
 
 
@@ -2480,6 +3045,44 @@ async def start_client_edit(
         await query.edit_message_text("🔍 Клиент не найден.")
         return
 
+    display_name = client_display_name(record)
+
+    if field == "favorite_bike":
+        context.user_data["pending_client_edit"] = {
+            "client_id": client_id,
+            "field": field,
+            "chat_id": query.message.chat_id,
+            "message_id": query.message.message_id,
+            "label": metadata["label"],
+            "client_name": display_name,
+            "mode": "picker",
+        }
+        await render_client_favorite_bike_picker(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
+            client_id,
+            page=0,
+        )
+        return
+    if field == "pedals":
+        context.user_data["pending_client_edit"] = {
+            "client_id": client_id,
+            "field": field,
+            "chat_id": query.message.chat_id,
+            "message_id": query.message.message_id,
+            "label": metadata["label"],
+            "client_name": display_name,
+            "mode": "picker",
+        }
+        await render_client_pedals_picker(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
+            client_id,
+        )
+        return
+
     bike_suggestions, height_cm, trainer_inventory = await get_bike_suggestions_for_client(record)
     trainer_map = (
         _build_trainer_suggestions(bike_suggestions, trainer_inventory)
@@ -2487,7 +3090,6 @@ async def start_client_edit(
         else None
     )
     details_text = format_client_details(record, bike_suggestions, height_cm, trainer_map)
-    display_name = client_display_name(record)
     prompt = metadata["prompt"]
     text = (
         f"{details_text}\n\n"
@@ -2502,6 +3104,7 @@ async def start_client_edit(
         "message_id": query.message.message_id,
         "label": metadata["label"],
         "client_name": display_name,
+        "mode": "text",
     }
 
     await query.edit_message_text(
@@ -2537,6 +3140,10 @@ async def process_pending_client_edit(
     context: ContextTypes.DEFAULT_TYPE,
     pending: Dict[str, Any],
 ) -> bool:
+    mode = pending.get("mode", "text")
+    if mode != "text":
+        return False
+
     field = pending.get("field")
     client_id = pending.get("client_id")
 

@@ -11,8 +11,10 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
 
-  bot:
-    build: .
+  adminbot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
     command: ["python", "-m", "wattattackbot"]
     env_file: .env
     volumes:
@@ -22,7 +24,9 @@ services:
     restart: unless-stopped
 
   krutilkafitbot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
     command: ["python", "-m", "krutilkafitbot"]
     env_file: .env
     volumes:
@@ -32,13 +36,17 @@ services:
     restart: unless-stopped
 
   krutilkavnbot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
     command: ["python", "-m", "krutilkavnbot.main"]
     env_file: .env
     restart: unless-stopped
 
   scheduler:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
     command:
       [
         "python",
