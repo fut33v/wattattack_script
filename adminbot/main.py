@@ -59,6 +59,13 @@ from repositories.trainers_repository import (
     get_trainer,
     update_trainer_fields,
 )
+from repositories.layout_repository import (
+    ensure_layout_table,
+    list_layout_details,
+    get_assignment_for_bike,
+    set_bike_assignment,
+    clear_bike_assignment_for_bike,
+)
 from scripts.load_clients import load_clients_from_csv_bytes
 from scripts.load_bikes import load_bikes_from_csv_bytes
 from scripts.load_trainers import load_trainers_from_csv_bytes
@@ -151,7 +158,9 @@ PENDING_UPLOAD_KEY = "pending_inventory_upload"
 PENDING_TRAINER_EDIT_KEY = "pending_trainer_edit"
 PENDING_BIKE_EDIT_KEY = "pending_bike_edit"
 PENDING_WORKOUT_UPLOAD_KEY = "pending_workout_upload"
+PENDING_WORKOUT_FILE_KEY = "pending_workout_file"
 PENDING_COMBINATE_KEY = "pending_combinate"
+LAST_BIKES_SEARCH_KEY = "adminbot:last_bikes_search"
 UPLOAD_COMMAND_TYPES = {
     "/uploadclients": "clients",
     "/uploadbikes": "bikes",
@@ -223,6 +232,30 @@ def _pop_pending_workout_upload(user_data: Dict[str, Any]) -> Optional[Dict[str,
     if value is not None:
         user_data.pop(PENDING_WORKOUT_UPLOAD_KEY, None)
     return value
+
+
+def _set_pending_workout_file(
+    user_data: Dict[str, Any], *, data: bytes, file_name: str, chat_id: int, reply_to_message_id: Optional[int]
+) -> None:
+    user_data[PENDING_WORKOUT_FILE_KEY] = {
+        "data": data,
+        "file_name": file_name,
+        "chat_id": chat_id,
+        "reply_to_message_id": reply_to_message_id,
+    }
+
+
+def _get_pending_workout_file(user_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    value = user_data.get(PENDING_WORKOUT_FILE_KEY)
+    if not value:
+        return None
+    if not isinstance(value, dict):
+        return None
+    return value
+
+
+def _clear_pending_workout_file(user_data: Dict[str, Any]) -> None:
+    user_data.pop(PENDING_WORKOUT_FILE_KEY, None)
 
 
 def _set_pending_combinate(user_data: Dict[str, Any], chat_id: int) -> None:
@@ -477,10 +510,6 @@ def format_bike_record(record: Dict[str, Any]) -> str:
     title = html.escape(record.get("title") or "Без названия")
     lines = [f"🚲 <b>{title}</b>"]
 
-    owner = record.get("owner")
-    if owner:
-        lines.append(f"• Владелец: {html.escape(str(owner))}")
-
     size_label = (record.get("size_label") or "").strip()
     frame_size = (record.get("frame_size_cm") or "").strip()
     if size_label and frame_size:
@@ -598,10 +627,6 @@ def format_bike_details(
     title = html.escape(record.get("title") or "Без названия")
     lines = [f"🚲 <b>{title}</b>"]
 
-    owner = record.get("owner")
-    if owner:
-        lines.append(f"• Владелец: {html.escape(str(owner))}")
-
     size_label = (record.get("size_label") or "").strip()
     frame_size = (record.get("frame_size_cm") or "").strip()
     if size_label:
@@ -643,22 +668,45 @@ def format_bike_details(
     return "\n".join(lines)
 
 
-def build_bike_info_markup(bike_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+def build_bike_info_markup(bike_id: int, has_assignment: bool) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = [
         [
-            [
-                InlineKeyboardButton(
-                    text="📏 Рост от",
-                    callback_data=f"bike_edit|height_min_cm|{bike_id}",
-                ),
-                InlineKeyboardButton(
-                    text="📏 Рост до",
-                    callback_data=f"bike_edit|height_max_cm|{bike_id}",
-                ),
-            ],
-            [InlineKeyboardButton(text="❌ Закрыть", callback_data="noop")],
+            InlineKeyboardButton(
+                text="🛠 Поставить на станок",
+                callback_data=f"bike_assign_prepare|{bike_id}",
+            )
+        ]
+    ]
+
+    if has_assignment:
+        rows[0].append(
+            InlineKeyboardButton(
+                text="🧹 Снять",
+                callback_data=f"bike_assign_clear|{bike_id}",
+            )
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="📏 Рост от",
+                callback_data=f"bike_edit|height_min_cm|{bike_id}",
+            ),
+            InlineKeyboardButton(
+                text="📏 Рост до",
+                callback_data=f"bike_edit|height_max_cm|{bike_id}",
+            ),
         ]
     )
+
+    rows.append(
+        [
+            InlineKeyboardButton(text="← Список велосипедов", callback_data="bikes_list"),
+            InlineKeyboardButton(text="❌ Закрыть", callback_data="bikes_close"),
+        ]
+    )
+
+    return InlineKeyboardMarkup(rows)
 
 
 def build_bike_edit_markup(bike_id: int) -> InlineKeyboardMarkup:
@@ -692,10 +740,6 @@ def format_trainer_record(record: Dict[str, Any]) -> str:
 
     if display:
         lines.append(f"• Отображается как: {html.escape(display)}")
-
-    owner = record.get("owner")
-    if owner:
-        lines.append(f"• Владелец: {html.escape(str(owner))}")
 
     axle_types = record.get("axle_types")
     if axle_types:
@@ -785,9 +829,6 @@ def format_trainer_details(record: Dict[str, Any]) -> str:
     lines = [f"🛠 <b>{html.escape(header)}</b>"]
     if display:
         lines.append(f"• Отображается как: {html.escape(display)}")
-    owner = record.get("owner")
-    if owner:
-        lines.append(f"• Владелец: {html.escape(str(owner))}")
     axle = record.get("axle_types")
     if axle:
         lines.append(f"• Оси: {html.escape(str(axle))}")
@@ -955,20 +996,27 @@ async def process_trainers_document(
     )
 
 
-async def process_workout_document(
-    document,
-    message: Message,
-    account_ids: List[str],
-) -> None:
-    try:
-        file = await document.get_file()
-        data = await file.download_as_bytearray()
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to download workout file")
-        await message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
-        return
+def _make_reply_func(
+    bot,
+    chat_id: int,
+    reply_to_message_id: Optional[int] = None,
+) -> Callable[[str], Awaitable[Any]]:
+    async def _reply(text: str) -> Any:
+        return await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_to_message_id=reply_to_message_id,
+        )
 
-    raw_bytes = bytes(data)
+    return _reply
+
+
+async def process_workout_bytes(
+    raw_bytes: bytes,
+    file_name: str,
+    account_ids: List[str],
+    reply_func: Callable[[str], Awaitable[Any]],
+) -> None:
     text: Optional[str] = None
     for encoding in ("utf-8-sig", "utf-8", "cp1251"):
         try:
@@ -983,18 +1031,18 @@ async def process_workout_document(
         workout = await asyncio.to_thread(parse_zwo_workout, text)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to parse ZWO workout")
-        await message.reply_text(f"❌ Ошибка обработки ZWO: {exc}")
+        await reply_func(f"❌ Ошибка обработки ZWO: {exc}")
         return
 
     try:
         chart_data = await asyncio.to_thread(zwo_to_chart_data, workout)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to build chart data")
-        await message.reply_text(f"❌ Ошибка генерации графика тренировки: {exc}")
+        await reply_func(f"❌ Ошибка генерации графика тренировки: {exc}")
         return
 
     if not account_ids:
-        await message.reply_text("ℹ️ Не указан ни один аккаунт для загрузки.")
+        await reply_func("ℹ️ Не указан ни один аккаунт для загрузки.")
         return
 
     results: List[Tuple[str, bool, str]] = []
@@ -1005,7 +1053,7 @@ async def process_workout_document(
         success, info = await upload_workout_to_account(account_id, workout, chart_data)
         results.append((account_id, success, info))
 
-    workout_name = workout.get("name") or (document.file_name or "тренировка")
+    workout_name = workout.get("name") or (file_name or "тренировка")
     header = f"📤 Загрузка тренировки «{workout_name}»:"
     lines = [header]
     for account_id, success, info in results:
@@ -1014,7 +1062,28 @@ async def process_workout_document(
         prefix = "✅" if success else "❌"
         lines.append(f"{prefix} {account_label}: {info}")
 
-    await message.reply_text("\n".join(lines))
+    await reply_func("\n".join(lines))
+
+
+async def process_workout_document(
+    document,
+    message: Message,
+    account_ids: List[str],
+) -> None:
+    try:
+        file = await document.get_file()
+        data = await file.download_as_bytearray()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to download workout file")
+        await message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
+        return
+
+    await process_workout_bytes(
+        raw_bytes=bytes(data),
+        file_name=document.file_name or "",
+        account_ids=account_ids,
+        reply_func=message.reply_text,
+    )
 
 
 async def upload_workout_to_account(
@@ -1088,6 +1157,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/account <аккаунт> — показать текущие данные аккаунта\n"
         "/combinate — подобрать велосипеды и станки; фамилии пришлите отдельным сообщением\n"
         "/bikes [поиск] — показать доступные велосипеды\n"
+        "/layout — показать текущую расстановку велосипедов\n"
         "/stands [поиск] — показать доступные станки\n"
         "/client <имя/фамилия> — найти клиента по БД\n"
         "/stats — статистика по клиентской базе\n"
@@ -1729,11 +1799,10 @@ async def uploadworkout_handler(update: Update, context: ContextTypes.DEFAULT_TY
             return
         _pop_pending_workout_upload(context.user_data)
         await process_workout_document(reply_document, update.message, account_ids)
+        _clear_pending_workout_file(context.user_data)
         return
 
     if account_ids:
-        _pop_pending_workout_upload(context.user_data)
-        _set_pending_workout_upload(context.user_data, account_ids)
         if len(account_ids) == len(ACCOUNT_REGISTRY):
             target = "все аккаунты"
         elif len(account_ids) == 1:
@@ -1742,6 +1811,21 @@ async def uploadworkout_handler(update: Update, context: ContextTypes.DEFAULT_TY
             target = ", ".join(
                 ACCOUNT_REGISTRY[acc].name for acc in account_ids if acc in ACCOUNT_REGISTRY
             )
+        pending_file = _get_pending_workout_file(context.user_data)
+        if pending_file and pending_file.get("data"):
+            try:
+                await process_workout_bytes(
+                    raw_bytes=bytes(pending_file.get("data")),
+                    file_name=pending_file.get("file_name") or "",
+                    account_ids=account_ids,
+                    reply_func=update.message.reply_text,
+                )
+            finally:
+                _clear_pending_workout_file(context.user_data)
+                _pop_pending_workout_upload(context.user_data)
+            return
+        _pop_pending_workout_upload(context.user_data)
+        _set_pending_workout_upload(context.user_data, account_ids)
         await update.message.reply_text(
             f"📄 Пришлите файл тренировки ZWO для загрузки в {target}."
         )
@@ -1904,6 +1988,19 @@ async def _process_combinate_text(
         await message.reply_text("⚠️ В базе нет зарегистрированных велосипедов.")
         return False
 
+    layout_map: Dict[int, Dict[str, Any]] = {}
+    try:
+        await asyncio.to_thread(ensure_layout_table)
+        layout_rows = await asyncio.to_thread(list_layout_details)
+        layout_map = {
+            row.get("bike_id"): row
+            for row in layout_rows
+            if isinstance(row.get("bike_id"), int)
+        }
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to load layout details for combinate: %s", exc)
+        layout_map = {}
+
     try:
         await asyncio.to_thread(ensure_trainers_table)
         trainers = await asyncio.to_thread(list_trainers)
@@ -1914,7 +2011,16 @@ async def _process_combinate_text(
 
     trainer_suggestions_map = _build_trainer_suggestions(bikes, trainers) if trainers else {}
 
-    clients_sorted = sorted(selected_clients, key=lambda item: item.get("_order_index", 0))
+    def _client_priority(record: Dict[str, Any]) -> Tuple[int, float]:
+        gender_value = record.get("gender")
+        gender_priority = 1
+        if isinstance(gender_value, str):
+            normalized = gender_value.strip().lower()
+            if normalized in {"f", "female", "ж", "жен", "женский"}:
+                gender_priority = 0
+        return (gender_priority, record.get("_order_index", 0))
+
+    clients_sorted = sorted(selected_clients, key=_client_priority)
     clients_with_height: List[Tuple[Dict[str, Any], float]] = []
     for record in clients_sorted:
         height_value = _parse_height_cm(record.get("height"))
@@ -1929,9 +2035,6 @@ async def _process_combinate_text(
 
     def _format_bike_title(bike: Dict[str, Any]) -> str:
         title = html.escape(bike.get("title") or "Без названия")
-        owner = bike.get("owner")
-        if owner:
-            return f"{title} ({html.escape(str(owner))})"
         return title
 
     def _format_trainer_label(trainer: Dict[str, Any]) -> str:
@@ -2020,6 +2123,7 @@ async def _process_combinate_text(
         sorted_candidates = sorted(
             pool,
             key=lambda bike: (
+                0 if isinstance(bike.get("id"), int) and bike.get("id") in layout_map else 1,
                 _bike_height_distance(bike, height_value),
                 1 if bike.get("position") is None else 0,
                 bike.get("position") or 0,
@@ -2056,12 +2160,68 @@ async def _process_combinate_text(
 
     lines: List[str] = []
     lines.append("<b>🚲 Предложение рассадки</b>")
-    for record in clients_sorted:
+
+    def structured_sort_key(position: Optional[int], name: str) -> Tuple[int, int, str]:
+        name_key = name.lower()
+        if position is not None:
+            return (0, position, name_key)
+        if name:
+            return (1, 0, name_key)
+        return (2, 0, "")
+
+    def _assignment_key(entry: Dict[str, Any]) -> Tuple[Tuple[int, int, str], int, int]:
+        client_id = entry.get("id")
+        assigned_bike = assignments.get(client_id) if isinstance(client_id, int) else None
+        bike_id = assigned_bike.get("id") if isinstance(assigned_bike, dict) else None
+        layout_row = layout_map.get(bike_id) if isinstance(bike_id, int) else None
+        stand_position = layout_row.get("stand_position") if layout_row else None
+        stand_title = layout_row.get("stand_display") or layout_row.get("stand_title") or layout_row.get("stand_code") if layout_row else ""
+
+        gender_value = entry.get("gender")
+        gender_priority = 1
+        if isinstance(gender_value, str) and gender_value.strip().lower() in {"f", "female", "ж", "жен", "женский"}:
+            gender_priority = 0
+
+        return (
+            structured_sort_key(stand_position, stand_title),
+            gender_priority,
+            entry.get("_order_index", 0),
+        )
+
+    sorted_for_output = sorted(clients_sorted, key=_assignment_key)
+    current_stand_key: Optional[str] = None
+
+    for record in sorted_for_output:
         display_name = client_display_name(record)
         requested = record.get("_requested_term")
         header = f"<b>{html.escape(display_name)}</b>"
         if requested and requested.lower() != (display_name or "").lower():
             header += f" <i>(запрос «{html.escape(str(requested))}»)</i>"
+        client_id = record.get("id")
+        assigned_bike = assignments.get(client_id) if isinstance(client_id, int) else None
+        bike_id = assigned_bike.get("id") if isinstance(assigned_bike, dict) else None
+        layout_row = layout_map.get(bike_id) if isinstance(bike_id, int) else None
+        stand_label = None
+        if layout_row:
+            stand_stub = {
+                "code": layout_row.get("stand_code"),
+                "title": layout_row.get("stand_title"),
+                "display_name": layout_row.get("stand_display"),
+                "id": layout_row.get("stand_id"),
+            }
+            stand_label = format_trainer_button_label(stand_stub)
+
+        if stand_label:
+            if stand_label != current_stand_key:
+                current_stand_key = stand_label
+                lines.append("")
+                lines.append(f"<b>{html.escape(stand_label)}</b>")
+        else:
+            if current_stand_key != "__no_stand__":
+                current_stand_key = "__no_stand__"
+                lines.append("")
+                lines.append("<b>Без станка</b>")
+
         lines.append(header)
 
         client_id = record.get("id")
@@ -2140,15 +2300,10 @@ async def bikes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     search_term = " ".join(context.args).strip() if context.args else ""
+    context.user_data[LAST_BIKES_SEARCH_KEY] = search_term
 
     try:
-        await asyncio.to_thread(ensure_bikes_table)
-        if search_term:
-            bikes = await asyncio.to_thread(search_bikes, search_term, 30)
-            total_count = len(bikes)
-        else:
-            bikes = await asyncio.to_thread(list_bikes, 50)
-            total_count = await asyncio.to_thread(bikes_count)
+        text, markup = await build_bikes_view(search_term)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to fetch bikes")
         await update.message.reply_text(
@@ -2156,29 +2311,88 @@ async def bikes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    if not bikes:
-        if search_term:
-            await update.message.reply_text(
-                f"🚫 Велосипеды по запросу «{search_term}» не найдены."
-            )
-        else:
-            await update.message.reply_text("🚫 В базе нет доступных велосипедов.")
+    if markup is None:
+        await update.message.reply_text(text)
+    else:
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+        )
+
+
+async def layout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
         return
 
-    header_lines: List[str] = []
-    if search_term:
-        header_lines.append(
-            f"🔍 Найдено {total_count} велосипедов по запросу «{html.escape(search_term)}»."
+    try:
+        await asyncio.to_thread(ensure_layout_table)
+        await asyncio.to_thread(ensure_trainers_table)
+        await asyncio.to_thread(ensure_bikes_table)
+        assignments = await asyncio.to_thread(list_layout_details)
+        trainers = await asyncio.to_thread(list_trainers, 100)
+        bikes = await asyncio.to_thread(list_bikes, 200)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to fetch layout")
+        await update.message.reply_text(f"❌ Ошибка получения расстановки: {exc}")
+        return
+
+    assignment_by_stand = {
+        row.get("stand_id"): row for row in assignments if row.get("stand_id") is not None
+    }
+    assigned_bike_ids = {
+        row.get("bike_id") for row in assignments if row.get("bike_id") is not None
+    }
+
+    lines: List[str] = ["<b>🚲 Текущая расстановка</b>"]
+    if assignments:
+        for row in assignments:
+            stand_stub = {
+                "code": row.get("stand_code"),
+                "title": row.get("stand_title"),
+                "display_name": row.get("stand_display"),
+                "id": row.get("stand_id"),
+            }
+            stand_label = format_trainer_button_label(stand_stub)
+            bike_title = row.get("bike_title") or f"id={row.get('bike_id')}"
+        lines.append(
+            f"• {html.escape(stand_label)} → {html.escape(str(bike_title))}"
         )
     else:
-        header_lines.append(f"🚲 В базе велосипедов: {total_count}.")
-        if total_count > len(bikes):
-            header_lines.append(f"Показаны первые {len(bikes)} записей.")
-        header_lines.append("Используйте /bikes &lt;поиск&gt; для фильтрации.")
+        lines.append("• Нет назначенных велосипедов.")
 
-    body = "\n\n".join(format_bike_record(record) for record in bikes)
-    text = "\n\n".join(header_lines + [body])
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+    free_stands = [
+        trainer
+        for trainer in trainers
+        if isinstance(trainer.get("id"), int)
+        and trainer.get("id") not in assignment_by_stand
+    ]
+    if free_stands:
+        stand_labels = [format_trainer_button_label(item) for item in free_stands[:10]]
+        extra = "…" if len(free_stands) > len(stand_labels) else ""
+        lines.append("")
+        lines.append(
+            "🛠 Свободные станки: "
+            + ", ".join(html.escape(label) for label in stand_labels)
+            + extra
+        )
+
+    free_bikes = [
+        bike for bike in bikes if isinstance(bike.get("id"), int) and bike.get("id") not in assigned_bike_ids
+    ]
+    if free_bikes:
+        bike_labels = [_format_bike_choice_label(bike) for bike in free_bikes[:10]]
+        extra = "…" if len(free_bikes) > len(bike_labels) else ""
+        lines.append("")
+        lines.append(
+            "🚲 Свободные велосипеды: "
+            + ", ".join(html.escape(label) for label in bike_labels)
+            + extra
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def stands_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2257,6 +2471,25 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 return
             account_ids = [account_id]
             label = ACCOUNT_REGISTRY[account_id].name
+        pending_file = _get_pending_workout_file(context.user_data)
+        if pending_file and pending_file.get("data"):
+            await query.edit_message_text(f"📤 Загружаю тренировку в {label}…")
+            reply_func = _make_reply_func(
+                context.bot,
+                pending_file.get("chat_id") or query.message.chat_id,
+                pending_file.get("reply_to_message_id"),
+            )
+            try:
+                await process_workout_bytes(
+                    raw_bytes=bytes(pending_file.get("data")),
+                    file_name=pending_file.get("file_name") or "",
+                    account_ids=account_ids,
+                    reply_func=reply_func,
+                )
+            finally:
+                _clear_pending_workout_file(context.user_data)
+                _pop_pending_workout_upload(context.user_data)
+            return
         _set_pending_workout_upload(context.user_data, account_ids)
         await query.edit_message_text(
             f"📄 Пришлите файл тренировки ZWO для загрузки в {label}."
@@ -2417,6 +2650,94 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             query.message.message_id,
             client_id,
         )
+    elif action == "bike_info" and len(parts) >= 2:
+        try:
+            bike_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор велосипеда.")
+            return
+        await show_bike_info(query, context, bike_id)
+    elif action == "bike_assign_prepare" and len(parts) >= 2:
+        try:
+            bike_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор велосипеда.")
+            return
+        await render_bike_assignment_selector(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
+            bike_id,
+        )
+    elif action == "bike_assign_set" and len(parts) >= 3:
+        try:
+            bike_id = int(parts[1])
+            stand_id = int(parts[2])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректные параметры назначения.")
+            return
+        try:
+            await asyncio.to_thread(
+                set_bike_assignment,
+                stand_id,
+                bike_id,
+                getattr(query.from_user, "id", None),
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to assign bike %s to stand %s", bike_id, stand_id)
+            await query.edit_message_text(f"❌ Не удалось назначить велосипед: {exc}")
+            return
+        await query.answer("Велосипед назначен.")
+        await render_bike_info_message(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
+            bike_id,
+        )
+    elif action == "bike_assign_clear" and len(parts) >= 2:
+        try:
+            bike_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор велосипеда.")
+            return
+        try:
+            await asyncio.to_thread(clear_bike_assignment_for_bike, bike_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to clear bike %s assignment", bike_id)
+            await query.edit_message_text(f"❌ Не удалось снять велосипед со станка: {exc}")
+            return
+        await query.answer("Велосипед снят со станка.")
+        await render_bike_info_message(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
+            bike_id,
+        )
+    elif action == "bikes_close":
+        try:
+            await query.message.delete()
+        except Exception:  # noqa: BLE001
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("bikes_close action failed for message %s", query.message)
+        return
+    elif action == "bikes_list":
+        search_term = context.user_data.get(LAST_BIKES_SEARCH_KEY, "")
+        try:
+            text, markup = await build_bikes_view(search_term)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to rebuild bikes view")
+            await query.edit_message_text(f"❌ Ошибка получения списка велосипедов: {exc}")
+            return
+        if markup is None:
+            await query.edit_message_text(text)
+        else:
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            )
     elif action == "trainer_info" and len(parts) >= 2:
         try:
             trainer_id = int(parts[1])
@@ -2847,17 +3168,42 @@ def build_client_edit_markup(client_id: int) -> InlineKeyboardMarkup:
 def _format_bike_choice_label(record: Dict[str, Any]) -> str:
     title = str(record.get("title") or f"id={record.get('id')}")
     size_label = record.get("size_label") or record.get("frame_size_cm")
-    owner = record.get("owner")
 
-    suffix_parts: List[str] = []
     if size_label:
-        suffix_parts.append(str(size_label))
-    if owner:
-        suffix_parts.append(str(owner))
-
-    if suffix_parts:
-        return f"{title} • {' / '.join(part.strip() for part in suffix_parts if part)}"
+        return f"{title} • {str(size_label).strip()}"
     return title
+
+
+def _trim_label(value: str, max_len: int = 60) -> str:
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 1].rstrip() + "…"
+
+
+def _format_bike_button_label(record: Dict[str, Any], assignment: Optional[Dict[str, Any]]) -> str:
+    base = _format_bike_choice_label(record)
+    if not assignment:
+        return _trim_label(f"{base} • свободен")
+
+    trainer_stub = {
+        "code": assignment.get("stand_code"),
+        "title": assignment.get("stand_title"),
+        "display_name": assignment.get("stand_display"),
+        "id": assignment.get("stand_id"),
+    }
+    stand_label = format_trainer_button_label(trainer_stub)
+    return _trim_label(f"{base} • {stand_label}")
+
+
+def _format_stand_selection_label(
+    trainer_record: Dict[str, Any], assignment: Optional[Dict[str, Any]]
+) -> str:
+    base = format_trainer_button_label(trainer_record)
+    if not assignment:
+        return _trim_label(f"{base} • свободно")
+
+    bike_title = assignment.get("bike_title") or f"id={assignment.get('bike_id')}"
+    return _trim_label(f"{base} • {bike_title}")
 
 
 def build_client_bike_picker_markup(
@@ -3016,6 +3362,65 @@ async def render_client_favorite_bike_picker(
         parse_mode=ParseMode.HTML,
         reply_markup=build_client_bike_picker_markup(client_id, bikes, page, total_count),
     )
+
+
+async def build_bikes_view(
+    search_term: str,
+) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+    await asyncio.to_thread(ensure_bikes_table)
+    if search_term:
+        bikes = await asyncio.to_thread(search_bikes, search_term, 30)
+        total_count = len(bikes)
+    else:
+        bikes = await asyncio.to_thread(list_bikes, 50)
+        total_count = await asyncio.to_thread(bikes_count)
+
+    if not bikes:
+        if search_term:
+            return (
+                f"🚫 Велосипеды по запросу «{html.escape(search_term)}» не найдены.",
+                None,
+            )
+        return ("🚫 В базе нет доступных велосипедов.", None)
+
+    await asyncio.to_thread(ensure_layout_table)
+    try:
+        assignments = await asyncio.to_thread(list_layout_details)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to load bike layout: %s", exc)
+        assignments = []
+
+    assignment_map = {
+        row.get("bike_id"): row
+        for row in assignments
+        if isinstance(row.get("bike_id"), int)
+    }
+
+    keyboard_rows: List[List[InlineKeyboardButton]] = []
+    for record in bikes:
+        bike_id = record.get("id")
+        if not isinstance(bike_id, int):
+            continue
+        label = _format_bike_button_label(record, assignment_map.get(bike_id))
+        keyboard_rows.append(
+            [InlineKeyboardButton(text=label, callback_data=f"bike_info|{bike_id}")]
+        )
+
+    keyboard_rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="bikes_close")])
+
+    header_lines: List[str] = []
+    if search_term:
+        header_lines.append(
+            f"🔍 Найдено {total_count} велосипедов по запросу «{html.escape(search_term)}»."
+        )
+    else:
+        header_lines.append(f"🚲 Всего велосипедов: {total_count}.")
+        if total_count > len(bikes):
+            header_lines.append(f"Показаны первые {len(bikes)} записей.")
+        header_lines.append("Нажмите на велосипед, чтобы открыть карточку.")
+
+    text = "\n".join(header_lines)
+    return text, InlineKeyboardMarkup(keyboard_rows)
 
 
 def build_client_pedals_picker_markup(client_id: int) -> InlineKeyboardMarkup:
@@ -3653,13 +4058,33 @@ async def render_bike_info_message(
         LOGGER.warning("Failed to load trainers for bike %s: %s", bike_id, exc)
         trainers = None
 
+    assignment = None
+    try:
+        await asyncio.to_thread(ensure_layout_table)
+        assignment = await asyncio.to_thread(get_assignment_for_bike, bike_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to load layout for bike %s: %s", bike_id, exc)
+        assignment = None
+
     text = format_bike_details(record, trainers)
+    if assignment and assignment.get("stand_id"):
+        trainer_stub = {
+            "code": assignment.get("stand_code"),
+            "title": assignment.get("stand_title"),
+            "display_name": assignment.get("stand_display"),
+            "id": assignment.get("stand_id"),
+        }
+        stand_label = format_trainer_button_label(trainer_stub)
+        text = f"{text}\n\n🛠 На станке: {html.escape(stand_label)}"
+    else:
+        text = f"{text}\n\n🛠 На станке: не назначен."
+
     await context.bot.edit_message_text(
         chat_id=chat_id,
         message_id=message_id,
         text=text,
         parse_mode=ParseMode.HTML,
-        reply_markup=build_bike_info_markup(bike_id),
+        reply_markup=build_bike_info_markup(bike_id, assignment is not None),
     )
 
 
@@ -3670,6 +4095,108 @@ async def show_bike_info(query, context: ContextTypes.DEFAULT_TYPE, bike_id: int
         query.message.chat_id,
         query.message.message_id,
         bike_id,
+    )
+
+
+async def render_bike_assignment_selector(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    bike_id: int,
+) -> None:
+    try:
+        bike = await asyncio.to_thread(get_bike, bike_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load bike %s", bike_id)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"❌ Ошибка получения данных велосипеда: {exc}",
+        )
+        return
+
+    if not bike:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="🔍 Велосипед не найден.",
+        )
+        return
+
+    try:
+        await asyncio.to_thread(ensure_trainers_table)
+        trainers = await asyncio.to_thread(list_trainers, 100)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load trainers for bike assignment")
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"❌ Ошибка получения списка станков: {exc}",
+        )
+        return
+
+    await asyncio.to_thread(ensure_layout_table)
+    try:
+        assignments = await asyncio.to_thread(list_layout_details)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to load layout details: %s", exc)
+        assignments = []
+
+    assignment_by_stand = {
+        row.get("stand_id"): row
+        for row in assignments
+        if isinstance(row.get("stand_id"), int)
+    }
+    current_assignment = None
+    for row in assignments:
+        if row.get("bike_id") == bike_id:
+            current_assignment = row
+            break
+
+    rows: List[List[InlineKeyboardButton]] = []
+    for trainer in trainers:
+        stand_id = trainer.get("id")
+        if not isinstance(stand_id, int):
+            continue
+        label = _format_stand_selection_label(trainer, assignment_by_stand.get(stand_id))
+        rows.append(
+            [InlineKeyboardButton(text=label, callback_data=f"bike_assign_set|{bike_id}|{stand_id}")]
+        )
+
+    if not rows:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="⚠️ В базе нет станков для назначения.",
+        )
+        return
+
+    if current_assignment:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🧹 Снять со станка",
+                    callback_data=f"bike_assign_clear|{bike_id}",
+                )
+            ]
+        )
+
+    rows.append(
+        [InlineKeyboardButton(text="↩️ Назад", callback_data=f"bike_info|{bike_id}")]
+    )
+
+    bike_title = bike.get("title") or f"id={bike_id}"
+    text = (
+        f"🛠 Выберите станок для велосипеда <b>{html.escape(str(bike_title))}</b>.\n"
+        "Если нужный станок недоступен, сначала освободите его."
+    )
+
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
     )
 
 
@@ -4340,13 +4867,29 @@ async def workout_document_handler(update: Update, context: ContextTypes.DEFAULT
         if pending:
             account_ids = list(pending.get("account_ids") or [])
 
-    if not account_ids:
-        await update.message.reply_text(
-            "ℹ️ Сначала выберите аккаунт командой /uploadworkout."
-        )
+    if account_ids:
+        await process_workout_document(document, update.message, account_ids)
+        _clear_pending_workout_file(context.user_data)
         return
 
-    await process_workout_document(document, update.message, account_ids)
+    try:
+        file = await document.get_file()
+        data = await file.download_as_bytearray()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to download workout file")
+        await update.message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
+        return
+
+    file_label = document.file_name or document.file_unique_id or "тренировка.zwo"
+    _set_pending_workout_file(
+        context.user_data,
+        data=bytes(data),
+        file_name=file_label,
+        chat_id=update.message.chat_id,
+        reply_to_message_id=update.message.message_id,
+    )
+
+    await show_account_selection(message=update.message, kind="workout")
 
 
 async def document_upload_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4467,6 +5010,7 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("client", client_handler))
     application.add_handler(CommandHandler("stats", stats_handler))
     application.add_handler(CommandHandler("bikes", bikes_handler))
+    application.add_handler(CommandHandler("layout", layout_handler))
     application.add_handler(CommandHandler("stands", stands_handler))
     application.add_handler(CommandHandler("setclient", setclient_handler))
     application.add_handler(CommandHandler("admins", admins_handler))

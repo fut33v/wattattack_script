@@ -22,6 +22,7 @@ WattAttack Bot Suite
 
 ## Основные модули / компоненты
 - `adminbot/` – основной бот (команды, inline-навигация, поиск клиентов, управление администраторами).
+- `repositories/layout_repository.py` – привязка велосипедов к станкам.
 - `wattattackscheduler/` – пакет со скедулером и нотификатором новых тренировок.
 - `wattattack_activities.py` – обёртка над API WattAttack (login, профили, активности, загрузка тренировок).
 - `wattattack_workouts.py` – парсер ZWO, нормализация данных, построение графиков/метрик и сборка payload для `/workouts/user-create`.

@@ -12,6 +12,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
   - `/client <query>` – search clients by name/surname.
   - `/setclient <id>` – apply selected client’s data to a WattAttack account.
   - `/newclient` – create a new client record directly from Telegram.
+  - `/layout` – show current bike-to-stand assignments.
   - `/uploadclients [truncate]` – import clients from CSV (reply or inline); supports truncation.
   - `/uploadbikes [truncate]` – import bicycles from CSV (reply or inline); supports truncation.
   - `/uploadstands [truncate]` – import trainer inventory from CSV (reply or inline); supports truncation.
@@ -40,7 +41,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 
 ## Features
 - **Admin-only controls**: All commands, callbacks, and text handlers require admin status. Admins are stored centrally in the DB; `/addadmin` and `/removeadmin` manipulate them at runtime. Seed list comes from `TELEGRAM_ADMIN_IDS`.
-- **Client management**: CSV import normalizes name, gender, weight, height, FTP, pedals, goals, etc. `/client` and plain text search locate clients; `/setclient` applies their data to accounts (keeping mandatory fields like `birthDate` and gender). Карточка клиента включает отдельную кнопку для просмотра подобранных велосипедов и станков (учитываются рост, оси и кассеты). `/stands` выводит учёт станков и позволяет редактировать оси/кассеты из бота, `/bikes` показывает парк велосипедов и даёт менять допустимые значения роста. `/account` fetches up-to-date profile info from WattAttack.
+- **Client management**: CSV import normalizes name, gender, weight, height, FTP, pedals, goals, etc. `/client` and plain text search locate clients; `/setclient` applies their data to accounts (keeping mandatory fields like `birthDate` and gender). Карточка клиента включает отдельную кнопку для просмотра подобранных велосипедов и станков (учитываются рост, оси и кассеты). `/stands` выводит учёт станков и позволяет редактировать оси/кассеты из бота, `/bikes` показывает парк велосипедов и даёт менять допустимые значения роста, `/layout` отображает текущую расстановку велосипедов. `/account` fetches up-to-date profile info from WattAttack.
 - **Workout uploads**: `/uploadworkout` parses ZWO files server-side, builds chart data and advanced power metrics (IF, NP, TSS, zone breakdown) using the athlete’s FTP when available, and pushes the workout into the selected WattAttack account(s).
 - **Activity notifications**: Notifier (and krutilkafitbot) send FIT files and metadata when new workouts appear. Admin list reused from the DB.
 - **Docker-ready**: `docker-compose.yml` provides services for bot (`bot`), scheduler (`scheduler`), and Postgres (`db`, exposed on host port 55432). Volume `postgres_data` persists DB state.
@@ -78,6 +79,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
      account - показать текущие данные аккаунта
      combinate - подобрать велосипеды и станки
      bikes - показать доступные велосипеды
+     layout - показать текущую расстановку велосипедов
      stands - показать доступные станки
      client - найти клиента по БД
      newclient - создать нового клиента

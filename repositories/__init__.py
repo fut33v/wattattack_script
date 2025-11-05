@@ -6,5 +6,6 @@ __all__ = [
     "client_link_repository",
     "bikes_repository",
     "trainers_repository",
+    "layout_repository",
     "db_utils",
 ]
