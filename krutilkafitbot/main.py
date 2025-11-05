@@ -25,7 +25,7 @@ from repositories.admin_repository import (
     is_admin as db_is_admin,
 )
 from wattattack_activities import WattAttackClient
-from wattattackbot.accounts import (
+from adminbot.accounts import (
     AccountConfig,
     load_accounts,
     normalize_account_id,

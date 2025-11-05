@@ -15,7 +15,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.bot
-    command: ["python", "-m", "wattattackbot"]
+    command: ["python", "-m", "adminbot"]
     env_file: .env
     volumes:
       - ./accounts.json:/app/accounts.json:ro

@@ -4,13 +4,14 @@
 This repository contains a Telegram bot and supporting utilities for managing WattAttack athlete accounts, а также веб-приложение «Крутилка» для администраторов. The bot automates tasks such as applying client data (from a PostgreSQL-backed client database) to WattAttack user profiles, downloading FIT activity files for new workouts, and providing account information on demand. Supporting scripts handle CSV imports of client information and direct profile updates via the WattAttack web API.
 
 ## Components
-- **wattattackbot/** – Telegram bot package that manages WattAttack profiles, clients, and inventory:
+- **adminbot/** – Telegram bot package that manages WattAttack profiles, clients, and inventory:
   - `/start`, `/help` – navigation/help.
   - `/account <id>` – show current WattAttack profile data.
   - `/combinate` — подбор велосипеда/станка по параметрам клиента.
   - `/bikes [поиск]` – list available bikes from the shared inventory (supports search term).
   - `/client <query>` – search clients by name/surname.
   - `/setclient <id>` – apply selected client’s data to a WattAttack account.
+  - `/newclient` – create a new client record directly from Telegram.
   - `/uploadclients [truncate]` – import clients from CSV (reply or inline); supports truncation.
   - `/uploadbikes [truncate]` – import bicycles from CSV (reply or inline); supports truncation.
   - `/uploadstands [truncate]` – import trainer inventory from CSV (reply or inline); supports truncation.
@@ -48,7 +49,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 1. Install backend dependencies: `pip install -r requirements.txt` (Python 3.11+).
 2. Install frontend dependencies: `cd webapp/frontend && npm install` (Node.js 18+), затем вернитесь в корень `cd ../..`.
 3. Copy `.env.example` to `.env` and configure:
-   - `TELEGRAM_BOT_TOKEN` для wattattackbot, optional `TELEGRAM_ADMIN_IDS` seed.
+   - `TELEGRAM_BOT_TOKEN` для adminbot, optional `TELEGRAM_ADMIN_IDS` seed.
    - `KRUTILKAFIT_BOT_TOKEN` — токен отдельного бота для скачивания активностей (если не указан, будет использован `TELEGRAM_BOT_TOKEN`).
    - `KRUTILKAVN_BOT_TOKEN` for the greeting bot (use `KRUTILKAVN_GREETING` to override the default message).
    - `WATTATTACK_ACCOUNTS_FILE` (JSON with email/password/base_url per account).
@@ -62,14 +63,14 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 4. Start services:
    - Backend/API: `docker-compose up -d db webapp` (или `uvicorn webapp.main:app --reload`) — сервис отдаёт API и собранную SPA «Крутилка».
    - Frontend (разработка): `cd webapp/frontend && npm run dev` — Vite поднимет SPA «Крутилка» на `http://localhost:5173` и проксирует вызовы к `:8000`.
-   - Telegram-боты: `docker-compose up -d bot krutilkafitbot scheduler krutilkavnbot`.
+   - Telegram-боты: `docker-compose up -d adminbot krutilkafitbot scheduler krutilkavnbot`.
    - Для production-образа `docker-compose up -d db webapp` автоматически соберёт фронтенд внутри Dockerfile (используется Node-стадия).
 5. Import reference data:
    - Clients: `python -m scripts.load_clients --truncate` or send CSV via `/uploadclients`.
    - Bikes: `python -m scripts.load_bikes --truncate` to load the inventory CSV from `data/`.
    - Stands: `python -m scripts.load_trainers --truncate` to import the trainer inventory.
 6. Configure bot commands in BotFather:
-   - Для `wattattackbot`:
+   - Для `adminbot`:
      ```
      start - краткое описание возможностей
      help - подсказать доступные команды
@@ -79,6 +80,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
      bikes - показать доступные велосипеды
      stands - показать доступные станки
      client - найти клиента по БД
+     newclient - создать нового клиента
      uploadclients - загрузить CSV клиентов
      uploadbikes - загрузить CSV велосипедов
      uploadstands - загрузить CSV станков

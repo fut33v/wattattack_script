@@ -1,8 +1,7 @@
-"""Module entry point for `python -m wattattackbot`."""
+"""Module entry point for `python -m adminbot`."""
 
 from .main import main
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
