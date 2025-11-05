@@ -394,6 +394,177 @@
   align-items: flex-end;
 }
 
+.trainers-layout,
+.bikes-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  gap: 1.5rem;
+  align-items: stretch;
+}
+
+.trainers-list,
+.bikes-list {
+  background: rgba(11, 17, 32, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+  min-height: 0;
+}
+
+.trainers-list-items,
+.bikes-list-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.trainer-list-item,
+.bike-list-item {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  padding: 0.75rem;
+  background: rgba(22, 30, 52, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  transition: transform 150ms ease, background 150ms ease, border 150ms ease, box-shadow 150ms ease;
+}
+
+.trainer-list-item:hover,
+.bike-list-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(79, 155, 255, 0.5);
+  box-shadow: 0 12px 24px rgba(79, 155, 255, 0.15);
+}
+
+.trainer-list-item.active,
+.bike-list-item.active {
+  background: linear-gradient(135deg, rgba(79, 155, 255, 0.85), rgba(120, 82, 255, 0.85));
+  border-color: rgba(79, 155, 255, 0.9);
+  box-shadow: 0 16px 30px rgba(79, 155, 255, 0.35);
+  color: #0b1020;
+}
+
+.trainer-list-item.active .trainer-list-meta,
+.trainer-list-item.active .trainer-list-bike,
+.bike-list-item.active .bike-list-meta,
+.bike-list-item.active .bike-list-height {
+  color: rgba(13, 19, 36, 0.75);
+}
+
+.trainer-list-title,
+.bike-list-title {
+  font-weight: 600;
+  font-size: 1rem;
+}
+
+.trainer-list-meta,
+.bike-list-meta {
+  font-size: 0.82rem;
+  color: rgba(196, 205, 238, 0.65);
+}
+
+.trainer-list-bike,
+.bike-list-height {
+  font-size: 0.8rem;
+  color: rgba(196, 205, 238, 0.55);
+}
+
+.bike-list-item.create-entry {
+  border-style: dashed;
+  background: rgba(22, 30, 52, 0.35);
+  font-style: normal;
+}
+
+.bike-list-item.create-entry:hover {
+  border-color: rgba(120, 82, 255, 0.6);
+}
+
+.bike-list-item.create-entry.active {
+  background: rgba(120, 82, 255, 0.2);
+  color: inherit;
+}
+
+.trainer-details,
+.bike-details {
+  background: rgba(11, 17, 32, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  min-height: 0;
+}
+
+.trainer-form,
+.bike-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+}
+
+.read-value {
+  display: block;
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(13, 19, 36, 0.6);
+  color: rgba(215, 224, 255, 0.85);
+}
+
+.trainer-hint {
+  font-size: 0.85rem;
+  color: rgba(196, 205, 238, 0.65);
+}
+
+.inventory-create-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.inventory-create-button.active {
+  background: rgba(120, 82, 255, 0.2);
+  color: #f4f6ff;
+}
+
+.form-error {
+  border-radius: 12px;
+  padding: 0.7rem 0.9rem;
+  background: rgba(255, 107, 139, 0.15);
+  border: 1px solid rgba(255, 107, 139, 0.35);
+  color: #ffcdd7;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 960px) {
+  .trainers-layout,
+  .bikes-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .trainers-list,
+  .bikes-list {
+    max-height: 280px;
+    overflow: hidden;
+  }
+
+  .trainers-list-items,
+  .bikes-list-items {
+    max-height: 240px;
+  }
+}
+
 .detail-grid {
   display: grid;
   gap: 1.5rem;
@@ -452,6 +623,63 @@
   gap: 0.75rem;
   flex-wrap: wrap;
   align-items: center;
+}
+
+.clients-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: stretch;
+}
+
+.clients-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.clients-search {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.clients-search input[type="search"] {
+  flex: 1 1 220px;
+  min-width: 200px;
+}
+
+.clients-sort {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.clients-sort label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: rgba(200, 210, 240, 0.85);
+}
+
+.clients-sort select {
+  min-width: 160px;
+}
+
+.button.secondary,
+button.secondary {
+  background: rgba(79, 155, 255, 0.15);
+  color: #d5e3ff;
+  box-shadow: none;
+}
+
+.button.secondary:hover,
+button.secondary:hover {
+  background: rgba(79, 155, 255, 0.25);
+  box-shadow: none;
+  transform: none;
 }
 
 .pagination-controls {
@@ -560,7 +788,8 @@
 input[type="text"],
 input[type="number"],
 input[type="search"],
-textarea {
+textarea,
+select {
   width: 100%;
   padding: 0.5rem 0.75rem;
   border-radius: 10px;
@@ -571,7 +800,8 @@ textarea {
 }
 
 input:focus,
-textarea:focus {
+textarea:focus,
+select:focus {
   outline: none;
   border-color: rgba(79, 155, 255, 0.8);
   box-shadow: 0 0 0 3px rgba(79, 155, 255, 0.25);

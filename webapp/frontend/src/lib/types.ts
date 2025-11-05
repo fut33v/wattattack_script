@@ -72,6 +72,9 @@ export interface TrainerRow {
   axle_types?: string | null;
   cassette?: string | null;
   notes?: string | null;
+  bike_id?: number | null;
+  bike_title?: string | null;
+  bike_owner?: string | null;
 }
 
 export interface TrainerListResponse {

@@ -7,20 +7,61 @@ from typing import Dict, List, Optional
 from .db_utils import db_connection, dict_cursor
 
 EDITABLE_FIELDS = {
+    "first_name": "first_name",
+    "last_name": "last_name",
+    "full_name": "full_name",
     "weight": "weight",
+    "height": "height",
     "ftp": "ftp",
     "favorite_bike": "favorite_bike",
     "pedals": "pedals",
+    "goal": "goal",
+    "gender": "gender",
+    "saddle_height": "saddle_height",
 }
 
-def list_clients(limit: int, offset: int = 0) -> List[Dict]:
-    query = (
+ALLOWED_SORT_FIELDS = {
+    "id": "id",
+    "first_name": "COALESCE(first_name, '')",
+    "last_name": "COALESCE(last_name, COALESCE(full_name, ''))",
+    "full_name": "COALESCE(full_name, '')",
+    "submitted_at": "COALESCE(submitted_at, TO_TIMESTAMP(0))",
+    "height": "COALESCE(height, 0)",
+    "weight": "COALESCE(weight, 0)",
+    "ftp": "COALESCE(ftp, 0)",
+}
+
+
+def list_clients(
+    limit: int,
+    offset: int = 0,
+    search: Optional[str] = None,
+    sort: Optional[str] = None,
+    direction: str = "asc",
+) -> List[Dict]:
+    base_query = (
         "SELECT id, first_name, last_name, full_name, gender, weight, height, ftp, pedals, goal, saddle_height, favorite_bike, submitted_at "
-        "FROM clients ORDER BY COALESCE(last_name, full_name), COALESCE(first_name, ''), COALESCE(full_name, '') "
-        "LIMIT %s OFFSET %s"
+        "FROM clients"
     )
+    params: List[object] = []
+    if search:
+        pattern = f"%{search}%"
+        base_query += (
+            " WHERE COALESCE(first_name, '') ILIKE %s"
+            " OR COALESCE(last_name, '') ILIKE %s"
+            " OR COALESCE(full_name, '') ILIKE %s"
+        )
+        params.extend([pattern, pattern, pattern])
+
+    order_expr = ALLOWED_SORT_FIELDS.get((sort or "").lower(), "COALESCE(last_name, COALESCE(full_name, ''))")
+    order_direction = "DESC" if direction and direction.lower() == "desc" else "ASC"
+    base_query += f" ORDER BY {order_expr} {order_direction}, id"
+
+    base_query += " LIMIT %s OFFSET %s"
+    params.extend([limit, offset])
+
     with db_connection() as conn, dict_cursor(conn) as cur:
-        cur.execute(query, (limit, offset))
+        cur.execute(base_query, params)
         rows = cur.fetchall()
     return rows
 
@@ -35,11 +76,33 @@ def get_client(client_id: int) -> Optional[Dict]:
     return row
 
 
-def count_clients() -> int:
+def count_clients(search: Optional[str] = None) -> int:
     with db_connection() as conn, dict_cursor(conn) as cur:
-        cur.execute("SELECT COUNT(*) AS cnt FROM clients")
+        if search:
+            pattern = f"%{search}%"
+            cur.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM clients
+                WHERE COALESCE(first_name, '') ILIKE %s
+                   OR COALESCE(last_name, '') ILIKE %s
+                   OR COALESCE(full_name, '') ILIKE %s
+                """,
+                (pattern, pattern, pattern),
+            )
+        else:
+            cur.execute("SELECT COUNT(*) AS cnt FROM clients")
         row = cur.fetchone()
     return int(row.get("cnt", 0)) if row else 0
+
+
+def delete_client(client_id: int) -> bool:
+    with db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM clients WHERE id = %s", (client_id,))
+            deleted = cur.rowcount > 0
+        conn.commit()
+    return deleted
 
 
 def get_clients_stats() -> Dict[str, Optional[float]]:
@@ -116,6 +179,8 @@ def create_client(
     ftp: Optional[float] = None,
     pedals: Optional[str] = None,
     goal: Optional[str] = None,
+    favorite_bike: Optional[str] = None,
+    saddle_height: Optional[str] = None,
 ) -> Dict:
     first_name_clean = (first_name or "").strip() or None
     last_name_clean = (last_name or "").strip() or None
@@ -128,6 +193,8 @@ def create_client(
     pedals_clean = (pedals or "").strip() or None
     goal_clean = (goal or "").strip() or None
     gender_clean = (gender or "").strip() or None
+    favorite_bike_clean = (favorite_bike or "").strip() or None
+    saddle_height_clean = (saddle_height or "").strip() or None
 
     submitted_at = datetime.utcnow()
 
@@ -144,10 +211,12 @@ def create_client(
                 height,
                 ftp,
                 pedals,
-                goal
+                goal,
+                saddle_height,
+                favorite_bike
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING id, first_name, last_name, full_name, gender, weight, height, ftp, pedals, goal, submitted_at
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, first_name, last_name, full_name, gender, weight, height, ftp, pedals, goal, saddle_height, favorite_bike, submitted_at
             """,
             (
                 submitted_at,
@@ -160,6 +229,8 @@ def create_client(
                 ftp,
                 pedals_clean,
                 goal_clean,
+                saddle_height_clean,
+                favorite_bike_clean,
             ),
         )
         record = cur.fetchone()

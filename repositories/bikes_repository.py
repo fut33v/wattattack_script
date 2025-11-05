@@ -1,7 +1,7 @@
 """Database utilities for managing WattAttack bicycle inventory."""
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .db_utils import db_connection, dict_cursor
 
@@ -45,6 +45,58 @@ def get_bike(bike_id: int) -> Dict | None:
             (bike_id,),
         )
         row = cur.fetchone()
+    return row
+
+
+def create_bike(
+    *,
+    title: str,
+    owner: Optional[str] = None,
+    size_label: Optional[str] = None,
+    frame_size_cm: Optional[str] = None,
+    height_min_cm: Optional[float] = None,
+    height_max_cm: Optional[float] = None,
+    gears: Optional[str] = None,
+    axle_type: Optional[str] = None,
+    cassette: Optional[str] = None,
+) -> Dict:
+    ensure_bikes_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        try:
+            cur.execute(
+                """
+                INSERT INTO bikes (
+                    title,
+                    owner,
+                    size_label,
+                    frame_size_cm,
+                    height_min_cm,
+                    height_max_cm,
+                    gears,
+                    axle_type,
+                    cassette
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, position, title, owner, size_label, frame_size_cm,
+                          height_min_cm, height_max_cm, gears, axle_type, cassette
+                """,
+                (
+                    title,
+                    owner,
+                    size_label,
+                    frame_size_cm,
+                    height_min_cm,
+                    height_max_cm,
+                    gears,
+                    axle_type,
+                    cassette,
+                ),
+            )
+            row = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return row
 
 

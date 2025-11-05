@@ -27,7 +27,7 @@ class Settings:
 @lru_cache()
 def get_settings() -> Settings:
     """Return cached application settings."""
-    default_page_size = int(os.environ.get("WEBAPP_CLIENTS_PAGE_SIZE", os.environ.get("CLIENTS_PAGE_SIZE", "50")))
+    default_page_size = int(os.environ.get("WEBAPP_CLIENTS_PAGE_SIZE", os.environ.get("CLIENTS_PAGE_SIZE", "100")))
     telegram_bot_token = _env("TELEGRAM_BOT_TOKEN", required=True)
     login_token = (
         os.environ.get("TELEGRAM_LOGIN_BOT_TOKEN")

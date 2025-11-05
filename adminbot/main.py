@@ -211,8 +211,8 @@ def format_admin_record(record: Dict[str, Any]) -> str:
     return " ".join(parts) if parts else f"id={tg_id}" if tg_id else str(record.get("id"))
 
 
-def _set_pending_upload(user_data: Dict, upload_type: str, truncate: bool) -> None:
-    user_data[PENDING_UPLOAD_KEY] = {"type": upload_type, "truncate": truncate}
+def _set_pending_upload(user_data: Dict, upload_type: str, *, truncate: bool, update: bool = False) -> None:
+    user_data[PENDING_UPLOAD_KEY] = {"type": upload_type, "truncate": truncate, "update": update}
 
 
 def _pop_pending_upload(user_data: Dict) -> Optional[Dict[str, Any]]:
@@ -914,7 +914,10 @@ async def ensure_admin_callback(query) -> bool:
 
 
 async def process_clients_document(
-    document, message: Message, truncate: bool = False
+    document,
+    message: Message,
+    truncate: bool = False,
+    update_existing: bool = False,
 ) -> None:
     try:
         file = await document.get_file()
@@ -926,15 +929,21 @@ async def process_clients_document(
 
     try:
         inserted, updated = await asyncio.to_thread(
-            load_clients_from_csv_bytes, bytes(data), truncate
+            load_clients_from_csv_bytes,
+            bytes(data),
+            truncate,
+            update_existing,
         )
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to import clients")
         await message.reply_text(f"❌ Ошибка импорта: {exc}")
         return
 
+    mode_suffix = " Режим обновления." if update_existing else ""
     await message.reply_text(
-        "✅ Импорт завершён. Добавлено: {0}, обновлено: {1}.".format(inserted, updated)
+        "✅ Импорт завершён. Добавлено: {0}, обновлено: {1}.{2}".format(
+            inserted, updated, mode_suffix
+        )
     )
 
 
@@ -1705,8 +1714,11 @@ async def uploadclients_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     truncate = False
+    update_mode = False
     if context.args:
-        truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in context.args)
+        args_lower = [arg.lower() for arg in context.args]
+        truncate = any(arg in {"truncate", "--truncate"} for arg in args_lower)
+        update_mode = any(arg in {"update", "--update"} for arg in args_lower)
 
     if update.message.reply_to_message and update.message.reply_to_message.document:
         _pop_pending_upload(context.user_data)
@@ -1714,12 +1726,15 @@ async def uploadclients_handler(update: Update, context: ContextTypes.DEFAULT_TY
             update.message.reply_to_message.document,
             update.message,
             truncate=truncate,
+            update_existing=update_mode,
         )
         return
 
-    _set_pending_upload(context.user_data, "clients", truncate)
+    _set_pending_upload(context.user_data, "clients", truncate=truncate, update=update_mode)
     await update.message.reply_text(
-        "📄 Пришлите CSV файл (как документ). Можно указать /uploadclients truncate для полной перезагрузки."
+        "📄 Пришлите CSV файл (как документ).\n"
+        "   • /uploadclients truncate — полностью перезаписать таблицу\n"
+        "   • /uploadclients update — обновить существующих клиентов и добавить новых"
     )
 
 
@@ -1742,7 +1757,7 @@ async def uploadbikes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    _set_pending_upload(context.user_data, "bikes", truncate)
+    _set_pending_upload(context.user_data, "bikes", truncate=truncate)
     await update.message.reply_text(
         "📄 Пришлите CSV файл (как документ). Можно указать /uploadbikes truncate для полной перезагрузки."
     )
@@ -1767,7 +1782,7 @@ async def uploadstands_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return
 
-    _set_pending_upload(context.user_data, "stands", truncate)
+    _set_pending_upload(context.user_data, "stands", truncate=truncate)
     await update.message.reply_text(
         "📄 Пришлите CSV файл (как документ). Можно указать /uploadstands truncate для полной перезагрузки."
     )
@@ -4911,19 +4926,27 @@ async def document_upload_handler(update: Update, context: ContextTypes.DEFAULT_
 
     upload_type: Optional[str] = None
     truncate = False
+    update_mode = False
 
     if command and command in UPLOAD_COMMAND_TYPES:
         upload_type = UPLOAD_COMMAND_TYPES[command]
         truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in args)
+        update_mode = any(arg.lower() in {"update", "--update"} for arg in args)
         _pop_pending_upload(context.user_data)
     else:
         pending = _pop_pending_upload(context.user_data)
         if pending:
             upload_type = pending.get("type")
             truncate = pending.get("truncate", False)
+            update_mode = pending.get("update", False)
 
     if upload_type == "clients":
-        await process_clients_document(document, update.message, truncate)
+        await process_clients_document(
+            document,
+            update.message,
+            truncate,
+            update_mode,
+        )
     elif upload_type == "bikes":
         await process_bikes_document(document, update.message, truncate)
     elif upload_type == "stands":

@@ -4,9 +4,34 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import dayjs from "dayjs";
 
 import Panel from "../components/Panel";
-import { apiFetch } from "../lib/api";
-import type { ClientRow } from "../lib/types";
+import { apiFetch, ApiError } from "../lib/api";
+import type { BikeListResponse, BikeRow, ClientRow } from "../lib/types";
 import StateScreen from "../components/StateScreen";
+
+const PEDAL_OPTIONS = [
+  "топталки (под кроссовки)",
+  "контакты шоссе Look",
+  "контакты шоссе Shimano",
+  "контакты MTB Shimano",
+  "принесу свои"
+] as const;
+
+const GENDER_LABELS: Record<string, string> = {
+  male: "Мужской",
+  female: "Женский"
+};
+
+const GENDER_OPTIONS = [
+  { value: "", label: "Не указано" },
+  { value: "male", label: "Мужской" },
+  { value: "female", label: "Женский" }
+] as const;
+
+function formatGender(value: string | null | undefined): string {
+  if (!value) return "—";
+  const key = value.toLowerCase();
+  return GENDER_LABELS[key] ?? value;
+}
 
 interface ClientResponse {
   item: ClientRow;
@@ -24,6 +49,11 @@ export default function ClientEditPage() {
     queryKey: ["client", clientId],
     queryFn: () => apiFetch<ClientResponse>(`/api/clients/${clientId}`),
     enabled: isIdValid
+  });
+
+  const bikesQuery = useQuery<BikeListResponse>({
+    queryKey: ["bikes"],
+    queryFn: () => apiFetch<BikeListResponse>("/api/bikes")
   });
 
   const updateMutation = useMutation({
@@ -51,13 +81,19 @@ export default function ClientEditPage() {
   }
 
   const client = clientQuery.data.item;
+  const bikes = bikesQuery.data?.items ?? [];
+  const favoriteBikeValue = client.favorite_bike ?? "";
+  const isCustomFavoriteBike =
+    favoriteBikeValue !== "" && !bikes.some((bike: BikeRow) => bike.title === favoriteBikeValue);
+  const pedalsValue = client.pedals ?? "";
+  const isCustomPedals = pedalsValue !== "" && !PEDAL_OPTIONS.includes(pedalsValue as (typeof PEDAL_OPTIONS)[number]);
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
     const payload: Record<string, unknown> = {};
 
-    const numericFields = ["weight", "ftp"] as const;
+    const numericFields = ["weight", "ftp", "height"] as const;
     numericFields.forEach((field) => {
       const value = formData.get(field);
       if (value === null || value === "") {
@@ -70,7 +106,7 @@ export default function ClientEditPage() {
       }
     });
 
-    const textFields = ["favorite_bike", "pedals"] as const;
+    const textFields = ["first_name", "last_name", "favorite_bike", "pedals", "goal", "gender", "saddle_height"] as const;
     textFields.forEach((field) => {
       const value = formData.get(field);
       if (typeof value === "string") {
@@ -109,7 +145,7 @@ export default function ClientEditPage() {
             </div>
             <div>
               <dt>Пол</dt>
-              <dd>{client.gender ?? "—"}</dd>
+              <dd>{formatGender(client.gender)}</dd>
             </div>
             <div>
               <dt>Рост</dt>
@@ -142,12 +178,60 @@ export default function ClientEditPage() {
               <input type="number" step="1" name="ftp" defaultValue={client.ftp ?? ""} />
             </label>
             <label>
+              Рост (см)
+              <input type="number" step="1" min={0} name="height" defaultValue={client.height ?? ""} />
+            </label>
+            <label>
+              Имя
+              <input type="text" name="first_name" defaultValue={client.first_name ?? ""} />
+            </label>
+            <label>
+              Фамилия
+              <input type="text" name="last_name" defaultValue={client.last_name ?? ""} />
+            </label>
+            <label>
+              Пол
+              <select name="gender" defaultValue={client.gender ?? ""}>
+                {GENDER_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
               Любимый велосипед
-              <input type="text" name="favorite_bike" defaultValue={client.favorite_bike ?? ""} />
+              <select name="favorite_bike" defaultValue={favoriteBikeValue} disabled={bikesQuery.isLoading}>
+                <option value="">— Не выбран —</option>
+                {bikes.map((bike) => (
+                  <option key={bike.id} value={bike.title}>
+                    {bike.title}
+                    {bike.owner ? ` (${bike.owner})` : ""}
+                  </option>
+                ))}
+                {isCustomFavoriteBike && <option value={favoriteBikeValue}>Другой: {favoriteBikeValue}</option>}
+              </select>
+              {bikesQuery.isError && <span className="trainer-hint">Не удалось загрузить список велосипедов.</span>}
             </label>
             <label>
               Педали
-              <input type="text" name="pedals" defaultValue={client.pedals ?? ""} />
+              <select name="pedals" defaultValue={pedalsValue}>
+                <option value="">— Не выбрано —</option>
+                {PEDAL_OPTIONS.map((label) => (
+                  <option key={label} value={label}>
+                    {label}
+                  </option>
+                ))}
+                {isCustomPedals && <option value={pedalsValue}>Другие: {pedalsValue}</option>}
+              </select>
+            </label>
+            <label>
+              Высота седла
+              <input type="text" name="saddle_height" defaultValue={client.saddle_height ?? ""} />
+            </label>
+            <label>
+              Цель
+              <textarea name="goal" rows={3} defaultValue={client.goal ?? ""} />
             </label>
             <div className="form-actions">
               <button type="submit" className="button" disabled={updateMutation.isPending}>
@@ -157,6 +241,11 @@ export default function ClientEditPage() {
                 К списку
               </Link>
             </div>
+            {updateMutation.isError && (
+              <div className="form-error">
+                {(updateMutation.error as ApiError)?.message ?? "Не удалось сохранить изменения."}
+              </div>
+            )}
             {updateMutation.isSuccess && <div className="muted">Изменения сохранены.</div>}
           </form>
         </section>

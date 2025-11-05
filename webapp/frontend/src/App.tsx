@@ -9,6 +9,7 @@ import { AppContextProvider } from "./lib/AppContext";
 import DashboardPage from "./pages/DashboardPage";
 import ClientsPage from "./pages/ClientsPage";
 import ClientEditPage from "./pages/ClientEditPage";
+import ClientCreatePage from "./pages/ClientCreatePage";
 import BikesPage from "./pages/BikesPage";
 import TrainersPage from "./pages/TrainersPage";
 import ClientLinksPage from "./pages/ClientLinksPage";
@@ -51,6 +52,7 @@ export default function App() {
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/clients" element={<ClientsPage />} />
+          <Route path="/clients/new" element={<ClientCreatePage />} />
           <Route path="/clients/:id" element={<ClientEditPage />} />
           <Route path="/bikes" element={<BikesPage />} />
           <Route path="/trainers" element={<TrainersPage />} />

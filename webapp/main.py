@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
+import psycopg2
 from fastapi import (
     APIRouter,
     Depends,
@@ -25,6 +26,7 @@ from repositories import (
     bikes_repository,
     client_link_repository,
     client_repository,
+    layout_repository,
     trainers_repository,
 )
 
@@ -88,14 +90,27 @@ def api_summary(user=Depends(require_user)):
 
 
 @api.get("/clients")
-def api_clients(page: int = 1, user=Depends(require_user)):
+def api_clients(
+    page: int = 1,
+    search: str | None = None,
+    sort: str | None = None,
+    direction: str = "asc",
+    user=Depends(require_user),
+):
     settings = get_settings()
     page = max(page, 1)
     limit = settings.clients_page_size
     offset = (page - 1) * limit
+    term = search.strip() if isinstance(search, str) else None
 
-    rows = client_repository.list_clients(limit=limit, offset=offset)
-    total = client_repository.count_clients()
+    rows = client_repository.list_clients(
+        limit=limit,
+        offset=offset,
+        search=term,
+        sort=sort,
+        direction=direction,
+    )
+    total = client_repository.count_clients(search=term)
     total_pages = max(math.ceil(total / limit), 1)
 
     return _json_success(
@@ -122,33 +137,226 @@ def api_get_client(client_id: int, user=Depends(require_user)):
 @api.patch("/clients/{client_id}")
 async def api_update_client(client_id: int, request: Request, user=Depends(require_admin)):
     payload = await request.json()
+
+    record = client_repository.get_client(client_id)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+
     updates: dict[str, object] = {}
 
+    def _clean_text(value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            trimmed = value.strip()
+            return trimmed or None
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid text value")
+
+    def _clean_numeric(value: object, field: str) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            normalized = stripped.replace(",", ".")
+            try:
+                return float(normalized)
+            except ValueError as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}") from exc
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}")
+
+    if "first_name" in payload:
+        updates["first_name"] = _clean_text(payload["first_name"])
+    if "last_name" in payload:
+        updates["last_name"] = _clean_text(payload["last_name"])
     if "weight" in payload:
-        updates["weight"] = payload["weight"]
+        updates["weight"] = _clean_numeric(payload["weight"], "weight")
+    if "height" in payload:
+        updates["height"] = _clean_numeric(payload["height"], "height")
     if "ftp" in payload:
-        updates["ftp"] = payload["ftp"]
+        updates["ftp"] = _clean_numeric(payload["ftp"], "ftp")
     if "favorite_bike" in payload:
-        favorite_bike = payload["favorite_bike"]
-        updates["favorite_bike"] = favorite_bike.strip() if isinstance(favorite_bike, str) else favorite_bike
+        updates["favorite_bike"] = _clean_text(payload["favorite_bike"])
     if "pedals" in payload:
-        pedals = payload["pedals"]
-        updates["pedals"] = pedals.strip() if isinstance(pedals, str) else pedals
+        updates["pedals"] = _clean_text(payload["pedals"])
+    if "goal" in payload:
+        updates["goal"] = _clean_text(payload["goal"])
+    if "gender" in payload:
+        gender_value = _clean_text(payload["gender"])
+        updates["gender"] = gender_value.lower() if isinstance(gender_value, str) else gender_value
+    if "saddle_height" in payload:
+        updates["saddle_height"] = _clean_text(payload["saddle_height"])
+
+    if "first_name" in updates or "last_name" in updates:
+        first = updates.get("first_name", record.get("first_name"))
+        last = updates.get("last_name", record.get("last_name"))
+        full_name = " ".join(part for part in [first, last] if part) if (first or last) else None
+        updates["full_name"] = full_name
+
+    # remove keys that remain unchanged compared to existing values
+    for key in list(updates.keys()):
+        if key == "full_name":
+            continue
+        if updates[key] == record.get(key):
+            updates.pop(key)
+    if "full_name" in updates and updates["full_name"] == record.get("full_name"):
+        updates.pop("full_name")
 
     if not updates:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nothing to update")
 
-    client_repository.update_client_fields(client_id, **updates)
-    record = client_repository.get_client(client_id)
-    if not record:
+    try:
+        client_repository.update_client_fields(client_id, **updates)
+    except psycopg2.errors.UniqueViolation as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "Another client already uses this full name"
+        ) from exc
+    updated = client_repository.get_client(client_id)
+    if not updated:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
-    return {"item": jsonable_encoder(record)}
+    return {"item": jsonable_encoder(updated)}
+
+
+@api.post("/clients")
+async def api_create_client(request: Request, user=Depends(require_admin)):
+    payload = await request.json()
+
+    def _clean_text(value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            trimmed = value.strip()
+            return trimmed or None
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid text value")
+
+    def _clean_numeric(value: object, field: str) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            normalized = stripped.replace(",", ".")
+            try:
+                return float(normalized)
+            except ValueError as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}") from exc
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}")
+
+    first_name = _clean_text(payload.get("first_name"))
+    last_name = _clean_text(payload.get("last_name"))
+    if not first_name and not last_name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Имя или фамилия обязательны")
+
+    weight = _clean_numeric(payload.get("weight"), "weight")
+    height = _clean_numeric(payload.get("height"), "height")
+    ftp = _clean_numeric(payload.get("ftp"), "ftp")
+    pedals = _clean_text(payload.get("pedals"))
+    goal = _clean_text(payload.get("goal"))
+    favorite_bike = _clean_text(payload.get("favorite_bike"))
+    saddle_height = _clean_text(payload.get("saddle_height"))
+    gender = _clean_text(payload.get("gender"))
+    if isinstance(gender, str):
+        gender = gender.lower()
+
+    try:
+        record = client_repository.create_client(
+            first_name=first_name,
+            last_name=last_name,
+            gender=gender,
+            weight=weight,
+            height=height,
+            ftp=ftp,
+            pedals=pedals,
+            goal=goal,
+            favorite_bike=favorite_bike,
+            saddle_height=saddle_height,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except psycopg2.errors.UniqueViolation as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Клиент с таким именем уже существует") from exc
+
+    created = client_repository.get_client(record["id"])
+    return {"item": jsonable_encoder(created or record)}
+
+
+@api.delete("/clients/{client_id}")
+def api_delete_client(client_id: int, user=Depends(require_admin)):
+    # Remove linked Telegram accounts if present (FK may handle cascade but ensure consistency)
+    client_link_repository.remove_link(client_id=client_id)
+
+    deleted = client_repository.delete_client(client_id)
+    if not deleted:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+    return {"ok": True}
 
 
 @api.get("/bikes")
 def api_bikes(user=Depends(require_user)):
     rows = bikes_repository.list_bikes()
     return _json_success({"items": jsonable_encoder(rows)})
+
+
+@api.post("/bikes")
+async def api_create_bike(request: Request, user=Depends(require_admin)):
+    payload = await request.json()
+
+    title = payload.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Title is required")
+
+    def _clean_str(value: object, *, allowed: set[str] | None = None) -> str | None:
+        if isinstance(value, str):
+            trimmed = value.strip()
+            if not trimmed:
+                return None
+            if allowed is not None and trimmed not in allowed:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid value")
+            return trimmed
+        if value is None:
+            return None
+        if allowed is not None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid value")
+        return None
+
+    def _parse_height(value: object, field: str) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            normalized = stripped.replace(",", ".")
+            try:
+                return float(normalized)
+            except ValueError as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}") from exc
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}")
+
+    try:
+        record = bikes_repository.create_bike(
+            title=title.strip(),
+            owner=_clean_str(payload.get("owner")),
+            size_label=_clean_str(payload.get("size_label")),
+            frame_size_cm=_clean_str(payload.get("frame_size_cm")),
+            height_min_cm=_parse_height(payload.get("height_min_cm"), "height_min_cm"),
+            height_max_cm=_parse_height(payload.get("height_max_cm"), "height_max_cm"),
+            gears=_clean_str(payload.get("gears")),
+            axle_type=_clean_str(payload.get("axle_type"), allowed={"ЭКС", "ОСЬ"}),
+            cassette=_clean_str(payload.get("cassette"), allowed={"7", "8", "9", "10", "11", "12"}),
+        )
+    except psycopg2.errors.UniqueViolation as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Bike with this title already exists") from exc
+
+    return {"item": jsonable_encoder(record)}
 
 
 @api.patch("/bikes/{bike_id}")
@@ -181,15 +389,43 @@ def api_trainers(user=Depends(require_user)):
 async def api_update_trainer(trainer_id: int, request: Request, user=Depends(require_admin)):
     payload = await request.json()
     updates: dict[str, object] = {}
-    for key in ("axle_types", "cassette"):
+    for key in ("title", "display_name", "owner", "axle_types", "cassette"):
         if key in payload:
-            value = payload[key]
-            updates[key] = value.strip() if isinstance(value, str) else value
+            updates[key] = payload[key]
 
-    if not updates:
+    bike_assignment_handled = False
+    if "bike_id" in payload:
+        bike_assignment_handled = True
+        bike_value = payload["bike_id"]
+        if isinstance(bike_value, str):
+            bike_value = bike_value.strip()
+        if bike_value in (None, "", "null"):
+            layout_repository.ensure_layout_table()
+            layout_repository.clear_bike_assignment_for_stand(trainer_id)
+        else:
+            try:
+                bike_id = int(bike_value)
+            except (TypeError, ValueError):
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid bike_id")
+            bike_record = bikes_repository.get_bike(bike_id)
+            if not bike_record:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Bike not found")
+            layout_repository.ensure_layout_table()
+            layout_repository.set_bike_assignment(trainer_id, bike_id, assigned_by=getattr(user, "id", None))
+
+    for key, value in list(updates.items()):
+        if isinstance(value, str):
+            trimmed = value.strip()
+            updates[key] = trimmed or None
+        elif value in ("", None):
+            updates[key] = None
+
+    if not updates and not bike_assignment_handled:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nothing to update")
 
-    trainers_repository.update_trainer_fields(trainer_id, **updates)
+    if updates:
+        trainers_repository.update_trainer_fields(trainer_id, **updates)
+
     record = trainers_repository.get_trainer(trainer_id)
     if not record:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Trainer not found")

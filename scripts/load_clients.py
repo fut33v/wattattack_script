@@ -7,7 +7,7 @@ import csv
 from io import StringIO
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 from repositories.db_utils import db_connection, dict_cursor
 
@@ -23,6 +23,8 @@ CSV_HEADERS = {
     "Педали": "pedals",
     "Ваша цель": "goal",
     "ПОЛ": "gender",
+    "Пол": "gender",
+    "Ваш пол": "gender",
     "высота седла": "saddle_height",
     "любимый велосипед": "favorite_bike",
 }
@@ -122,7 +124,39 @@ def _map_rows(reader: csv.DictReader) -> List[dict]:
     return rows
 
 
-def load_rows(rows: List[dict]) -> tuple[int, int]:
+def _find_existing_client(
+    cur,
+    *,
+    full_name: Optional[str],
+    first_name: Optional[str],
+    last_name: Optional[str],
+) -> Optional[int]:
+    if full_name:
+        cur.execute(
+            "SELECT id FROM clients WHERE lower(COALESCE(full_name, '')) = %s",
+            (full_name.lower(),),
+        )
+        row = cur.fetchone()
+        if row and row.get("id") is not None:
+            return int(row["id"])
+
+    if first_name and last_name:
+        cur.execute(
+            """
+            SELECT id FROM clients
+            WHERE lower(COALESCE(first_name, '')) = %s
+              AND lower(COALESCE(last_name, '')) = %s
+            """,
+            (first_name.lower(), last_name.lower()),
+        )
+        row = cur.fetchone()
+        if row and row.get("id") is not None:
+            return int(row["id"])
+
+    return None
+
+
+def load_rows(rows: List[dict], *, update_existing: bool = True) -> tuple[int, int]:
     inserted = 0
     updated = 0
 
@@ -156,23 +190,87 @@ def load_rows(rows: List[dict]) -> tuple[int, int]:
                 # Skip entries without at least a combined name to keep uniqueness meaningful
                 continue
 
-            cur.execute(
-                """
-                INSERT INTO clients (submitted_at, first_name, last_name, full_name, gender, weight, height, ftp, pedals, goal, saddle_height, favorite_bike)
+            if update_existing:
+                existing_id = _find_existing_client(
+                    cur,
+                    full_name=full_name,
+                    first_name=first_name or None,
+                    last_name=last_name or None,
+                )
+                if existing_id is not None:
+                    cur.execute(
+                        """
+                        UPDATE clients
+                        SET
+                            submitted_at = %s,
+                            first_name = %s,
+                            last_name = %s,
+                            full_name = %s,
+                            gender = %s,
+                            weight = %s,
+                            height = %s,
+                            ftp = %s,
+                            pedals = %s,
+                            goal = %s,
+                            saddle_height = %s,
+                            favorite_bike = %s
+                        WHERE id = %s
+                        """,
+                        (
+                            submitted_dt,
+                            first_name or None,
+                            last_name or None,
+                            full_name,
+                            gender,
+                            weight,
+                            height,
+                            ftp,
+                            pedals,
+                            goal,
+                            saddle_height,
+                            favorite_bike,
+                            existing_id,
+                        ),
+                    )
+                    updated += 1
+                    continue
+
+            conflict_clause = """
+            ON CONFLICT (full_name) DO UPDATE
+            SET submitted_at = EXCLUDED.submitted_at,
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                gender = EXCLUDED.gender,
+                weight = EXCLUDED.weight,
+                height = EXCLUDED.height,
+                ftp = EXCLUDED.ftp,
+                pedals = EXCLUDED.pedals,
+                goal = EXCLUDED.goal,
+                saddle_height = EXCLUDED.saddle_height,
+                favorite_bike = EXCLUDED.favorite_bike
+            RETURNING (xmax = 0) AS inserted
+            """
+
+            query = f"""
+                INSERT INTO clients (
+                    submitted_at,
+                    first_name,
+                    last_name,
+                    full_name,
+                    gender,
+                    weight,
+                    height,
+                    ftp,
+                    pedals,
+                    goal,
+                    saddle_height,
+                    favorite_bike
+                )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (full_name) DO UPDATE
-                SET submitted_at = EXCLUDED.submitted_at,
-                    first_name = EXCLUDED.first_name,
-                    last_name = EXCLUDED.last_name,
-                    gender = EXCLUDED.gender,
-                    weight = EXCLUDED.weight,
-                    height = EXCLUDED.height,
-                    ftp = EXCLUDED.ftp,
-                    pedals = EXCLUDED.pedals,
-                    goal = EXCLUDED.goal,
-                    saddle_height = EXCLUDED.saddle_height,
-                    favorite_bike = EXCLUDED.favorite_bike
-                """,
+                {conflict_clause}
+            """
+            cur.execute(
+                query,
                 (
                     submitted_dt,
                     first_name or None,
@@ -188,7 +286,9 @@ def load_rows(rows: List[dict]) -> tuple[int, int]:
                     favorite_bike,
                 ),
             )
-            if cur.statusmessage.startswith("INSERT"):
+
+            row_info = cur.fetchone()
+            if row_info and row_info.get("inserted", False):
                 inserted += 1
             else:
                 updated += 1
@@ -197,14 +297,18 @@ def load_rows(rows: List[dict]) -> tuple[int, int]:
     return inserted, updated
 
 
-def load_data(csv_path: Path) -> tuple[int, int]:
+def load_data(csv_path: Path, *, update_existing: bool = True) -> tuple[int, int]:
     with csv_path.open(encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         rows = _map_rows(reader)
-    return load_rows(rows)
+    return load_rows(rows, update_existing=update_existing)
 
 
-def load_clients_from_csv_bytes(data: bytes, truncate: bool = False) -> tuple[int, int]:
+def load_clients_from_csv_bytes(
+    data: bytes,
+    truncate: bool = False,
+    update_existing: bool = True,
+) -> tuple[int, int]:
     create_table()
     if truncate:
         truncate_table()
@@ -212,7 +316,7 @@ def load_clients_from_csv_bytes(data: bytes, truncate: bool = False) -> tuple[in
     text = data.decode("utf-8-sig")
     reader = csv.DictReader(StringIO(text))
     rows = _map_rows(reader)
-    return load_rows(rows)
+    return load_rows(rows, update_existing=update_existing)
 
 
 def main(argv: Iterable[str] | None = None) -> int:

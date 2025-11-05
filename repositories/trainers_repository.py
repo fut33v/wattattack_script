@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Dict, Iterable, List, Tuple
 
 from .db_utils import db_connection, dict_cursor
+from .layout_repository import ensure_layout_table
 
 
 def ensure_trainers_table() -> None:
@@ -32,12 +33,27 @@ def ensure_trainers_table() -> None:
 
 
 def get_trainer(trainer_id: int) -> Dict | None:
+    ensure_layout_table()
     with db_connection() as conn, dict_cursor(conn) as cur:
         cur.execute(
             """
-            SELECT id, position, code, title, display_name, owner, axle_types, cassette, notes
-            FROM trainers
-            WHERE id = %s
+            SELECT
+                t.id,
+                t.position,
+                t.code,
+                t.title,
+                t.display_name,
+                t.owner,
+                t.axle_types,
+                t.cassette,
+                t.notes,
+                bl.bike_id,
+                b.title AS bike_title,
+                b.owner AS bike_owner
+            FROM trainers AS t
+            LEFT JOIN bike_layout AS bl ON bl.stand_id = t.id
+            LEFT JOIN bikes AS b ON b.id = bl.bike_id
+            WHERE t.id = %s
             """,
             (trainer_id,),
         )
@@ -105,10 +121,26 @@ def upsert_trainers(rows: Iterable[Dict]) -> Tuple[int, int]:
 def list_trainers(limit: int | None = None, offset: int = 0) -> List[Dict]:
     """Return trainer inventory ordered by position then code."""
 
+    ensure_layout_table()
+
     query = (
-        "SELECT id, position, code, title, display_name, owner, axle_types, cassette, notes "
-        "FROM trainers "
-        "ORDER BY position NULLS LAST, code"
+        "SELECT "
+        "t.id, "
+        "t.position, "
+        "t.code, "
+        "t.title, "
+        "t.display_name, "
+        "t.owner, "
+        "t.axle_types, "
+        "t.cassette, "
+        "t.notes, "
+        "bl.bike_id, "
+        "b.title AS bike_title, "
+        "b.owner AS bike_owner "
+        "FROM trainers AS t "
+        "LEFT JOIN bike_layout AS bl ON bl.stand_id = t.id "
+        "LEFT JOIN bikes AS b ON b.id = bl.bike_id "
+        "ORDER BY t.position NULLS LAST, t.code"
     )
     params: tuple = ()
     if limit is not None:
@@ -151,6 +183,9 @@ def trainers_count() -> int:
 
 
 EDITABLE_TRAINER_FIELDS = {
+    "title": "title",
+    "display_name": "display_name",
+    "owner": "owner",
     "axle_types": "axle_types",
     "cassette": "cassette",
 }
