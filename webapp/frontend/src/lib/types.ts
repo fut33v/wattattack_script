@@ -105,3 +105,78 @@ export interface ClientLinkRow {
 export interface ClientLinkListResponse {
   items: ClientLinkRow[];
 }
+
+export interface ScheduleWeekRow {
+  id: number;
+  week_start_date: string;
+  title?: string | null;
+  notes?: string | null;
+  copied_from_week_id?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  slots_count?: number | null;
+}
+
+export interface ScheduleWeekListResponse {
+  items: ScheduleWeekRow[];
+  pagination: Pagination;
+}
+
+export interface ScheduleReservation {
+  id: number;
+  slot_id: number;
+  stand_id?: number | null;
+  stand_code?: string | null;
+  client_id?: number | null;
+  client_name?: string | null;
+  status: string;
+  source?: string | null;
+  notes?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ScheduleSlot {
+  id: number;
+  week_id: number;
+  slot_date: string;
+  start_time: string;
+  end_time: string;
+  label?: string | null;
+  session_kind: string;
+  is_cancelled?: boolean;
+  sort_index?: number | null;
+  notes?: string | null;
+  reservations: ScheduleReservation[];
+  instructorId?: number | null;
+  instructorName?: string | null;
+}
+
+export interface ScheduleStandSummary {
+  id: number;
+  code?: string | null;
+  display_name?: string | null;
+  title?: string | null;
+}
+
+export interface ScheduleWeekDetailResponse {
+  week: ScheduleWeekRow;
+  slots: ScheduleSlot[];
+  stands: ScheduleStandSummary[];
+  instructors: InstructorRow[];
+}
+
+export interface InstructorRow {
+  id: number;
+  full_name: string;
+  created_at?: string | null;
+}
+
+export interface InstructorListResponse {
+  items: InstructorRow[];
+}
+
+export interface FillTemplateResponse {
+  created: number;
+  slots: ScheduleSlot[];
+}

@@ -7,5 +7,7 @@ __all__ = [
     "bikes_repository",
     "trainers_repository",
     "layout_repository",
+    "instructors_repository",
+    "schedule_repository",
     "db_utils",
 ]

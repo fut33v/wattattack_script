@@ -117,6 +117,13 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 - **Notifier**: Draws admin IDs from DB (`admins` table). If empty, it logs an error at startup.
 - **Security**: `.env` and `accounts.json` are gitignored; keep credentials safe. PostgreSQL credentials supplied via env variables.
 
+### Schedule administration
+- Раздел `Расписание` в SPA разбит на два режима: обзор (`/app/schedule`) и редактор (`/app/schedule/manage`). Обзор открывается без бокового меню, занимает весь экран и по умолчанию показывает текущую неделю в виде семи колонок (каждый столбец — день). Навигация по неделям осуществляется стрелками в заголовке.
+- В блоках дня указано сколько слотов свободно/занято; карточки дней и отдельных слотов сворачиваются по клику, поэтому даже насыщенная неделя остаётся компактной и удобной на узких экранах. Состояние свёртки сохраняется при переключении недель.
+- В редакторе добавлены действия `Удалить неделю`, `Заполнить по шаблону`, копирование и синхронизация станков. Удаление требует подтверждения и очищает все слоты/брони выбранной недели.
+- Инструкторы управляются в новом разделе `Инструкторы`: можно добавить тренера по имени или удалить запись. Эти данные используются при создании слота в режиме «С инструктором».
+- Бэкенд автоматически создаёт таблицу инструкторов при запуске и наполняет её базовым списком (Евгений Балакин, Илья Фатеев, Кирилл Иванов). Список можно расширять прямо из интерфейса или обновить `DEFAULT_INSTRUCTORS` в `repositories/instructors_repository.py`, после чего приложение само подтянет новые значения.
+
 ## Utilities
 - `scripts/load_clients.py` – standalone importer (CLI). Returns counts of inserted/updated rows.
 - `scripts/load_bikes.py` – bicycle inventory importer (CLI) with optional truncation.

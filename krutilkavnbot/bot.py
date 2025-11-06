@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, time, timedelta
 from typing import Any, Awaitable, Callable, Dict, Final, List, Optional, Tuple
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, User
 from telegram.ext import (
@@ -16,6 +18,7 @@ from telegram.ext import (
     filters,
 )
 
+from repositories import bikes_repository, schedule_repository, trainers_repository
 from repositories.client_repository import create_client, get_client, search_clients
 from repositories.client_link_repository import (
     get_link_by_client,
@@ -31,6 +34,7 @@ _CANDIDATES_KEY: Final[str] = "krutilkavnbot:candidates"
 _FORM_KEY: Final[str] = "krutilkavnbot:form"
 _PENDING_APPROVALS_KEY: Final[str] = "krutilkavnbot:pending_approvals"
 _LAST_SEARCH_KEY: Final[str] = "krutilkavnbot:last_name"
+_BOOKING_STATE_KEY: Final[str] = "krutilkavnbot:booking"
 
 DEFAULT_GREETING: Final[str] = "Здравствуйте!"
 MAX_SUGGESTIONS: Final[int] = 6
@@ -48,6 +52,8 @@ MAX_SUGGESTIONS: Final[int] = 6
     FORM_GOAL,
 ) = range(10)
 
+BOOK_SELECT_DAY, BOOK_SELECT_SLOT = range(100, 102)
+
 _PEDAL_CHOICES: Final[List[Tuple[str, str]]] = [
     ("топталки (под кроссовки)", "platform"),
     ("контакты шоссе Look", "road_look"),
@@ -58,6 +64,9 @@ _PEDAL_CHOICES: Final[List[Tuple[str, str]]] = [
 
 _PEDAL_LABEL_BY_CODE: Final[Dict[str, str]] = {code: label for label, code in _PEDAL_CHOICES}
 _GENDER_LABELS: Final[Dict[str, str]] = {"male": "М", "female": "Ж"}
+_WEEKDAY_SHORT: Final[List[str]] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+_BOOKING_CUTOFF: Final[timedelta] = timedelta(minutes=90)
+_LOCAL_TZ: Final[ZoneInfo] = ZoneInfo("Europe/Moscow")
 
 
 def _normalize_last_name(value: str) -> str:
@@ -76,6 +85,706 @@ def _format_client_label(client: Dict[str, Any]) -> str:
     else:
         display = last_name or first_name or "Без имени"
     return f"{display} (ID {client.get('id')})"
+
+
+def _format_client_display_name(client: Dict[str, Any]) -> str:
+    first_name = (client.get("first_name") or "").strip()
+    last_name = (client.get("last_name") or "").strip()
+    full_name = (client.get("full_name") or "").strip()
+    if first_name and last_name:
+        return f"{first_name} {last_name}".strip()
+    if full_name:
+        return full_name
+    return last_name or first_name or "Клиент"
+
+
+def _format_day_label(value: date) -> str:
+    weekday_idx = value.weekday()
+    prefix = _WEEKDAY_SHORT[weekday_idx] if 0 <= weekday_idx < len(_WEEKDAY_SHORT) else value.strftime("%a")
+    return f"{prefix} {value.strftime('%d.%m')}"
+
+
+def _parse_date(value: Any) -> Optional[date]:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            try:
+                return datetime.strptime(value, "%Y-%m-%d").date()
+            except ValueError:
+                return None
+    return None
+
+
+def _parse_time(value: Any) -> Optional[time]:
+    if isinstance(value, time):
+        return value
+    if isinstance(value, str):
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                return datetime.strptime(value, fmt).time()
+            except ValueError:
+                continue
+    return None
+
+
+def _format_time_range(start_value: Any, end_value: Any) -> str:
+    start = _parse_time(start_value)
+    end = _parse_time(end_value)
+    if not start or not end:
+        return f"{start_value}-{end_value}"
+    return f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
+
+
+def _format_slot_caption(slot: Dict[str, Any]) -> str:
+    label_parts: List[str] = [_format_time_range(slot.get("start_time"), slot.get("end_time"))]
+    slot_label = (slot.get("label") or "").strip()
+    instructor_name = (slot.get("instructor_name") or "").strip()
+    if slot_label:
+        label_parts.append(slot_label)
+    elif slot.get("session_kind") == "instructor" and instructor_name:
+        label_parts.append(f"С инструктором ({instructor_name})")
+    elif slot.get("session_kind") == "instructor":
+        label_parts.append("С инструктором")
+    free_count = slot.get("free_count")
+    if isinstance(free_count, int):
+        label_parts.append(f"мест {free_count}")
+    return " · ".join(label_parts)
+
+
+def _format_stand_label(stand: Optional[Dict[str, Any]], reservation: Optional[Dict[str, Any]] = None) -> str:
+    if stand:
+        for key in ("display_name", "code", "title"):
+            value = stand.get(key)
+            if value:
+                return str(value)
+        stand_id = stand.get("id")
+        if stand_id is not None:
+            return f"Станок {stand_id}"
+    stand_code = (reservation or {}).get("stand_code")
+    if stand_code:
+        return str(stand_code)
+    return "Станок"
+
+
+def _slot_start_datetime(slot: Dict[str, Any]) -> Optional[datetime]:
+    slot_date = _parse_date(slot.get("slot_date"))
+    start_time_value = _parse_time(slot.get("start_time"))
+    if slot_date and start_time_value:
+        combined = datetime.combine(slot_date, start_time_value)
+        return combined.replace(tzinfo=_LOCAL_TZ)
+    return None
+
+
+def _to_local_naive(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(_LOCAL_TZ).replace(tzinfo=None)
+
+
+def _local_now() -> datetime:
+    return datetime.now(tz=_LOCAL_TZ)
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _score_bike_height(bike: Dict[str, Any], client_height: Optional[float]) -> float:
+    if client_height is None:
+        return 120.0
+
+    min_h = _to_float(bike.get("height_min_cm"))
+    max_h = _to_float(bike.get("height_max_cm"))
+
+    if min_h is not None and max_h is not None:
+        if min_h <= client_height <= max_h:
+            midpoint = (min_h + max_h) / 2
+            return abs(client_height - midpoint)
+        if client_height < min_h:
+            return 200.0 + (min_h - client_height)
+        return 200.0 + (client_height - max_h)
+
+    if min_h is not None:
+        if client_height >= min_h:
+            return client_height - min_h
+        return 200.0 + (min_h - client_height)
+
+    if max_h is not None:
+        if client_height <= max_h:
+            return max_h - client_height
+        return 200.0 + (client_height - max_h)
+
+    return 150.0
+
+
+def _match_favorite_bike_id(favorite_raw: Optional[str], bikes_map: Dict[int, Dict[str, Any]]) -> Optional[int]:
+    if not favorite_raw:
+        return None
+    needle = favorite_raw.strip().lower()
+    if not needle:
+        return None
+
+    exact_matches: List[int] = []
+    partial_matches: List[int] = []
+
+    for bike_id, bike in bikes_map.items():
+        title = (bike.get("title") or "").strip().lower()
+        owner = (bike.get("owner") or "").strip().lower()
+        if title == needle or owner == needle:
+            exact_matches.append(bike_id)
+        elif needle in title or (owner and needle in owner):
+            partial_matches.append(bike_id)
+
+    if exact_matches:
+        return exact_matches[0]
+    if partial_matches:
+        return partial_matches[0]
+    return None
+
+
+def _choose_best_reservation(
+    client: Dict[str, Any],
+    reservations: List[Dict[str, Any]],
+    *,
+    stands_map: Dict[int, Dict[str, Any]],
+    bikes_map: Dict[int, Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    client_height = _to_float(client.get("height"))
+    favorite_bike_id = _match_favorite_bike_id(client.get("favorite_bike"), bikes_map)
+
+    best_choice: Optional[Tuple[float, float, str, Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]] = None
+
+    for reservation in reservations:
+        stand_id = reservation.get("stand_id")
+        stand = stands_map.get(stand_id) if isinstance(stand_id, int) else None
+        bike = None
+        bike_id = None
+        if stand:
+            bike_id = stand.get("bike_id")
+            if isinstance(bike_id, int):
+                bike = bikes_map.get(bike_id)
+
+        if bike_id is not None and favorite_bike_id is not None and bike_id == favorite_bike_id:
+            score = 0.0
+        elif bike is not None:
+            score = 100.0 + _score_bike_height(bike, client_height)
+        elif stand is not None:
+            score = 600.0
+        else:
+            score = 900.0
+
+        position = stand.get("position") if isinstance(stand, dict) else None
+        position_score = float(position) if isinstance(position, (int, float)) else 999.0
+        stand_label = _format_stand_label(stand, reservation)
+
+        candidate = (score, position_score, stand_label.lower(), reservation, stand, bike)
+        if best_choice is None or candidate[:3] < best_choice[:3]:
+            best_choice = candidate
+
+    if best_choice is None:
+        return None, None, None
+
+    return best_choice[3], best_choice[4], best_choice[5]
+
+
+def _get_booking_state(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Any]:
+    state = context.user_data.get(_BOOKING_STATE_KEY)
+    if state is None:
+        state = {}
+        context.user_data[_BOOKING_STATE_KEY] = state
+    return state
+
+
+def _clear_booking_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(_BOOKING_STATE_KEY, None)
+
+
+def _fetch_linked_client(user_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    try:
+        link = get_link_by_user(user_id)
+    except Exception:
+        LOGGER.exception("Failed to fetch linked client for user %s", user_id)
+        return None, None
+    if not link:
+        return None, None
+
+    client_id = link.get("client_id")
+    if not isinstance(client_id, int):
+        return link, None
+
+    try:
+        client = get_client(client_id)
+    except Exception:
+        LOGGER.exception("Failed to load client record %s for user %s", client_id, user_id)
+        return link, None
+
+    return link, client
+
+
+def _group_slots_by_day(slots: List[Dict[str, Any]]) -> List[Tuple[date, List[Dict[str, Any]]]]:
+    grouped: Dict[date, List[Dict[str, Any]]] = {}
+    for slot in slots:
+        slot_date = slot.get("slot_date")
+        if not isinstance(slot_date, date):
+            continue
+        grouped.setdefault(slot_date, []).append(slot)
+    for slot_list in grouped.values():
+        slot_list.sort(key=lambda item: (item.get("start_time"), item.get("id")))
+    return sorted(grouped.items(), key=lambda item: item[0])
+
+
+def _build_day_keyboard(day_slots: List[Tuple[date, List[Dict[str, Any]]]]) -> InlineKeyboardMarkup:
+    buttons: List[List[InlineKeyboardButton]] = []
+    for slot_date, slots in day_slots:
+        total_free = sum(slot.get("free_count") or 0 for slot in slots)
+        label = f"{_format_day_label(slot_date)} · свободно {total_free}"
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"book:day:{slot_date.isoformat()}",
+                )
+            ]
+        )
+    buttons.append([InlineKeyboardButton(text="Отмена", callback_data="book:cancel")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _build_slot_keyboard(slots: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+    buttons: List[List[InlineKeyboardButton]] = []
+    for slot in slots:
+        caption = _format_slot_caption(slot)
+        slot_id = slot.get("id")
+        if not isinstance(slot_id, int):
+            continue
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=caption,
+                    callback_data=f"book:slot:{slot_id}",
+                )
+            ]
+        )
+    nav_row = [
+        InlineKeyboardButton(text="← Назад", callback_data="book:back"),
+        InlineKeyboardButton(text="Отмена", callback_data="book:cancel"),
+    ]
+    buttons.append(nav_row)
+    return InlineKeyboardMarkup(buttons)
+
+
+async def _present_day_selection(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    reply: Callable[[str, InlineKeyboardMarkup], Awaitable[None]],
+    horizon_days: int = 21,
+) -> bool:
+    now_local = _local_now()
+    end = now_local + timedelta(days=horizon_days)
+    cutoff_threshold = now_local + _BOOKING_CUTOFF
+    if end <= cutoff_threshold:
+        end = cutoff_threshold + timedelta(days=1)
+    try:
+        slots_raw = schedule_repository.list_available_slots(
+            _to_local_naive(now_local),
+            _to_local_naive(end),
+        )
+    except Exception:
+        LOGGER.exception("Failed to load available slots for booking")
+        return False
+
+    slots = []
+    for slot in slots_raw:
+        start_dt = _slot_start_datetime(slot)
+        if start_dt is None:
+            continue
+        if start_dt - now_local < _BOOKING_CUTOFF:
+            continue
+        slots.append(slot)
+
+    if not slots:
+        return False
+
+    grouped = _group_slots_by_day(slots)
+    if not grouped:
+        return False
+
+    limited = grouped[:10]
+    booking_state = _get_booking_state(context)
+    booking_state["day_map"] = {day.isoformat(): day_slots for day, day_slots in limited}
+    booking_state["horizon_start"] = cutoff_threshold.isoformat()
+    booking_state["horizon_end"] = end
+
+    text = "Выберите день для бронирования тренировки:"
+    markup = _build_day_keyboard(limited)
+    await reply(text, markup)
+    return True
+
+
+async def _send_day_selection_message(message, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    async def _reply(text: str, markup: InlineKeyboardMarkup) -> None:
+        await message.reply_text(text, reply_markup=markup)
+
+    return await _present_day_selection(context, reply=_reply)
+
+
+async def _edit_day_selection_message(query, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    async def _reply(text: str, markup: InlineKeyboardMarkup) -> None:
+        await query.edit_message_text(text, reply_markup=markup)
+
+    return await _present_day_selection(context, reply=_reply)
+
+
+async def _book_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return ConversationHandler.END
+
+    _clear_booking_state(context)
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await message.reply_text("Сначала привяжите свою анкету через /start, затем повторите попытку.")
+        return ConversationHandler.END
+
+    state = _get_booking_state(context)
+    state["client"] = client
+    state["client_id"] = client.get("id")
+    state["link"] = link
+
+    success = await _send_day_selection_message(message, context)
+    if not success or "day_map" not in state:
+        await message.reply_text("Свободных слотов пока нет. Попробуйте позже.")
+        _clear_booking_state(context)
+        return ConversationHandler.END
+
+    return BOOK_SELECT_DAY
+
+
+async def _handle_booking_day(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query is None:
+        return ConversationHandler.END
+    await query.answer()
+    data = query.data or ""
+    try:
+        _, _, date_str = data.split(":", 2)
+        selected_date = date.fromisoformat(date_str)
+    except (ValueError, AttributeError):
+        return BOOK_SELECT_DAY
+
+    state = _get_booking_state(context)
+    day_map = state.get("day_map") or {}
+    if date_str not in day_map:
+        success = await _edit_day_selection_message(query, context)
+        if not success:
+            await query.edit_message_text("Выбор устарел. Запустите /book заново.")
+            _clear_booking_state(context)
+            return ConversationHandler.END
+        return BOOK_SELECT_DAY
+    state["selected_date"] = date_str
+
+    start_dt_local = datetime.combine(selected_date, time.min, tzinfo=_LOCAL_TZ)
+    end_dt_local = datetime.combine(selected_date, time.max, tzinfo=_LOCAL_TZ)
+
+    try:
+        slots = schedule_repository.list_available_slots(
+            _to_local_naive(start_dt_local),
+            _to_local_naive(end_dt_local),
+        )
+    except Exception:
+        LOGGER.exception("Failed to load slots for %s", date_str)
+        await query.edit_message_text("Не удалось загрузить список слотов. Попробуйте позже.")
+        _clear_booking_state(context)
+        return ConversationHandler.END
+
+    now_check = _local_now()
+    filtered_slots: List[Dict[str, Any]] = []
+    for slot in slots:
+        if not slot.get("free_count"):
+            continue
+        start_dt_candidate = _slot_start_datetime(slot)
+        if start_dt_candidate is None:
+            continue
+        if start_dt_candidate - now_check < _BOOKING_CUTOFF:
+            continue
+        filtered_slots.append(slot)
+    slots = filtered_slots
+    if not slots:
+        success = await _edit_day_selection_message(query, context)
+        if not success:
+            await query.edit_message_text("Свободных мест не осталось. Попробуйте позже.")
+            _clear_booking_state(context)
+            return ConversationHandler.END
+        return BOOK_SELECT_DAY
+
+    state["slots_map"] = {slot["id"]: slot for slot in slots if isinstance(slot.get("id"), int)}
+
+    text = f"Свободные слоты { _format_day_label(selected_date)}:"
+    markup = _build_slot_keyboard(slots)
+    try:
+        await query.edit_message_text(text, reply_markup=markup)
+    except Exception:
+        LOGGER.exception("Failed to present slots for %s", date_str)
+        _clear_booking_state(context)
+        return ConversationHandler.END
+
+    return BOOK_SELECT_SLOT
+
+
+async def _handle_booking_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query is None:
+        return ConversationHandler.END
+    await query.answer()
+    success = await _edit_day_selection_message(query, context)
+    if not success:
+        await query.edit_message_text("Свободных слотов пока нет. Попробуйте позже.")
+        _clear_booking_state(context)
+        return ConversationHandler.END
+    return BOOK_SELECT_DAY
+
+
+async def _handle_booking_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query is not None:
+        await query.answer("Бронирование отменено")
+        try:
+            await query.edit_message_text("Бронирование отменено.")
+        except Exception:
+            LOGGER.debug("Failed to edit cancel message", exc_info=True)
+    _clear_booking_state(context)
+    return ConversationHandler.END
+
+
+async def _booking_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text("Бронирование отменено.")
+    _clear_booking_state(context)
+    return ConversationHandler.END
+
+
+async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query is None:
+        return ConversationHandler.END
+    await query.answer()
+
+    data = query.data or ""
+    try:
+        reservation_slot_id = int(data.split(":", 2)[2])
+    except (ValueError, IndexError):
+        return BOOK_SELECT_SLOT
+
+    state = _get_booking_state(context)
+    client = state.get("client")
+    if not isinstance(client, dict) or not isinstance(client.get("id"), int):
+        await query.edit_message_text("Сессия бронирования устарела. Запустите /book снова.")
+        _clear_booking_state(context)
+        return ConversationHandler.END
+
+    try:
+        slot = schedule_repository.get_slot_with_reservations(reservation_slot_id)
+    except Exception:
+        LOGGER.exception("Failed to load slot detail %s", reservation_slot_id)
+        slot = None
+
+    if not slot:
+        success = await _edit_day_selection_message(query, context)
+        if not success:
+            await query.edit_message_text("Слот недоступен. Попробуйте начать заново.")
+            _clear_booking_state(context)
+            return ConversationHandler.END
+        return BOOK_SELECT_DAY
+
+    slot_start_dt = _slot_start_datetime(slot)
+    if slot_start_dt is not None:
+        if slot_start_dt - _local_now() < _BOOKING_CUTOFF:
+            await query.answer("До начала менее 1,5 часов, слот недоступен для брони.", show_alert=True)
+            success = await _edit_day_selection_message(query, context)
+            if not success:
+                await query.edit_message_text("Выберите другой слот при следующей попытке.")
+                _clear_booking_state(context)
+                return ConversationHandler.END
+            return BOOK_SELECT_DAY
+
+    reservations = slot.get("reservations") or []
+    for existing in reservations:
+        if existing.get("client_id") == client.get("id"):
+            await query.edit_message_text("Вы уже записаны на этот слот.")
+            _clear_booking_state(context)
+            return ConversationHandler.END
+
+    available_reservations = [
+        res for res in reservations if (res.get("status") or "").lower() == "available"
+    ]
+    if not available_reservations:
+        success = await _edit_day_selection_message(query, context)
+        if not success:
+            await query.edit_message_text("Свободных мест не осталось. Попробуйте позже.")
+            _clear_booking_state(context)
+            return ConversationHandler.END
+        return BOOK_SELECT_DAY
+
+    try:
+        stands = trainers_repository.list_trainers()
+    except Exception:
+        LOGGER.exception("Failed to load trainers for booking")
+        stands = []
+    stands_map = {
+        row.get("id"): row for row in stands if isinstance(row.get("id"), int)
+    }
+
+    try:
+        bikes = bikes_repository.list_bikes()
+    except Exception:
+        LOGGER.exception("Failed to load bikes for booking")
+        bikes = []
+    bikes_map = {
+        row.get("id"): row for row in bikes if isinstance(row.get("id"), int)
+    }
+
+    reservation, stand, bike = _choose_best_reservation(
+        client,
+        available_reservations,
+        stands_map=stands_map,
+        bikes_map=bikes_map,
+    )
+    if reservation is None:
+        success = await _edit_day_selection_message(query, context)
+        if not success:
+            await query.edit_message_text("Не удалось подобрать свободный станок.")
+            _clear_booking_state(context)
+            return ConversationHandler.END
+        return BOOK_SELECT_DAY
+
+    client_display_name = _format_client_display_name(client)
+    try:
+        booked_row = schedule_repository.book_available_reservation(
+            reservation["id"],
+            client_id=client["id"],
+            client_name=client_display_name,
+            source="krutilkavnbot",
+        )
+    except Exception:
+        LOGGER.exception("Failed to update reservation %s", reservation["id"])
+        booked_row = None
+
+    if not booked_row:
+        await query.answer("К сожалению, место только что заняли.", show_alert=True)
+        selected_date_str = state.get("selected_date")
+        if selected_date_str:
+            try:
+                selected_date = date.fromisoformat(selected_date_str)
+            except ValueError:
+                selected_date = slot.get("slot_date")
+        else:
+            selected_date = slot.get("slot_date")
+
+        selected_date_obj = _parse_date(selected_date)
+        if selected_date_obj:
+            cutoff_time = _local_now() + _BOOKING_CUTOFF
+            start_dt_local = datetime.combine(selected_date_obj, time.min, tzinfo=_LOCAL_TZ)
+            if start_dt_local < cutoff_time:
+                start_dt_local = cutoff_time
+            end_dt_local = datetime.combine(selected_date_obj, time.max, tzinfo=_LOCAL_TZ)
+            if end_dt_local <= start_dt_local:
+                end_dt_local = start_dt_local + timedelta(minutes=1)
+            try:
+                refreshed = schedule_repository.list_available_slots(
+                    _to_local_naive(start_dt_local),
+                    _to_local_naive(end_dt_local),
+                )
+            except Exception:
+                LOGGER.exception("Failed to refresh slots for %s", selected_date)
+                refreshed = []
+
+            now_refresh = _local_now()
+            filtered_refreshed: List[Dict[str, Any]] = []
+            for item in refreshed:
+                if not item.get("free_count"):
+                    continue
+                start_dt_candidate = _slot_start_datetime(item)
+                if start_dt_candidate is None:
+                    continue
+                if start_dt_candidate - now_refresh < _BOOKING_CUTOFF:
+                    continue
+                filtered_refreshed.append(item)
+            refreshed = filtered_refreshed
+            if refreshed:
+                state["slots_map"] = {
+                    item["id"]: item for item in refreshed if isinstance(item.get("id"), int)
+                }
+                markup = _build_slot_keyboard(refreshed)
+                text = f"Свободные слоты {_format_day_label(selected_date_obj)}:"
+                await query.edit_message_text(text, reply_markup=markup)
+                return BOOK_SELECT_SLOT
+
+        success = await _edit_day_selection_message(query, context)
+        if not success:
+            await query.edit_message_text("Свободных мест больше нет. Попробуйте позже.")
+            _clear_booking_state(context)
+            return ConversationHandler.END
+        return BOOK_SELECT_DAY
+
+    stand_label = _format_stand_label(stand, reservation)
+    bike_label = None
+    if bike:
+        bike_title = (bike.get("title") or "").strip()
+        bike_owner = (bike.get("owner") or "").strip()
+        if bike_owner:
+            bike_label = f"{bike_title} ({bike_owner})" if bike_title else bike_owner
+        else:
+            bike_label = bike_title or None
+
+    slot_label = (slot.get("label") or "").strip()
+    instructor_note = ""
+    if slot.get("session_kind") == "instructor":
+        instructor_name = (slot.get("instructor_name") or "").strip()
+        if instructor_name:
+            instructor_note = f"\nИнструктор: {instructor_name}"
+        else:
+            instructor_note = "\nИнструктор: уточняется"
+
+    when_label = ""
+    slot_date_val = _parse_date(slot.get("slot_date"))
+    start_time_val = _parse_time(slot.get("start_time"))
+    if slot_date_val and start_time_val:
+        when_label = f"{slot_date_val.strftime('%d.%m.%Y')} в {start_time_val.strftime('%H:%M')}"
+
+    summary_lines = [
+        "✅ Запись подтверждена!",
+        f"{client_display_name}, вы записаны на {when_label}." if when_label else "Запись создана.",
+        f"Станок: {stand_label}",
+    ]
+    if slot_label:
+        summary_lines.append(f"Слот: {slot_label}")
+    if bike_label:
+        summary_lines.append(f"Велосипед: {bike_label}")
+    if instructor_note:
+        summary_lines.append(instructor_note.strip())
+    summary_lines.append("До встречи в «Крутилке»!")
+
+    try:
+        await query.edit_message_text("\n".join(summary_lines))
+    except Exception:
+        LOGGER.debug("Failed to edit confirmation message", exc_info=True)
+        try:
+            await query.message.reply_text("\n".join(summary_lines))
+        except Exception:
+            LOGGER.exception("Failed to send booking confirmation follow-up")
+
+    _clear_booking_state(context)
+    return ConversationHandler.END
 
 
 def _find_clients_by_last_name(last_name: str) -> List[Dict[str, Any]]:
@@ -337,12 +1046,14 @@ async def _start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         text = (
             f"{greeting}\n\n{intro}\n\n"
             f"✅ Уже привязаны к {linked_client_name}.\n"
-            "Чтобы изменить связь, отправьте свою фамилию снова."
+            "Чтобы изменить связь, отправьте свою фамилию снова.\n\n"
+            "Для бронирования свободных слотов используйте команду /book."
         )
     else:
         text = (
             f"{greeting}\n\n{intro}\n\n"
-            "Пожалуйста, введите свою фамилию, чтобы продолжить."
+            "Пожалуйста, введите свою фамилию, чтобы продолжить. "
+            "После подтверждения анкеты можно будет записываться через /book."
         )
 
     await message.reply_text(text)
@@ -354,9 +1065,9 @@ async def _help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if message is None:
         return
     await message.reply_text(
-        "Отправьте /start, чтобы пройти авторизацию. "
-        "Бот попросит вашу фамилию и предложит выбрать клиента из списка. "
-        "Если клиента нет в базе, можно заполнить короткую анкету для создания новой записи.",
+        "Отправьте /start, чтобы пройти авторизацию и привязать свою анкету. "
+        "Если клиента нет в базе, можно заполнить короткую анкету для новой записи. "
+        "После привязки используйте /book, чтобы выбрать удобный слот и забронировать тренировку.",
     )
 
 
@@ -1053,6 +1764,25 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     )
 
     application.add_handler(conversation)
+    booking_conversation = ConversationHandler(
+        entry_points=[CommandHandler("book", _book_command_handler)],
+        states={
+            BOOK_SELECT_DAY: [
+                CallbackQueryHandler(_handle_booking_day, pattern=r"^book:day:\d{4}-\d{2}-\d{2}$"),
+                CallbackQueryHandler(_handle_booking_cancel_callback, pattern=r"^book:cancel$"),
+            ],
+            BOOK_SELECT_SLOT: [
+                CallbackQueryHandler(_handle_booking_slot, pattern=r"^book:slot:\d+$"),
+                CallbackQueryHandler(_handle_booking_day, pattern=r"^book:day:\d{4}-\d{2}-\d{2}$"),
+                CallbackQueryHandler(_handle_booking_back, pattern=r"^book:back$"),
+                CallbackQueryHandler(_handle_booking_cancel_callback, pattern=r"^book:cancel$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", _booking_cancel_command)],
+        name="schedule_booking",
+        persistent=False,
+    )
+    application.add_handler(booking_conversation)
     application.add_handler(CommandHandler("help", _help_handler))
     application.add_handler(CallbackQueryHandler(_handle_admin_decision, pattern=r"^(approve|reject):"))
     application.add_handler(MessageHandler(filters.COMMAND, _unknown_command_handler))
