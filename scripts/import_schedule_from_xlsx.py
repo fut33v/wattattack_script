@@ -6,7 +6,9 @@ import argparse
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from io import BytesIO
 from pathlib import Path
+import re
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import zipfile
 import xml.etree.ElementTree as ET
@@ -17,14 +19,23 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from repositories import client_repository, schedule_repository, trainers_repository
+from repositories import (
+    client_repository,
+    instructors_repository,
+    schedule_repository,
+    trainers_repository,
+)
 
 
 BASE_DATE = datetime(1899, 12, 30)
 NS_MAIN = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 NS_REL = {"r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships"}
 
-CLIENT_ALIASES: Dict[str, Optional[str]] = {
+def _normalize_yo(value: str) -> str:
+    return value.replace("ё", "е").replace("Ё", "Е")
+
+
+_CLIENT_ALIAS_ENTRIES: Dict[str, Optional[str]] = {
     "занято": None,
     "busy": None,
     "самокрутка": None,
@@ -57,6 +68,22 @@ CLIENT_ALIASES: Dict[str, Optional[str]] = {
     "ольга кубарева": "ольга кубарева",
 }
 
+CLIENT_ALIASES: Dict[str, Optional[str]] = {
+    _normalize_yo(key.strip().lower()): value for key, value in _CLIENT_ALIAS_ENTRIES.items()
+}
+
+INSTRUCTOR_ALIAS_ENTRIES: Dict[str, str] = {
+    "евгений балакин": "евгений балакин",
+    "балакин евгений": "евгений балакин",
+    "балакин": "евгений балакин",
+    "евгений балакан": "евгений балакин",
+    "константин гаврилов": "константин гаврилов",
+    "гаврилов константин": "константин гаврилов",
+    "костя гаврилов": "константин гаврилов",
+    "наталья раскина": "наталья раскина",
+    "раскина наталья": "наталья раскина",
+}
+
 
 @dataclass
 class SlotReservation:
@@ -77,6 +104,27 @@ class WeekSheet:
     sheet_name: str
     week_start: date
     slots: List[SlotEntry]
+
+
+@dataclass
+class WeekImportSummary:
+    week_start: date
+    sheet: str
+    created_slots: int
+    reservations: int
+    unmatched_clients: Counter[str]
+    unmatched_stands: Counter[str]
+    unmatched_instructors: Counter[str]
+
+
+@dataclass
+class ImportOutcome:
+    summaries: List[WeekImportSummary]
+    totals_clients: Counter[str]
+    totals_stands: Counter[str]
+    totals_instructors: Counter[str]
+    replace_existing: bool
+    dry_run: bool
 
 
 def load_shared_strings(zf: zipfile.ZipFile) -> List[str]:
@@ -107,6 +155,28 @@ def workbook_sheets(zf: zipfile.ZipFile) -> List[Tuple[str, str]]:
             continue
         sheets.append((sheet.attrib.get("name", f"sheet-{len(sheets)+1}"), f"xl/{target}"))
     return sheets
+
+
+def _extract_week_sheets(zf: zipfile.ZipFile) -> List[WeekSheet]:
+    shared_strings = load_shared_strings(zf)
+    sheets = workbook_sheets(zf)
+
+    week_sheets: List[WeekSheet] = []
+    for sheet_name, sheet_path in sheets:
+        if sheet_path not in zf.namelist():
+            continue
+        slot_entries = parse_sheet(zf, sheet_path, shared_strings)
+        if not slot_entries:
+            continue
+        min_date = min(entry.slot_date for entry in slot_entries)
+        week_start = min_date - timedelta(days=min_date.weekday())
+        week_sheets.append(WeekSheet(sheet_name=sheet_name, week_start=week_start, slots=slot_entries))
+    return week_sheets
+
+
+def load_workbook_from_bytes(data: bytes) -> List[WeekSheet]:
+    with zipfile.ZipFile(BytesIO(data)) as zf:
+        return _extract_week_sheets(zf)
 
 
 def excel_cell_to_indices(ref: str) -> Tuple[int, int]:
@@ -279,12 +349,47 @@ def load_stand_lookup() -> Dict[str, int]:
     return mapping
 
 
+def load_instructor_lookup() -> Dict[str, Tuple[int, str]]:
+    instructors_repository.ensure_instructors_table()
+    instructors = instructors_repository.list_instructors()
+    mapping: Dict[str, Tuple[int, str]] = {}
+    for instructor in instructors:
+        full_name = instructor.get("full_name")
+        if not full_name:
+            continue
+        normalized = resolve_instructor_key(full_name)
+        if normalized:
+            mapping[normalized] = (instructor["id"], full_name)
+    return mapping
+
+
 def normalize_client_name(name: str) -> str:
-    return " ".join(name.strip().lower().split())
+    return " ".join(_normalize_yo(name.strip().lower()).split())
 
 
 def normalize_stand_label(label: str) -> str:
     return label.strip().lower().replace(" ", "")
+
+
+def normalize_instructor_name(name: str) -> str:
+    cleaned = re.sub(r"[^\w\s]+", " ", name, flags=re.UNICODE)
+    return " ".join(_normalize_yo(cleaned.strip().lower()).split())
+
+
+def resolve_instructor_key(name: str) -> str:
+    normalized = normalize_instructor_name(name)
+    if not normalized:
+        return ""
+    target = INSTRUCTOR_ALIASES.get(normalized)
+    if target:
+        return normalize_instructor_name(target)
+    return normalized
+
+
+INSTRUCTOR_ALIASES: Dict[str, str] = {
+    _normalize_yo(key.strip().lower()): normalize_instructor_name(value)
+    for key, value in INSTRUCTOR_ALIAS_ENTRIES.items()
+}
 
 
 def extract_client_key(text: str) -> str:
@@ -296,7 +401,7 @@ def resolve_client(
     client_text: str,
     lookup: Dict[str, List[Tuple[int, str]]],
 ) -> Tuple[Optional[int], Optional[str]]:
-    raw = client_text.strip().lower()
+    raw = _normalize_yo(client_text.strip().lower())
     alias_target = CLIENT_ALIASES.get(raw)
     if raw in CLIENT_ALIASES and alias_target is None:
         return None, None
@@ -330,6 +435,23 @@ def resolve_client(
     return None, None
 
 
+def detect_instructor_from_label(
+    label: str,
+    lookup: Dict[str, Tuple[int, str]],
+) -> Tuple[Optional[int], Optional[str], Optional[str]]:
+    normalized = resolve_instructor_key(label or "")
+    if not normalized:
+        return None, label, None
+    match = lookup.get(normalized)
+    if match:
+        instructor_id, display_name = match
+        return instructor_id, None, display_name
+    for key, (instructor_id, display_name) in lookup.items():
+        if key and key in normalized:
+            return instructor_id, label, display_name
+    return None, label, None
+
+
 def ensure_week_title(week_id: int, title: str) -> None:
     existing = schedule_repository.get_week(week_id)
     if not existing:
@@ -345,9 +467,10 @@ def import_schedule(
     week: WeekSheet,
     client_lookup: Dict[str, List[Tuple[int, str]]],
     stand_lookup: Dict[str, int],
+    instructor_lookup: Dict[str, Tuple[int, str]],
     replace: bool,
     dry_run: bool,
-) -> dict:
+) -> WeekImportSummary:
     schedule_repository.ensure_schedule_tables()
     week_record = schedule_repository.get_or_create_week(
         week_start_date=week.week_start,
@@ -360,6 +483,7 @@ def import_schedule(
 
     unmatched_clients: Counter[str] = Counter()
     unmatched_stands: Counter[str] = Counter()
+    unmatched_instructors: Counter[str] = Counter()
     created_slots = 0
     populated_reservations = 0
 
@@ -367,13 +491,19 @@ def import_schedule(
         start_time, end_time = parse_time_range(slot_entry.time_label)
 
         session_kind = "self_service"
-        label = slot_entry.label.strip() if slot_entry.label else None
+        original_label = slot_entry.label.strip() if slot_entry.label else None
+        label = original_label
+        instructor_id: Optional[int] = None
         if label:
-            if label.lower().startswith("самокрутка"):
+            lower_label = label.lower()
+            if lower_label.startswith("самокрутка"):
                 session_kind = "self_service"
                 label = None
             else:
                 session_kind = "instructor"
+                instructor_id, label, _ = detect_instructor_from_label(label, instructor_lookup)
+                if instructor_id is None and original_label:
+                    unmatched_instructors[original_label] += 1
 
         if dry_run:
             created_slots += 1
@@ -396,6 +526,7 @@ def import_schedule(
             end_time=end_time,
             label=label,
             session_kind=session_kind,
+            instructor_id=instructor_id,
         )
         created_slots += 1
 
@@ -444,33 +575,144 @@ def import_schedule(
     if not dry_run:
         schedule_repository.sync_week_capacity(week_record["id"])
 
-    return {
-        "week_id": week_record["id"],
-        "week_start": week.week_start,
-        "sheet": week.sheet_name,
-        "created_slots": created_slots,
-        "reservations": populated_reservations,
-        "unmatched_clients": unmatched_clients,
-        "unmatched_stands": unmatched_stands,
-    }
+    return WeekImportSummary(
+        week_start=week.week_start,
+        sheet=week.sheet_name,
+        created_slots=created_slots,
+        reservations=populated_reservations,
+        unmatched_clients=unmatched_clients,
+        unmatched_stands=unmatched_stands,
+        unmatched_instructors=unmatched_instructors,
+    )
+
+
+def run_schedule_import(
+    weeks: List[WeekSheet],
+    *,
+    keep_existing: bool,
+    dry_run: bool,
+) -> ImportOutcome:
+    if not weeks:
+        raise ValueError("Нет подходящих недель для импорта.")
+
+    client_lookup = load_client_lookup()
+    stand_lookup = load_stand_lookup()
+    instructor_lookup = load_instructor_lookup()
+    replace = not keep_existing
+
+    summaries: List[WeekImportSummary] = []
+    totals_clients: Counter[str] = Counter()
+    totals_stands: Counter[str] = Counter()
+    totals_instructors: Counter[str] = Counter()
+
+    for week in weeks:
+        summary = import_schedule(
+            week=week,
+            client_lookup=client_lookup,
+            stand_lookup=stand_lookup,
+            instructor_lookup=instructor_lookup,
+            replace=replace,
+            dry_run=dry_run,
+        )
+        summaries.append(summary)
+        totals_clients.update(summary.unmatched_clients)
+        totals_stands.update(summary.unmatched_stands)
+        totals_instructors.update(summary.unmatched_instructors)
+
+    return ImportOutcome(
+        summaries=summaries,
+        totals_clients=totals_clients,
+        totals_stands=totals_stands,
+        totals_instructors=totals_instructors,
+        replace_existing=replace,
+        dry_run=dry_run,
+    )
+
+
+def _filter_weeks(
+    weeks: List[WeekSheet],
+    week_filters: Optional[Iterable[date]] = None,
+    sheet_filters: Optional[Iterable[str]] = None,
+) -> List[WeekSheet]:
+    filtered = weeks
+    if week_filters:
+        desired = set(week_filters)
+        filtered = [week for week in filtered if week.week_start in desired]
+    if sheet_filters:
+        wanted = {name.lower() for name in sheet_filters}
+        filtered = [week for week in filtered if week.sheet_name.lower() in wanted]
+    return sorted(filtered, key=lambda w: w.week_start)
+
+
+def run_schedule_import_from_bytes(
+    data: bytes,
+    *,
+    keep_existing: bool,
+    dry_run: bool,
+    week_filters: Optional[Iterable[date]] = None,
+    sheet_filters: Optional[Iterable[str]] = None,
+) -> ImportOutcome:
+    weeks = load_workbook_from_bytes(data)
+    if not weeks:
+        raise ValueError("Не удалось извлечь расписание из файла.")
+    weeks = _filter_weeks(weeks, week_filters, sheet_filters)
+    if not weeks:
+        raise ValueError("Нет подходящих недель для импорта (проверьте фильтр).")
+    return run_schedule_import(weeks, keep_existing=keep_existing, dry_run=dry_run)
+
+
+def _format_counter_section(
+    lines: List[str],
+    counter: Counter[str],
+    title: str,
+) -> None:
+    if not counter:
+        return
+    lines.append(f"  {title}:")
+    for name, count in counter.most_common():
+        lines.append(f"    · {name} × {count}")
+
+
+def format_import_report(outcome: ImportOutcome) -> str:
+    replace_text = "yes" if outcome.replace_existing else "no"
+    lines: List[str] = [
+        f"Найдено недель: {len(outcome.summaries)} (replace={replace_text}, dry_run={outcome.dry_run})"
+    ]
+
+    for summary in outcome.summaries:
+        lines.append(
+            f"- {summary.week_start.isoformat()} (лист '{summary.sheet}'): "
+            f"слотов={summary.created_slots} назначений={summary.reservations}"
+        )
+        _format_counter_section(lines, summary.unmatched_clients, "Клиенты без совпадений")
+        _format_counter_section(lines, summary.unmatched_stands, "Не сопоставлены станки")
+        _format_counter_section(
+            lines,
+            summary.unmatched_instructors,
+            "Не сопоставлены инструкторы",
+        )
+
+    if outcome.totals_clients:
+        lines.append("\nКлиенты без совпадений (итого):")
+        for name, count in outcome.totals_clients.most_common():
+            lines.append(f"  · {name} × {count}")
+    if outcome.totals_stands:
+        lines.append("\nНе сопоставлены станки (итого):")
+        for name, count in outcome.totals_stands.most_common():
+            lines.append(f"  · {name} × {count}")
+    if outcome.totals_instructors:
+        lines.append("\nИнструкторы без совпадений (итого):")
+        for name, count in outcome.totals_instructors.most_common():
+            lines.append(f"  · {name} × {count}")
+
+    if outcome.dry_run:
+        lines.append("\nDRY RUN завершён. В базу изменения не вносились.")
+
+    return "\n".join(lines)
 
 
 def load_workbook(path: Path) -> List[WeekSheet]:
-    with zipfile.ZipFile(path) as zf:
-        shared_strings = load_shared_strings(zf)
-        sheets = workbook_sheets(zf)
-
-        week_sheets: List[WeekSheet] = []
-        for sheet_name, sheet_path in sheets:
-            if sheet_path not in zf.namelist():
-                continue
-            slot_entries = parse_sheet(zf, sheet_path, shared_strings)
-            if not slot_entries:
-                continue
-            min_date = min(entry.slot_date for entry in slot_entries)
-            week_start = min_date - timedelta(days=min_date.weekday())
-            week_sheets.append(WeekSheet(sheet_name=sheet_name, week_start=week_start, slots=slot_entries))
-    return week_sheets
+    return load_workbook_from_bytes(path.read_bytes())
 
 
 def main() -> None:
@@ -506,60 +748,33 @@ def main() -> None:
     if not args.file.exists():
         raise SystemExit(f"Файл {args.file} не найден.")
 
-    weeks = load_workbook(args.file)
-    if not weeks:
-        raise SystemExit("Не удалось извлечь расписание из файла.")
+    try:
+        data = args.file.read_bytes()
+    except FileNotFoundError:
+        raise SystemExit(f"Файл {args.file} не найден.")
 
+    week_filters = None
     if args.week_start:
-        desired = {
-            datetime.strptime(value, "%Y-%m-%d").date() - timedelta(days=datetime.strptime(value, "%Y-%m-%d").weekday())
-            for value in args.week_start
-        }
-        weeks = [week for week in weeks if week.week_start in desired]
+        week_filters = []
+        for value in args.week_start:
+            dt = datetime.strptime(value, "%Y-%m-%d").date()
+            week_filters.append(dt - timedelta(days=dt.weekday()))
 
-    if args.sheet:
-        wanted = {name.lower() for name in args.sheet}
-        weeks = [week for week in weeks if week.sheet_name.lower() in wanted]
+    sheet_filters = args.sheet if args.sheet else None
 
-    if not weeks:
-        raise SystemExit("Нет подходящих недель для импорта (проверьте фильтр).")
-
-    weeks.sort(key=lambda w: w.week_start)
-
-    client_lookup = load_client_lookup()
-    stand_lookup = load_stand_lookup()
-
-    print(f"Найдено недель: {len(weeks)} (replace={'no' if args.keep_existing else 'yes'}, dry_run={args.dry_run})")
-
-    totals_clients: Counter[str] = Counter()
-    totals_stands: Counter[str] = Counter()
-
-    for week in weeks:
-        summary = import_schedule(
-            week=week,
-            client_lookup=client_lookup,
-            stand_lookup=stand_lookup,
-            replace=not args.keep_existing,
+    try:
+        outcome = run_schedule_import_from_bytes(
+            data,
+            keep_existing=args.keep_existing,
             dry_run=args.dry_run,
+            week_filters=week_filters,
+            sheet_filters=sheet_filters,
         )
-        print(
-            f"- {summary['week_start'].isoformat()} (лист '{summary['sheet']}'): "
-            f"слотов={summary['created_slots']} назначений={summary['reservations']}"
-        )
-        totals_clients.update(summary["unmatched_clients"])
-        totals_stands.update(summary["unmatched_stands"])
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
-        if summary["unmatched_clients"]:
-            print("  Клиенты без совпадений:")
-            for name, count in summary["unmatched_clients"].most_common():
-                print(f"    · {name} × {count}")
-        if summary["unmatched_stands"]:
-            print("  Не сопоставлены станки:")
-            for name, count in summary["unmatched_stands"].most_common():
-                print(f"    · {name} × {count}")
-
-    if args.dry_run:
-        print("\nDRY RUN завершён. В базу изменения не вносились.")
+    report = format_import_report(outcome)
+    print(report)
 
 
 if __name__ == "__main__":

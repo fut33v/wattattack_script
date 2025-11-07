@@ -6,3 +6,4 @@ __pycache__/
 data
 webapp/frontend/node_modules/
 webapp/frontend/dist/
+.pycache

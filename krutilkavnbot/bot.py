@@ -36,6 +36,16 @@ _PENDING_APPROVALS_KEY: Final[str] = "krutilkavnbot:pending_approvals"
 _LAST_SEARCH_KEY: Final[str] = "krutilkavnbot:last_name"
 _BOOKING_STATE_KEY: Final[str] = "krutilkavnbot:booking"
 _MY_BOOKINGS_CACHE_KEY: Final[str] = "krutilkavnbot:my_bookings"
+_STATUS_LABELS: Final[Dict[str, str]] = {
+    "booked": "Записан",
+    "available": "Свободно",
+    "cancelled": "Отменено",
+    "pending": "Ожидание",
+    "waitlist": "Лист ожидания",
+    "blocked": "Заблокировано",
+    "legacy": "История",
+    "hold": "Держим",
+}
 
 DEFAULT_GREETING: Final[str] = "Здравствуйте!"
 MAX_SUGGESTIONS: Final[int] = 6
@@ -1069,7 +1079,8 @@ async def _help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await message.reply_text(
         "Отправьте /start, чтобы пройти авторизацию и привязать свою анкету. "
         "Если клиента нет в базе, можно заполнить короткую анкету для новой записи. "
-        "После привязки используйте /book, чтобы выбрать удобный слот и забронировать тренировку.",
+        "После привязки используйте /book, чтобы выбрать удобный слот, "
+        "/mybookings — посмотреть будущие записи, а /history — историю визитов.",
     )
 
 
@@ -1078,7 +1089,8 @@ async def _unknown_command_handler(update: Update, context: ContextTypes.DEFAULT
     if message is None:
         return
     await message.reply_text(
-        "Используйте /start, чтобы привязать или создать анкету, и /book, чтобы записаться в свободный слот."
+        "Используйте /start, чтобы привязать или создать анкету, /book — для записи, "
+        "/mybookings — увидеть будущие посещения, /history — историю."
     )
 
 
@@ -1090,7 +1102,8 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         "Доступные команды:\n"
         "/start — привязать или создать анкету.\n"
         "/book — забронировать свободный слот.\n"
-        "/mybookings — показать ваши будущие записи."
+        "/mybookings — показать ваши будущие записи.\n"
+        "/history — показать историю бронирований."
     )
 
 
@@ -1100,8 +1113,12 @@ async def _handle_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return ASK_LAST_NAME
 
     if message.text.startswith("/"):
+        command = message.text.strip().split()[0].lower()
+        if command == "/start":
+            return await _start_handler(update, context)
         await message.reply_text(
-            "Используйте /start, чтобы привязать или создать анкету, и /book, чтобы записаться в свободный слот."
+            "Используйте /start для привязки анкеты, /book для новых записей, "
+            "/mybookings для ближайших посещений и /history для истории бронирований."
         )
         return ASK_LAST_NAME
 
@@ -1806,6 +1823,7 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     )
     application.add_handler(booking_conversation)
     application.add_handler(CommandHandler("mybookings", _my_bookings_handler))
+    application.add_handler(CommandHandler("history", _history_handler))
     application.add_handler(CommandHandler("help", _help_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _fallback_text_handler))
     application.add_handler(CallbackQueryHandler(_handle_admin_decision, pattern=r"^(approve|reject):"))
@@ -1866,6 +1884,90 @@ async def _my_bookings_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         label = (entry.get("label") or "").strip()
         if label:
             parts.append(label)
+
+        stand_label = _format_stand_label(
+            {
+                "code": entry.get("stand_code"),
+                "display_name": entry.get("stand_display_name"),
+                "title": entry.get("stand_title"),
+            },
+            entry,
+        )
+        if stand_label:
+            parts.append(f"Станок: {stand_label}")
+
+        bike_title = (entry.get("bike_title") or "").strip()
+        bike_owner = (entry.get("bike_owner") or "").strip()
+        if bike_title or bike_owner:
+            if bike_owner:
+                parts.append(f"Велосипед: {bike_title} ({bike_owner})" if bike_title else f"Велосипед: {bike_owner}")
+            else:
+                parts.append(f"Велосипед: {bike_title}")
+
+        lines.append("\n".join(parts))
+
+    await message.reply_text("\n\n".join(lines))
+
+
+async def _history_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await message.reply_text("Сначала привяжите свою анкету через /start, затем повторите попытку.")
+        return
+
+    client_id = client.get("id")
+    if not isinstance(client_id, int):
+        await message.reply_text("Не удалось определить вашу анкету. Обратитесь к администратору.")
+        return
+
+    now_local = _local_now()
+    try:
+        reservations = schedule_repository.list_past_reservations_for_client(
+            client_id,
+            _to_local_naive(now_local),
+            limit=10,
+        )
+    except Exception:
+        LOGGER.exception("Failed to fetch reservation history for client %s", client_id)
+        await message.reply_text("Не удалось получить историю записей. Попробуйте позже.")
+        return
+
+    if not reservations:
+        await message.reply_text("История бронирований пуста.")
+        return
+
+    lines: List[str] = ["Последние посещения:"]
+    for entry in reservations:
+        slot_date_value = _parse_date(entry.get("slot_date"))
+        time_range = _format_time_range(entry.get("start_time"), entry.get("end_time"))
+        header = ""
+        if slot_date_value:
+            header = f"{slot_date_value.strftime('%d.%m.%Y (%a)')} · {time_range}"
+        else:
+            header = time_range
+
+        parts = [header]
+
+        status = (entry.get("status") or "").lower()
+        status_label = _STATUS_LABELS.get(status, status or "неизвестно")
+        parts.append(f"Статус: {status_label}")
+
+        label = (entry.get("label") or "").strip()
+        if label:
+            parts.append(label)
+
+        session_kind = entry.get("session_kind")
+        instructor_name = (entry.get("instructor_name") or "").strip()
+        if session_kind == "instructor":
+            if instructor_name:
+                parts.append(f"Инструктор: {instructor_name}")
+            else:
+                parts.append("Инструктор: уточняется")
 
         stand_label = _format_stand_label(
             {

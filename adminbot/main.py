@@ -69,6 +69,10 @@ from repositories.layout_repository import (
 from scripts.load_clients import load_clients_from_csv_bytes
 from scripts.load_bikes import load_bikes_from_csv_bytes
 from scripts.load_trainers import load_trainers_from_csv_bytes
+from scripts.import_schedule_from_xlsx import (
+    run_schedule_import_from_bytes,
+    format_import_report as format_schedule_import_report,
+)
 from wattattack_activities import WattAttackClient
 from wattattack_workouts import (
     build_workout_payload,
@@ -165,8 +169,23 @@ UPLOAD_COMMAND_TYPES = {
     "/uploadclients": "clients",
     "/uploadbikes": "bikes",
     "/uploadstands": "stands",
+    "/uploadschedule": "schedule",
 }
 WORKOUT_UPLOAD_COMMAND = "/uploadworkout"
+UPLOADCLIENTS_PROMPT = (
+    "📄 Выберите режим импорта клиентов.\n"
+    "• «Обновление» — добавить новых и обновить существующих.\n"
+    "• «Перезаписать» — очистить таблицу и загрузить заново.\n"
+    "• «Dry run» — проверить файл без изменений в базе.\n"
+    "После выбора нажмите «Готово» и отправьте CSV документ."
+)
+UPLOADSCHEDULE_PROMPT = (
+    "📅 Выберите режим импорта расписания.\n"
+    "• «Keep» — не очищать существующие недели (добавление/обновление).\n"
+    "• Без keep — недели будут полностью заменены.\n"
+    "• «Dry run» — проверить файл без записи.\n"
+    "После выбора нажмите «Готово» и отправьте XLSX документ."
+)
 
 
 ACCOUNT_REGISTRY: Dict[str, AccountConfig] = {}
@@ -211,8 +230,18 @@ def format_admin_record(record: Dict[str, Any]) -> str:
     return " ".join(parts) if parts else f"id={tg_id}" if tg_id else str(record.get("id"))
 
 
-def _set_pending_upload(user_data: Dict, upload_type: str, *, truncate: bool, update: bool = False) -> None:
-    user_data[PENDING_UPLOAD_KEY] = {"type": upload_type, "truncate": truncate, "update": update}
+def _set_pending_upload(
+    user_data: Dict,
+    upload_type: str,
+    *,
+    truncate: bool,
+    update: bool = False,
+    **extra: Any,
+) -> None:
+    payload: Dict[str, Any] = {"type": upload_type, "truncate": truncate, "update": update}
+    if extra:
+        payload.update(extra)
+    user_data[PENDING_UPLOAD_KEY] = payload
 
 
 def _pop_pending_upload(user_data: Dict) -> Optional[Dict[str, Any]]:
@@ -220,6 +249,13 @@ def _pop_pending_upload(user_data: Dict) -> Optional[Dict[str, Any]]:
     if value is not None:
         user_data.pop(PENDING_UPLOAD_KEY, None)
     return value
+
+
+def _get_pending_upload(user_data: Dict) -> Optional[Dict[str, Any]]:
+    value = user_data.get(PENDING_UPLOAD_KEY)
+    if isinstance(value, dict):
+        return value
+    return None
 
 
 def _set_pending_workout_upload(user_data: Dict[str, Any], account_ids: List[str]) -> None:
@@ -1005,6 +1041,41 @@ async def process_trainers_document(
     )
 
 
+async def process_schedule_document(
+    document,
+    message: Message,
+    *,
+    keep_existing: bool,
+    dry_run: bool,
+) -> None:
+    try:
+        file = await document.get_file()
+        data = await file.download_as_bytearray()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to download schedule file")
+        await message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
+        return
+
+    try:
+        outcome = await asyncio.to_thread(
+            run_schedule_import_from_bytes,
+            bytes(data),
+            keep_existing=keep_existing,
+            dry_run=dry_run,
+        )
+    except ValueError as exc:
+        await message.reply_text(f"⚠️ {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to import schedule from XLSX")
+        await message.reply_text(f"❌ Ошибка импорта расписания: {exc}")
+        return
+
+    report = format_schedule_import_report(outcome)
+    for chunk in _split_html_message(report):
+        await message.reply_text(chunk)
+
+
 def _make_reply_func(
     bot,
     chat_id: int,
@@ -1173,6 +1244,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/uploadclients [truncate] — загрузить CSV клиентов\n"
         "/uploadbikes [truncate] — загрузить CSV велосипедов\n"
         "/uploadstands [truncate] — загрузить CSV станков\n"
+        "/uploadschedule [dry-run] [keep] — загрузить XLSX расписание\n"
         "/uploadworkout [all|аккаунт] — загрузить тренировку ZWO в библиотеку\n"
         "/newclient — создать новую запись клиента в базе\n"
         "/admins — показать список администраторов\n"
@@ -1707,18 +1779,131 @@ async def removeadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("🔍 Администратор не найден.")
 
 
+def build_uploadclients_keyboard(state: Dict[str, Any]) -> InlineKeyboardMarkup:
+    update_on = state.get("update", True)
+    truncate_on = state.get("truncate", False)
+    dry_run_on = state.get("dry_run", False)
+
+    update_label = "🔁 Обновление (вкл)" if update_on else "🔁 Обновление (выкл)"
+    truncate_label = "🧹 Перезаписать (вкл)" if truncate_on else "🧹 Перезаписать (выкл)"
+    dry_label = "🧪 Dry run (вкл)" if dry_run_on else "🧪 Dry run (выкл)"
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(text=update_label, callback_data="uploadclients_mode|update"),
+                InlineKeyboardButton(text=truncate_label, callback_data="uploadclients_mode|truncate"),
+            ],
+            [
+                InlineKeyboardButton(text=dry_label, callback_data="uploadclients_mode|dry_toggle"),
+                InlineKeyboardButton(
+                    text="✅ Готово, жду файл",
+                    callback_data="uploadclients_mode|confirm",
+                ),
+            ],
+        ]
+    )
+
+
+async def handle_uploadclients_mode(query, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
+    state = _get_pending_upload(context.user_data)
+    if not state or state.get("type") != "clients":
+        await query.answer("Сначала вызовите /uploadclients.", show_alert=True)
+        return
+
+    if mode == "update":
+        state["update"] = True
+        state["truncate"] = False
+    elif mode == "truncate":
+        state["truncate"] = True
+        state["update"] = False
+    elif mode == "dry_toggle":
+        state["dry_run"] = not state.get("dry_run", False)
+    elif mode == "confirm":
+        mode_label = "перезапись" if state.get("truncate") else "обновление"
+        dry_label = "dry run" if state.get("dry_run") else "боевой режим"
+        await query.edit_message_text(
+            f"Режим выбран: {mode_label}, {dry_label}.\n"
+            "Пришлите CSV файл (как документ), чтобы выполнить импорт."
+        )
+        return
+    else:
+        await query.answer("Неизвестный вариант.", show_alert=True)
+        return
+
+    text = UPLOADCLIENTS_PROMPT
+    markup = build_uploadclients_keyboard(state)
+    try:
+        await query.edit_message_text(text, reply_markup=markup)
+    except Exception:
+        await query.message.reply_text(text, reply_markup=markup)
+
+
+def build_uploadschedule_keyboard(state: Dict[str, Any]) -> InlineKeyboardMarkup:
+    keep_on = state.get("keep_existing", False)
+    dry_on = state.get("dry_run", False)
+    keep_label = "📌 Keep (вкл)" if keep_on else "📌 Keep (выкл)"
+    dry_label = "🧪 Dry run (вкл)" if dry_on else "🧪 Dry run (выкл)"
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(text=keep_label, callback_data="uploadschedule_mode|keep_toggle"),
+                InlineKeyboardButton(text=dry_label, callback_data="uploadschedule_mode|dry_toggle"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Готово, жду файл",
+                    callback_data="uploadschedule_mode|confirm",
+                )
+            ],
+        ]
+    )
+
+
+async def handle_uploadschedule_mode(query, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
+    state = _get_pending_upload(context.user_data)
+    if not state or state.get("type") != "schedule":
+        await query.answer("Сначала вызовите /uploadschedule.", show_alert=True)
+        return
+
+    if mode == "keep_toggle":
+        state["keep_existing"] = not state.get("keep_existing", False)
+    elif mode == "dry_toggle":
+        state["dry_run"] = not state.get("dry_run", False)
+    elif mode == "confirm":
+        keep_label = "keep" if state.get("keep_existing") else "replace"
+        dry_label = "dry run" if state.get("dry_run") else "боевой режим"
+        await query.edit_message_text(
+            f"Режим выбран: {keep_label}, {dry_label}.\n"
+            "Пришлите XLSX файл расписания (как документ), чтобы выполнить импорт."
+        )
+        return
+    else:
+        await query.answer("Неизвестный вариант.", show_alert=True)
+        return
+
+    text = UPLOADSCHEDULE_PROMPT
+    markup = build_uploadschedule_keyboard(state)
+    try:
+        await query.edit_message_text(text, reply_markup=markup)
+    except Exception:
+        await query.message.reply_text(text, reply_markup=markup)
+
+
 async def uploadclients_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
     if not ensure_admin_message(update):
         return
 
-    truncate = False
-    update_mode = False
-    if context.args:
-        args_lower = [arg.lower() for arg in context.args]
-        truncate = any(arg in {"truncate", "--truncate"} for arg in args_lower)
-        update_mode = any(arg in {"update", "--update"} for arg in args_lower)
+    args_lower = [arg.lower() for arg in context.args or []]
+    truncate = any(arg in {"truncate", "--truncate"} for arg in args_lower)
+    update_mode = True
+    if truncate:
+        update_mode = False
+    if any(arg in {"update", "--update"} for arg in args_lower):
+        update_mode = True
+    dry_run = any(arg in {"dry-run", "dry", "--dry-run"} for arg in args_lower)
 
     if update.message.reply_to_message and update.message.reply_to_message.document:
         _pop_pending_upload(context.user_data)
@@ -1727,14 +1912,21 @@ async def uploadclients_handler(update: Update, context: ContextTypes.DEFAULT_TY
             update.message,
             truncate=truncate,
             update_existing=update_mode,
+            dry_run=dry_run,
         )
         return
 
-    _set_pending_upload(context.user_data, "clients", truncate=truncate, update=update_mode)
+    _set_pending_upload(
+        context.user_data,
+        "clients",
+        truncate=truncate,
+        update=update_mode,
+        dry_run=dry_run,
+    )
+    state = _get_pending_upload(context.user_data) or {}
     await update.message.reply_text(
-        "📄 Пришлите CSV файл (как документ).\n"
-        "   • /uploadclients truncate — полностью перезаписать таблицу\n"
-        "   • /uploadclients update — обновить существующих клиентов и добавить новых"
+        UPLOADCLIENTS_PROMPT,
+        reply_markup=build_uploadclients_keyboard(state),
     )
 
 
@@ -1785,6 +1977,40 @@ async def uploadstands_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     _set_pending_upload(context.user_data, "stands", truncate=truncate)
     await update.message.reply_text(
         "📄 Пришлите CSV файл (как документ). Можно указать /uploadstands truncate для полной перезагрузки."
+    )
+
+
+async def uploadschedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    args = [arg.lower() for arg in (context.args or [])]
+    dry_run = any(arg in {"dry-run", "dry", "--dry-run"} for arg in args)
+    keep_existing = any(arg in {"keep", "append", "--keep"} for arg in args)
+
+    if update.message.reply_to_message and update.message.reply_to_message.document:
+        _pop_pending_upload(context.user_data)
+        await process_schedule_document(
+            update.message.reply_to_message.document,
+            update.message,
+            keep_existing=keep_existing,
+            dry_run=dry_run,
+        )
+        return
+
+    _set_pending_upload(
+        context.user_data,
+        "schedule",
+        truncate=False,
+        keep_existing=keep_existing,
+        dry_run=dry_run,
+    )
+    state = _get_pending_upload(context.user_data) or {}
+    await update.message.reply_text(
+        UPLOADSCHEDULE_PROMPT,
+        reply_markup=build_uploadschedule_keyboard(state),
     )
 
 
@@ -2638,6 +2864,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
             return
         await clear_client_favorite_bike(query, context, client_id)
+    elif action == "uploadclients_mode" and len(parts) >= 2:
+        await handle_uploadclients_mode(query, context, parts[1])
+        return
+    elif action == "uploadschedule_mode" and len(parts) >= 2:
+        await handle_uploadschedule_mode(query, context, parts[1])
+        return
     elif action == "client_pedals_set" and len(parts) >= 3:
         try:
             client_id = int(parts[1])
@@ -5140,19 +5372,37 @@ async def document_upload_handler(update: Update, context: ContextTypes.DEFAULT_
 
     upload_type: Optional[str] = None
     truncate = False
-    update_mode = False
+    update_mode = True
+    keep_existing_schedule = False
+    dry_run_schedule = False
+    dry_run_clients = False
 
     if command and command in UPLOAD_COMMAND_TYPES:
         upload_type = UPLOAD_COMMAND_TYPES[command]
         truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in args)
-        update_mode = any(arg.lower() in {"update", "--update"} for arg in args)
+        if truncate:
+            update_mode = False
+        if any(arg.lower() in {"update", "--update"} for arg in args):
+            update_mode = True
+        if upload_type == "schedule":
+            keep_existing_schedule = any(
+                arg.lower() in {"keep", "--keep", "append"} for arg in args
+            )
+            dry_run_schedule = any(
+                arg.lower() in {"dry-run", "dry", "--dry-run"} for arg in args
+            )
+        if upload_type == "clients":
+            dry_run_clients = any(arg.lower() in {"dry-run", "dry", "--dry-run"} for arg in args)
         _pop_pending_upload(context.user_data)
     else:
         pending = _pop_pending_upload(context.user_data)
         if pending:
             upload_type = pending.get("type")
             truncate = pending.get("truncate", False)
-            update_mode = pending.get("update", False)
+            update_mode = pending.get("update", True)
+            keep_existing_schedule = pending.get("keep_existing", False)
+            dry_run_schedule = pending.get("dry_run", False)
+            dry_run_clients = pending.get("dry_run", False)
 
     if upload_type == "clients":
         await process_clients_document(
@@ -5160,15 +5410,23 @@ async def document_upload_handler(update: Update, context: ContextTypes.DEFAULT_
             update.message,
             truncate,
             update_mode,
+            dry_run=dry_run_clients,
         )
     elif upload_type == "bikes":
         await process_bikes_document(document, update.message, truncate)
     elif upload_type == "stands":
         await process_trainers_document(document, update.message, truncate)
+    elif upload_type == "schedule":
+        await process_schedule_document(
+            document,
+            update.message,
+            keep_existing=keep_existing_schedule,
+            dry_run=dry_run_schedule,
+        )
     else:
         await update.message.reply_text(
             "ℹ️ Чтобы импортировать данные, используйте /uploadclients, /uploadbikes, /uploadstands, "
-            "/uploadworkout или добавьте команду в подпись к файлу."
+            "/uploadschedule, /uploadworkout или добавьте команду в подпись к файлу."
         )
 
 
@@ -5256,6 +5514,7 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("uploadclients", uploadclients_handler))
     application.add_handler(CommandHandler("uploadbikes", uploadbikes_handler))
     application.add_handler(CommandHandler("uploadstands", uploadstands_handler))
+    application.add_handler(CommandHandler("uploadschedule", uploadschedule_handler))
     application.add_handler(CommandHandler("uploadworkout", uploadworkout_handler))
     newclient_conversation = ConversationHandler(
         entry_points=[CommandHandler("newclient", newclient_start)],
@@ -5307,9 +5566,19 @@ def build_application(token: str) -> Application:
     application.add_handler(
         MessageHandler(workout_filter, workout_document_handler)
     )
-    csv_filter = (filters.Document.MimeType("text/csv") | filters.Document.FileExtension("csv"))
+    csv_filter = (
+        filters.Document.MimeType("text/csv")
+        | filters.Document.FileExtension("csv")
+        | filters.Document.FileExtension("CSV")
+    )
+    xlsx_filter = (
+        filters.Document.MimeType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        | filters.Document.FileExtension("xlsx")
+        | filters.Document.FileExtension("XLSX")
+    )
+    document_filter = csv_filter | xlsx_filter
     application.add_handler(
-        MessageHandler(csv_filter, document_upload_handler)
+        MessageHandler(document_filter, document_upload_handler)
     )
     application.add_handler(CallbackQueryHandler(noop_handler, pattern="^noop$"))
     application.add_handler(CallbackQueryHandler(callback_handler))
