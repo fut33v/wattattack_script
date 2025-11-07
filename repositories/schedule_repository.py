@@ -842,6 +842,53 @@ def book_available_reservation(
     return row
 
 
+def list_future_reservations_for_client(client_id: int, since: datetime) -> List[Dict]:
+    """Return upcoming reservations for a client (slots with start_time >= since)."""
+
+    ensure_schedule_tables()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                r.*,
+                s.slot_date,
+                s.start_time,
+                s.end_time,
+                s.label,
+                s.session_kind,
+                s.instructor_id,
+                i.full_name AS instructor_name,
+                t.code AS stand_code,
+                t.display_name AS stand_display_name,
+                t.title AS stand_title,
+                b.title AS bike_title,
+                b.owner AS bike_owner
+            FROM schedule_reservations AS r
+            JOIN schedule_slots AS s ON s.id = r.slot_id
+            LEFT JOIN schedule_instructors AS i ON i.id = s.instructor_id
+            LEFT JOIN trainers AS t ON t.id = r.stand_id
+            LEFT JOIN bike_layout AS bl ON bl.stand_id = t.id
+            LEFT JOIN bikes AS b ON b.id = bl.bike_id
+            WHERE r.client_id = %(client_id)s
+              AND r.status <> 'cancelled'
+              AND r.status <> 'legacy'
+              AND r.status <> 'blocked'
+              AND (
+                    s.slot_date > %(since_date)s
+                    OR (s.slot_date = %(since_date)s AND s.start_time >= %(since_time)s)
+                  )
+            ORDER BY s.slot_date, s.start_time, r.id
+            """,
+            {
+                "client_id": client_id,
+                "since_date": since.date(),
+                "since_time": since.time(),
+            },
+        )
+        rows = cur.fetchall()
+    return rows
+
+
 def _ensure_slot_capacity(conn, slot_id: int) -> int:
     """Ensure placeholder rows exist for all stands. Returns number of inserted placeholders."""
 

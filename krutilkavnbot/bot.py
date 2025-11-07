@@ -35,6 +35,7 @@ _FORM_KEY: Final[str] = "krutilkavnbot:form"
 _PENDING_APPROVALS_KEY: Final[str] = "krutilkavnbot:pending_approvals"
 _LAST_SEARCH_KEY: Final[str] = "krutilkavnbot:last_name"
 _BOOKING_STATE_KEY: Final[str] = "krutilkavnbot:booking"
+_MY_BOOKINGS_CACHE_KEY: Final[str] = "krutilkavnbot:my_bookings"
 
 DEFAULT_GREETING: Final[str] = "Здравствуйте!"
 MAX_SUGGESTIONS: Final[int] = 6
@@ -305,6 +306,7 @@ def _get_booking_state(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Any]:
 
 def _clear_booking_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop(_BOOKING_STATE_KEY, None)
+    context.user_data.pop(_MY_BOOKINGS_CACHE_KEY, None)
 
 
 def _fetch_linked_client(user_id: int) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
@@ -1075,12 +1077,32 @@ async def _unknown_command_handler(update: Update, context: ContextTypes.DEFAULT
     message = update.effective_message
     if message is None:
         return
-    await message.reply_text("Команда не поддерживается. Используйте /start для авторизации.")
+    await message.reply_text(
+        "Используйте /start, чтобы привязать или создать анкету, и /book, чтобы записаться в свободный слот."
+    )
+
+
+async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None or not message.text:
+        return
+    await message.reply_text(
+        "Доступные команды:\n"
+        "/start — привязать или создать анкету.\n"
+        "/book — забронировать свободный слот.\n"
+        "/mybookings — показать ваши будущие записи."
+    )
 
 
 async def _handle_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     message = update.effective_message
     if message is None or not message.text:
+        return ASK_LAST_NAME
+
+    if message.text.startswith("/"):
+        await message.reply_text(
+            "Используйте /start, чтобы привязать или создать анкету, и /book, чтобы записаться в свободный слот."
+        )
         return ASK_LAST_NAME
 
     _clear_candidates(context)
@@ -1783,7 +1805,9 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
         persistent=False,
     )
     application.add_handler(booking_conversation)
+    application.add_handler(CommandHandler("mybookings", _my_bookings_handler))
     application.add_handler(CommandHandler("help", _help_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _fallback_text_handler))
     application.add_handler(CallbackQueryHandler(_handle_admin_decision, pattern=r"^(approve|reject):"))
     application.add_handler(MessageHandler(filters.COMMAND, _unknown_command_handler))
 
@@ -1791,3 +1815,77 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
 
 
 __all__ = ["create_application", "DEFAULT_GREETING"]
+async def _my_bookings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await message.reply_text("Сначала привяжите свою анкету через /start, затем повторите попытку.")
+        return
+
+    client_id = client.get("id")
+    if not isinstance(client_id, int):
+        await message.reply_text("Не удалось определить вашу анкету. Обратитесь к администратору.")
+        return
+
+    now_local = _local_now()
+    try:
+        reservations = schedule_repository.list_future_reservations_for_client(
+            client_id,
+            _to_local_naive(now_local),
+        )
+    except Exception:
+        LOGGER.exception("Failed to fetch future reservations for client %s", client_id)
+        await message.reply_text("Не удалось получить список записей. Попробуйте позже.")
+        return
+
+    if not reservations:
+        await message.reply_text("У вас нет будущих записей.")
+        return
+
+    lines: List[str] = ["Ваши ближайшие записи:"]
+    for entry in reservations[:10]:
+        slot_label = _format_time_range(entry.get("start_time"), entry.get("end_time"))
+        slot_date_value = _parse_date(entry.get("slot_date"))
+        if slot_date_value:
+            slot_label = f"{slot_date_value.strftime('%d.%m (%a)')} · {slot_label}"
+
+        parts = [slot_label]
+
+        session_kind = entry.get("session_kind")
+        instructor_name = (entry.get("instructor_name") or "").strip()
+        if session_kind == "instructor":
+            if instructor_name:
+                parts.append(f"Инструктор: {instructor_name}")
+            else:
+                parts.append("Инструктор: уточняется")
+
+        label = (entry.get("label") or "").strip()
+        if label:
+            parts.append(label)
+
+        stand_label = _format_stand_label(
+            {
+                "code": entry.get("stand_code"),
+                "display_name": entry.get("stand_display_name"),
+                "title": entry.get("stand_title"),
+            },
+            entry,
+        )
+        if stand_label:
+            parts.append(f"Станок: {stand_label}")
+
+        bike_title = (entry.get("bike_title") or "").strip()
+        bike_owner = (entry.get("bike_owner") or "").strip()
+        if bike_title or bike_owner:
+            if bike_owner:
+                parts.append(f"Велосипед: {bike_title} ({bike_owner})" if bike_title else f"Велосипед: {bike_owner}")
+            else:
+                parts.append(f"Велосипед: {bike_title}")
+
+        lines.append("\n".join(parts))
+
+    await message.reply_text("\n\n".join(lines))

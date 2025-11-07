@@ -2653,6 +2653,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
             return
         await clear_client_pedals(query, context, client_id)
+    elif action == "client_gender_set" and len(parts) >= 3:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+            return
+        gender_code = parts[2]
+        await set_client_gender(query, context, client_id, gender_code)
+    elif action == "client_gender_clear" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+            return
+        await clear_client_gender(query, context, client_id)
     elif action == "client_bikes" and len(parts) >= 2:
         try:
             client_id = int(parts[1])
@@ -3058,6 +3073,14 @@ CLIENT_EDIT_FIELDS: Dict[str, Dict[str, str]] = {
         "label": "⚖️ Вес",
         "prompt": "Введите вес в килограммах (например, 72.5).",
     },
+    "height": {
+        "label": "📏 Рост",
+        "prompt": "Введите рост в сантиметрах (например, 178).",
+    },
+    "gender": {
+        "label": "🚻 Пол",
+        "prompt": "Выберите пол клиента или очистите значение.",
+    },
     "favorite_bike": {
         "label": "🚲 Любимый велосипед",
         "prompt": "Выберите велосипед из списка ниже или очистите текущий выбор.",
@@ -3118,6 +3141,16 @@ def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="⚖️ Изменить вес",
                     callback_data=f"client_edit|weight|{client_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📏 Изменить рост",
+                    callback_data=f"client_edit|height|{client_id}",
+                ),
+                InlineKeyboardButton(
+                    text="🚻 Изменить пол",
+                    callback_data=f"client_edit|gender|{client_id}",
                 ),
             ],
             [
@@ -3471,6 +3504,95 @@ def build_client_pedals_picker_markup(client_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def build_client_gender_picker_markup(client_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="🚹 Мужской",
+                    callback_data=f"client_gender_set|{client_id}|male",
+                ),
+                InlineKeyboardButton(
+                    text="🚺 Женский",
+                    callback_data=f"client_gender_set|{client_id}|female",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚫 Очистить значение",
+                    callback_data=f"client_gender_clear|{client_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="↩️ Назад",
+                    callback_data=f"client_info|{client_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=f"client_edit_cancel|{client_id}",
+                ),
+            ],
+        ]
+    )
+
+
+async def render_client_gender_picker(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    client_id: int,
+) -> None:
+    try:
+        record = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s", client_id)
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"❌ Ошибка получения данных клиента: {exc}",
+        )
+        return
+
+    if not record:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text="🔍 Клиент не найден.",
+        )
+        return
+
+    bike_suggestions, height_cm, trainer_inventory = await get_bike_suggestions_for_client(record)
+    trainer_map = (
+        _build_trainer_suggestions(bike_suggestions, trainer_inventory)
+        if bike_suggestions and trainer_inventory
+        else None
+    )
+    details_text = format_client_details(record, bike_suggestions, height_cm, trainer_map)
+    display_name = client_display_name(record)
+    prompt = CLIENT_EDIT_FIELDS["gender"]["prompt"]
+
+    pending = context.user_data.get("pending_client_edit")
+    if isinstance(pending, dict) and pending.get("client_id") == client_id:
+        pending.setdefault("client_name", display_name)
+        pending["label"] = CLIENT_EDIT_FIELDS["gender"]["label"]
+        pending["mode"] = "picker"
+
+    text = (
+        f"{details_text}\n\n"
+        f"✏️ <i>{html.escape(prompt)}</i>\n"
+        f"👤 <i>Клиент: {html.escape(display_name)}</i>"
+    )
+
+    await context.bot.edit_message_text(
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_client_gender_picker_markup(client_id),
+    )
+
+
 async def render_client_pedals_picker(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
@@ -3595,6 +3717,75 @@ async def clear_client_pedals(
     )
 
 
+async def set_client_gender(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    gender_code: str,
+) -> None:
+    normalized = gender_code.strip().lower()
+    if normalized not in {"male", "female"}:
+        await query.answer("Неизвестный вариант пола.", show_alert=True)
+        return
+
+    try:
+        await asyncio.to_thread(update_client_fields, client_id, gender=normalized)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to update client %s gender to %s", client_id, gender_code)
+        await query.edit_message_text(f"❌ Не удалось обновить пол клиента: {exc}")
+        return
+
+    pending = context.user_data.get("pending_client_edit") or {}
+    client_name = pending.get("client_name")
+    field_label = CLIENT_EDIT_FIELDS["gender"]["label"]
+    gender_label = "М" if normalized == "male" else "Ж"
+    if client_name:
+        success_text = f"✅ {field_label} для {client_name} обновлён: {gender_label}."
+    else:
+        success_text = f"✅ {field_label} обновлён: {gender_label}."
+    await context.bot.send_message(chat_id=query.message.chat_id, text=success_text)
+
+    context.user_data.pop("pending_client_edit", None)
+    await query.answer("Пол обновлён.")
+    await render_client_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        client_id,
+    )
+
+
+async def clear_client_gender(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+) -> None:
+    try:
+        await asyncio.to_thread(update_client_fields, client_id, gender=None)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to clear gender for client %s", client_id)
+        await query.edit_message_text(f"❌ Не удалось очистить пол клиента: {exc}")
+        return
+
+    pending = context.user_data.get("pending_client_edit") or {}
+    client_name = pending.get("client_name")
+    field_label = CLIENT_EDIT_FIELDS["gender"]["label"]
+    if client_name:
+        success_text = f"✅ {field_label} для {client_name} очищен."
+    else:
+        success_text = f"✅ {field_label} очищен."
+    await context.bot.send_message(chat_id=query.message.chat_id, text=success_text)
+
+    context.user_data.pop("pending_client_edit", None)
+    await query.answer("Пол очищен.")
+    await render_client_info_message(
+        context,
+        query.message.chat_id,
+        query.message.message_id,
+        client_id,
+    )
+
+
 async def set_client_favorite_bike(
     query,
     context: ContextTypes.DEFAULT_TYPE,
@@ -3685,6 +3876,12 @@ def parse_client_edit_value(field: str, raw_value: str) -> object:
         if weight_value <= 0:
             raise ValueError("Введите положительное число (кг).")
         return weight_value
+    if field == "height":
+        normalized = value.replace(",", ".")
+        height_value = float(normalized)
+        if height_value <= 0:
+            raise ValueError("Введите положительное число (см).")
+        return height_value
     if field in {"favorite_bike", "pedals"}:
         if not value:
             raise ValueError("Значение не должно быть пустым.")
@@ -3932,6 +4129,23 @@ async def start_client_edit(
             "mode": "picker",
         }
         await render_client_pedals_picker(
+            context,
+            query.message.chat_id,
+            query.message.message_id,
+            client_id,
+        )
+        return
+    if field == "gender":
+        context.user_data["pending_client_edit"] = {
+            "client_id": client_id,
+            "field": field,
+            "chat_id": query.message.chat_id,
+            "message_id": query.message.message_id,
+            "label": metadata["label"],
+            "client_name": display_name,
+            "mode": "picker",
+        }
+        await render_client_gender_picker(
             context,
             query.message.chat_id,
             query.message.message_id,
