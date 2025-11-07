@@ -66,7 +66,7 @@ from repositories.layout_repository import (
     set_bike_assignment,
     clear_bike_assignment_for_bike,
 )
-from scripts.load_clients import load_clients_from_csv_bytes
+from scripts.load_clients import load_clients_from_csv_bytes, export_clients_to_csv_bytes
 from scripts.load_bikes import load_bikes_from_csv_bytes
 from scripts.load_trainers import load_trainers_from_csv_bytes
 from scripts.import_schedule_from_xlsx import (
@@ -1242,6 +1242,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/client <имя/фамилия> — найти клиента по БД\n"
         "/stats — статистика по клиентской базе\n"
         "/uploadclients [truncate] — загрузить CSV клиентов\n"
+        "/downloadclients — выгрузить клиентов в CSV\n"
         "/uploadbikes [truncate] — загрузить CSV велосипедов\n"
         "/uploadstands [truncate] — загрузить CSV станков\n"
         "/uploadschedule [dry-run] [keep] — загрузить XLSX расписание\n"
@@ -2011,6 +2012,29 @@ async def uploadschedule_handler(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text(
         UPLOADSCHEDULE_PROMPT,
         reply_markup=build_uploadschedule_keyboard(state),
+    )
+
+
+async def downloadclients_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+
+    await update.message.reply_text("Готовлю выгрузку клиентов…")
+    try:
+        csv_bytes = await asyncio.to_thread(export_clients_to_csv_bytes)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to export clients CSV")
+        await update.message.reply_text(f"❌ Ошибка выгрузки: {exc}")
+        return
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    file_name = f"clients_{timestamp}.csv"
+    await update.message.reply_document(
+        document=csv_bytes,
+        filename=file_name,
+        caption="📥 Клиенты выгружены в формате загрузки.",
     )
 
 
@@ -5512,6 +5536,7 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("addadmin", addadmin_handler))
     application.add_handler(CommandHandler("removeadmin", removeadmin_handler))
     application.add_handler(CommandHandler("uploadclients", uploadclients_handler))
+    application.add_handler(CommandHandler("downloadclients", downloadclients_handler))
     application.add_handler(CommandHandler("uploadbikes", uploadbikes_handler))
     application.add_handler(CommandHandler("uploadstands", uploadstands_handler))
     application.add_handler(CommandHandler("uploadschedule", uploadschedule_handler))

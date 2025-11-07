@@ -13,21 +13,38 @@ from repositories.db_utils import db_connection, dict_cursor
 
 DEFAULT_CSV = Path("data")
 
-CSV_HEADERS = {
-    "Отметка времени": "submitted_at",
-    "Имя": "first_name",
-    "Фамилия": "last_name",
-    "Ваш вес": "weight",
-    "Ваш рост": "height",
-    "Ваш FTP, если знаете": "ftp",
-    "Педали": "pedals",
-    "Ваша цель": "goal",
-    "ПОЛ": "gender",
-    "Пол": "gender",
-    "Ваш пол": "gender",
-    "высота седла": "saddle_height",
-    "любимый велосипед": "favorite_bike",
-}
+_CSV_HEADER_SOURCES = [
+    ("Отметка времени", "submitted_at"),
+    ("Имя", "first_name"),
+    ("Фамилия", "last_name"),
+    ("Ваш вес", "weight"),
+    ("Ваш рост", "height"),
+    ("Ваш FTP, если знаете", "ftp"),
+    ("Педали", "pedals"),
+    ("Ваша цель", "goal"),
+    ("Ваш пол", "gender"),
+    ("высота седла", "saddle_height"),
+    ("любимый велосипед", "favorite_bike"),
+    ("ПОЛ", "gender"),
+    ("Пол", "gender"),
+]
+CSV_HEADERS = {src: field for src, field in _CSV_HEADER_SOURCES}
+CSV_HEADER_ORDER = [
+    "Отметка времени",
+    "Имя",
+    "Фамилия",
+    "Ваш вес",
+    "Ваш рост",
+    "Ваш FTP, если знаете",
+    "Педали",
+    "Ваша цель",
+    "Ваш пол",
+    "высота седла",
+    "любимый велосипед",
+]
+FIELD_TO_HEADER = {}
+for src, field in _CSV_HEADER_SOURCES:
+    FIELD_TO_HEADER.setdefault(field, src)
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -156,7 +173,7 @@ def _find_existing_client(
     return None
 
 
-def load_rows(rows: List[dict], *, update_existing: bool = True) -> tuple[int, int]:
+def load_rows(rows: List[dict], *, update_existing: bool = True, dry_run: bool = False) -> tuple[int, int]:
     inserted = 0
     updated = 0
 
@@ -292,31 +309,83 @@ def load_rows(rows: List[dict], *, update_existing: bool = True) -> tuple[int, i
                 inserted += 1
             else:
                 updated += 1
-        conn.commit()
+        if dry_run:
+            conn.rollback()
+        else:
+            conn.commit()
 
     return inserted, updated
 
 
-def load_data(csv_path: Path, *, update_existing: bool = True) -> tuple[int, int]:
+def load_data(csv_path: Path, *, update_existing: bool = True, dry_run: bool = False) -> tuple[int, int]:
     with csv_path.open(encoding="utf-8-sig") as fh:
         reader = csv.DictReader(fh)
         rows = _map_rows(reader)
-    return load_rows(rows, update_existing=update_existing)
+    return load_rows(rows, update_existing=update_existing, dry_run=dry_run)
 
 
 def load_clients_from_csv_bytes(
     data: bytes,
     truncate: bool = False,
     update_existing: bool = True,
+    dry_run: bool = False,
 ) -> tuple[int, int]:
     create_table()
-    if truncate:
+    if truncate and not dry_run:
         truncate_table()
 
     text = data.decode("utf-8-sig")
     reader = csv.DictReader(StringIO(text))
     rows = _map_rows(reader)
-    return load_rows(rows, update_existing=update_existing)
+    return load_rows(rows, update_existing=update_existing, dry_run=dry_run)
+
+
+def export_clients_to_csv_bytes() -> bytes:
+    headers = CSV_HEADER_ORDER
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(headers)
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT submitted_at, first_name, last_name, full_name, gender,
+                   weight, height, ftp, pedals, goal, saddle_height, favorite_bike
+            FROM clients
+            ORDER BY COALESCE(last_name, full_name), COALESCE(first_name, '')
+            """
+        )
+        rows = cur.fetchall()
+
+    for row in rows:
+        submitted_at = row.get("submitted_at")
+        if isinstance(submitted_at, datetime):
+            submitted_str = submitted_at.strftime("%d.%m.%Y %H:%M:%S")
+        else:
+            submitted_str = submitted_at or ""
+
+        values = []
+        for header in headers:
+            field = CSV_HEADERS[header]
+            if field == "submitted_at":
+                values.append(submitted_str)
+                continue
+            value = row.get(field)
+            if field == "gender":
+                if isinstance(value, str):
+                    gender_norm = value.strip().lower()
+                    if gender_norm.startswith("m"):
+                        values.append("М")
+                        continue
+                    if gender_norm.startswith("f"):
+                        values.append("Ж")
+                        continue
+                values.append("")
+                continue
+            values.append("" if value is None else str(value))
+        writer.writerow(values)
+
+    return output.getvalue().encode("utf-8-sig")
 
 
 def main(argv: Iterable[str] | None = None) -> int:
