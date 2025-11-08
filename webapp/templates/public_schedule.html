@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Расписание · Крутилка</title>
+    <style>
+      :root {
+        font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+        color: #111;
+        background-color: #f5f5f5;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 0;
+        background: linear-gradient(120deg, #f8f8fb, #eef2ff);
+        min-height: 100vh;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .page {
+        width: 100%;
+        max-width: none;
+        margin: 0 auto;
+        padding: 24px clamp(8px, 2vw, 20px) 40px;
+      }
+
+      .header {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+
+      .header h1 {
+        margin: 0;
+        font-size: 32px;
+        font-weight: 700;
+      }
+
+      .header p {
+        margin: 4px 0 0;
+        color: #444;
+        line-height: 1.4;
+      }
+
+      .header .share-link {
+        font-size: 14px;
+        word-break: break-all;
+      }
+
+      .header-actions {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        align-items: flex-end;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        border-radius: 8px;
+        border: 1px solid rgba(17, 17, 17, 0.15);
+        padding: 8px 14px;
+        font-size: 14px;
+        font-weight: 600;
+        text-decoration: none;
+        background: #fff;
+        transition: background 0.2s ease;
+        cursor: pointer;
+      }
+
+      .btn:hover {
+        background: #f0f0ff;
+      }
+
+      .btn.disabled {
+        opacity: 0.45;
+        pointer-events: none;
+      }
+
+      .btn.primary {
+        background: #4338ca;
+        color: #fff;
+        border-color: #4338ca;
+      }
+
+      .btn.primary:hover {
+        background: #3730a3;
+      }
+
+      .nav-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: center;
+      }
+
+      .notice {
+        padding: 16px;
+        border-radius: 12px;
+        background: #fffbe6;
+        border: 1px solid #ffe58f;
+        color: #8b6c00;
+        font-size: 15px;
+      }
+
+      .notice.error {
+        background: #fff1f0;
+        border-color: #ffccc7;
+        color: #a8071a;
+      }
+
+      .schedule-grid-wrapper {
+        width: 100%;
+        overflow-x: auto;
+        padding-bottom: 8px;
+      }
+
+      .schedule-grid {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(180px, 1fr));
+        gap: 16px;
+        margin-top: 16px;
+        min-width: 1260px;
+      }
+
+      .schedule-day {
+        background: #fff;
+        border-radius: 16px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+        display: flex;
+        flex-direction: column;
+        min-height: 320px;
+      }
+
+      .schedule-day header {
+        padding: 16px;
+        border-bottom: 1px solid #f0f0f5;
+      }
+
+      .schedule-day-title {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 8px;
+      }
+
+      .schedule-day-title span {
+        color: #6b7280;
+        font-size: 14px;
+      }
+
+      .schedule-day-title strong {
+        font-size: 18px;
+      }
+
+      .day-meta {
+        margin-top: 8px;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        color: #6b7280;
+        font-size: 13px;
+      }
+
+      .schedule-day-body {
+        padding: 12px 16px 16px;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .slot-card {
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        background: #fafaff;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .slot-card summary {
+        list-style: none;
+        cursor: pointer;
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 110px;
+        justify-content: space-between;
+      }
+
+      .slot-card summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .slot-summary-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .slot-time {
+        font-weight: 600;
+        font-size: 15px;
+      }
+
+      .slot-descriptor {
+        font-size: 13px;
+        font-weight: 600;
+        color: #4338ca;
+      }
+
+      .slot-stats {
+        display: flex;
+        gap: 12px;
+        font-size: 12px;
+        color: #374151;
+      }
+
+      .slot-stats span {
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: #eef2ff;
+      }
+
+      .reservations {
+        border-top: 1px solid #e5e7eb;
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        background: #fff;
+      }
+
+      .reservation {
+        border-radius: 10px;
+        padding: 8px 12px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+
+      .reservation.free {
+        background: #ecfdf5;
+        color: #047857;
+      }
+
+      .reservation.booked {
+        background: #eef2ff;
+        color: #312e81;
+      }
+
+      .reservation.busy {
+        background: #f3f4f6;
+        color: #1f2937;
+      }
+
+      .empty {
+        font-size: 13px;
+        color: #9ca3af;
+        text-align: center;
+      }
+
+      @media (max-width: 768px) {
+        .header {
+          flex-direction: column;
+        }
+
+        .header-actions {
+          width: 100%;
+          align-items: stretch;
+        }
+
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header class="header">
+        <div>
+          <h1>Расписание</h1>
+          {% if week %}
+            <p>
+              Неделя {{ week.week_start_date }}
+              {% if week.title %}
+                · {{ week.title }}
+              {% endif %}
+            </p>
+          {% endif %}
+          {% if week_range_label %}
+            <p>{{ week_range_label }}</p>
+          {% elif target_week_label %}
+            <p>{{ target_week_label }}</p>
+          {% endif %}
+          {% if canonical_slug %}
+            <p class="share-link">
+              Постоянная ссылка:
+              <a href="{{ share_url or '/schedule/' ~ canonical_slug }}">/schedule/{{ canonical_slug }}</a>
+            </p>
+          {% endif %}
+        </div>
+        <div class="header-actions">
+          <div class="nav-row">
+            <a
+              class="btn{% if not prev_week_slug %} disabled{% endif %}"
+              href="{% if prev_week_slug %}/schedule/{{ prev_week_slug }}{% else %}# {% endif %}"
+            >
+              Неделя назад
+            </a>
+            <a class="btn" href="/schedule/current_week">Текущая неделя</a>
+            <a
+              class="btn{% if not next_week_slug %} disabled{% endif %}"
+              href="{% if next_week_slug %}/schedule/{{ next_week_slug }}{% else %}# {% endif %}"
+            >
+              Неделя вперед
+            </a>
+          </div>
+          {% if show_editor_button %}
+            <a class="btn primary" href="/app/schedule/manage">Открыть редактор</a>
+          {% endif %}
+        </div>
+      </header>
+
+      {% if error_message %}
+        <div class="notice error">{{ error_message }}</div>
+      {% elif not day_columns %}
+        <div class="notice">Расписание для выбранной недели пустое.</div>
+      {% else %}
+        <div class="schedule-grid-wrapper">
+          <div class="schedule-grid">
+            {% for day in day_columns %}
+              <section class="schedule-day">
+                <header>
+                  <div class="schedule-day-title">
+                    <span>{{ day.weekday_short }}</span>
+                    <strong>{{ day.label }}</strong>
+                  </div>
+                  <div class="day-meta">
+                    <span>Слотов {{ day.totals.slots }}</span>
+                    <span>Занято {{ day.totals.occupied }}</span>
+                    <span>Свободно {{ day.totals.free }}</span>
+                  </div>
+                </header>
+                <div class="schedule-day-body">
+                  {% if not day.slots %}
+                    <div class="empty">Нет слотов</div>
+                  {% else %}
+                    {% for slot in day.slots %}
+                      <details class="slot-card" {% if loop.first %}open{% endif %}>
+                        <summary>
+                          <div class="slot-summary-header">
+                            <span class="slot-time">{{ slot.start_time }}–{{ slot.end_time }}</span>
+                          </div>
+                          {% set descriptor = slot.instructor_name or slot.label %}
+                          <div class="slot-descriptor">{{ descriptor }}</div>
+                          <div class="slot-stats">
+                            <span>Занято {{ slot.stats.occupied }}</span>
+                            <span>Свободно {{ slot.stats.free }}</span>
+                          </div>
+                        </summary>
+                        <div class="reservations">
+                          {% set reservation_rows = slot.reservation_rows if slot.reservation_rows is defined else [] %}
+                          {% if not reservation_rows %}
+                            <div class="reservation empty">Нет записей</div>
+                          {% else %}
+                            {% for row in reservation_rows %}
+                              <div class="reservation {{ row.kind or '' }}">
+                                {{ row.label }}
+                              </div>
+                            {% endfor %}
+                          {% endif %}
+                        </div>
+                      </details>
+                    {% endfor %}
+                  {% endif %}
+                </div>
+              </section>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </body>
+</html>

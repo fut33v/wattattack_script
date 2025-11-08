@@ -167,16 +167,29 @@ def _format_slot_caption(slot: Dict[str, Any]) -> str:
 
 def _format_stand_label(stand: Optional[Dict[str, Any]], reservation: Optional[Dict[str, Any]] = None) -> str:
     if stand:
-        for key in ("display_name", "code", "title"):
-            value = stand.get(key)
-            if value:
-                return str(value)
+        code_raw = stand.get("code")
+        if code_raw is not None:
+            code = str(code_raw).strip()
+            if code:
+                return code
+        title_raw = stand.get("title")
+        if title_raw is not None:
+            title = str(title_raw).strip()
+            if title:
+                return title
+        display_raw = stand.get("display_name")
+        if display_raw is not None:
+            display_name = str(display_raw).strip()
+            if display_name:
+                return display_name
         stand_id = stand.get("id")
         if stand_id is not None:
             return f"Станок {stand_id}"
     stand_code = (reservation or {}).get("stand_code")
-    if stand_code:
-        return str(stand_code)
+    if stand_code is not None:
+        code = str(stand_code).strip()
+        if code:
+            return code
     return "Станок"
 
 
@@ -763,9 +776,9 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
     if slot.get("session_kind") == "instructor":
         instructor_name = (slot.get("instructor_name") or "").strip()
         if instructor_name:
-            instructor_note = f"\nИнструктор: {instructor_name}"
+            instructor_note = f"\n🧑‍🏫 Инструктор: {instructor_name}"
         else:
-            instructor_note = "\nИнструктор: уточняется"
+            instructor_note = "\n🧑‍🏫 Инструктор: уточняется"
 
     when_label = ""
     slot_date_val = _parse_date(slot.get("slot_date"))
@@ -776,14 +789,16 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
     summary_lines = [
         "✅ Запись подтверждена!",
         f"{client_display_name}, вы записаны на {when_label}." if when_label else "Запись создана.",
-        f"Станок: {stand_label}",
+        f"🏋️ Станок: {stand_label}",
     ]
     if slot_label:
-        summary_lines.append(f"Слот: {slot_label}")
+        summary_lines.append(f"🕒 Слот: {slot_label}")
     if bike_label:
-        summary_lines.append(f"Велосипед: {bike_label}")
+        summary_lines.append(f"🚲 Велосипед: {bike_label}")
     if instructor_note:
         summary_lines.append(instructor_note.strip())
+    summary_lines.append("🧭 Как добраться: https://t.me/krutilkavn/9")
+    summary_lines.append("🎒 Что взять с собой: https://t.me/krutilkavn/10")
     summary_lines.append("До встречи в «Крутилке»!")
 
     try:
@@ -1861,25 +1876,25 @@ async def _my_bookings_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if not reservations:
-        await message.reply_text("У вас нет будущих записей.")
+        await message.reply_text("⏳ У вас нет будущих записей.")
         return
 
-    lines: List[str] = ["Ваши ближайшие записи:"]
+    lines: List[str] = ["🗓 Ваши ближайшие записи:"]
     for entry in reservations[:10]:
         slot_label = _format_time_range(entry.get("start_time"), entry.get("end_time"))
         slot_date_value = _parse_date(entry.get("slot_date"))
         if slot_date_value:
             slot_label = f"{slot_date_value.strftime('%d.%m (%a)')} · {slot_label}"
 
-        parts = [slot_label]
+        parts = [f"🕒 {slot_label}"]
 
         session_kind = entry.get("session_kind")
         instructor_name = (entry.get("instructor_name") or "").strip()
         if session_kind == "instructor":
             if instructor_name:
-                parts.append(f"Инструктор: {instructor_name}")
+                parts.append(f"🧑‍🏫 Инструктор: {instructor_name}")
             else:
-                parts.append("Инструктор: уточняется")
+                parts.append("🧑‍🏫 Инструктор: уточняется")
 
         label = (entry.get("label") or "").strip()
         if label:
@@ -1894,15 +1909,17 @@ async def _my_bookings_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             entry,
         )
         if stand_label:
-            parts.append(f"Станок: {stand_label}")
+            parts.append(f"🏋️ Станок: {stand_label}")
 
         bike_title = (entry.get("bike_title") or "").strip()
         bike_owner = (entry.get("bike_owner") or "").strip()
         if bike_title or bike_owner:
             if bike_owner:
-                parts.append(f"Велосипед: {bike_title} ({bike_owner})" if bike_title else f"Велосипед: {bike_owner}")
+                parts.append(
+                    f"🚲 Велосипед: {bike_title} ({bike_owner})" if bike_title else f"🚲 Велосипед: {bike_owner}"
+                )
             else:
-                parts.append(f"Велосипед: {bike_title}")
+                parts.append(f"🚲 Велосипед: {bike_title}")
 
         lines.append("\n".join(parts))
 
@@ -1938,10 +1955,10 @@ async def _history_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     if not reservations:
-        await message.reply_text("История бронирований пуста.")
+        await message.reply_text("📭 История бронирований пуста.")
         return
 
-    lines: List[str] = ["Последние посещения:"]
+    lines: List[str] = ["📜 Последние посещения:"]
     for entry in reservations:
         slot_date_value = _parse_date(entry.get("slot_date"))
         time_range = _format_time_range(entry.get("start_time"), entry.get("end_time"))
@@ -1951,42 +1968,15 @@ async def _history_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             header = time_range
 
-        parts = [header]
-
-        status = (entry.get("status") or "").lower()
-        status_label = _STATUS_LABELS.get(status, status or "неизвестно")
-        parts.append(f"Статус: {status_label}")
-
-        label = (entry.get("label") or "").strip()
-        if label:
-            parts.append(label)
+        parts = [f"🕘 {header}"]
 
         session_kind = entry.get("session_kind")
         instructor_name = (entry.get("instructor_name") or "").strip()
         if session_kind == "instructor":
             if instructor_name:
-                parts.append(f"Инструктор: {instructor_name}")
+                parts.append(f"🧑‍🏫 Инструктор: {instructor_name}")
             else:
-                parts.append("Инструктор: уточняется")
-
-        stand_label = _format_stand_label(
-            {
-                "code": entry.get("stand_code"),
-                "display_name": entry.get("stand_display_name"),
-                "title": entry.get("stand_title"),
-            },
-            entry,
-        )
-        if stand_label:
-            parts.append(f"Станок: {stand_label}")
-
-        bike_title = (entry.get("bike_title") or "").strip()
-        bike_owner = (entry.get("bike_owner") or "").strip()
-        if bike_title or bike_owner:
-            if bike_owner:
-                parts.append(f"Велосипед: {bike_title} ({bike_owner})" if bike_title else f"Велосипед: {bike_owner}")
-            else:
-                parts.append(f"Велосипед: {bike_title}")
+                parts.append("🧑‍🏫 Инструктор: уточняется")
 
         lines.append("\n".join(parts))
 

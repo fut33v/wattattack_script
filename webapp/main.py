@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import logging
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -21,6 +21,7 @@ from fastapi import (
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from repositories import (
@@ -47,7 +48,10 @@ from .dependencies import (
 
 BASE_DIR = Path(__file__).parent
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
+TEMPLATES_DIR = BASE_DIR / "templates"
 log = logging.getLogger(__name__)
+
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 def _safe_next(next_param: Optional[str]) -> str:
@@ -75,6 +79,30 @@ RESERVATION_STATUS_ALLOWED = {
     "waitlist",
     "blocked",
 }
+
+WEEKDAY_SHORT_NAMES = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+WEEKDAY_FULL_NAMES = (
+    "Понедельник",
+    "Вторник",
+    "Среда",
+    "Четверг",
+    "Пятница",
+    "Суббота",
+    "Воскресенье",
+)
+
+def _reservation_display_entry(reservation: dict) -> dict:
+    status = str(reservation.get("status") or "").lower()
+    client_name = (reservation.get("client_name") or "").strip()
+    if status == "available" or not reservation.get("client_name") and status in {"cancelled"}:
+        return {"label": "Свободно", "kind": "free"}
+
+    if client_name:
+        parts = client_name.split()
+        label = parts[-1] if parts else client_name
+        return {"label": label, "kind": "booked"}
+
+    return {"label": "Занято", "kind": "busy"}
 
 
 def _parse_iso_date(field: str, value: object) -> date:
@@ -128,6 +156,184 @@ def _serialize_reservation(reservation: dict) -> dict:
     if hasattr(updated_at, "isoformat"):
         serialized["updated_at"] = updated_at.isoformat()
     return serialized
+
+
+def _load_schedule_week_payload(week_id: int) -> Optional[dict]:
+    week = schedule_repository.get_week(week_id)
+    if not week:
+        return None
+
+    slots = schedule_repository.list_slots_with_reservations(week_id)
+    if not slots:
+        try:
+            created = schedule_repository.create_default_slots_for_week(week_id)
+        except Exception as exc:  # pylint: disable=broad-except
+            log.warning("Failed to auto-create default slots for week %s: %s", week_id, exc)
+            created = 0
+        if created:
+            slots = schedule_repository.list_slots_with_reservations(week_id)
+
+    trainers_repository.ensure_trainers_table()
+    stands = trainers_repository.list_trainers()
+    stands_payload = [
+        {
+            "id": trainer["id"],
+            "code": trainer.get("code"),
+            "display_name": trainer.get("display_name"),
+            "title": trainer.get("title"),
+        }
+        for trainer in stands
+    ]
+
+    serialized_slots = [_serialize_slot(slot) for slot in slots]
+    instructors_payload = jsonable_encoder(instructors_repository.list_instructors())
+
+    return {
+        "week": jsonable_encoder(week),
+        "slots": serialized_slots,
+        "stands": jsonable_encoder(stands_payload),
+        "instructors": instructors_payload,
+    }
+
+
+def _week_start_for_slug(slug: str) -> Optional[date]:
+    if not slug:
+        return None
+    normalized = slug.strip().lower()
+    today = date.today()
+    current_week_start = today - timedelta(days=today.weekday())
+    if normalized == "current_week":
+        return current_week_start
+    if normalized == "next_week":
+        return current_week_start + timedelta(days=7)
+    if normalized == "previous_week":
+        return current_week_start - timedelta(days=7)
+
+    if normalized.startswith("week_"):
+        tail = normalized[5:]
+        for fmt in ("%Y_%m_%d", "%d_%m_%Y", "%d_%m_%y"):
+            try:
+                parsed = datetime.strptime(tail, fmt).date()
+                return parsed
+            except ValueError:
+                continue
+    return None
+
+
+def _format_week_slug(week_start: date | str) -> Optional[str]:
+    if isinstance(week_start, str):
+        try:
+            week_date = datetime.strptime(week_start, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+    elif isinstance(week_start, date):
+        week_date = week_start
+    else:
+        return None
+    return f"week_{week_date:%d_%m_%y}"
+
+
+def _format_week_range_label(week_start: date | str) -> Optional[str]:
+    if isinstance(week_start, str):
+        try:
+            start_date = datetime.strptime(week_start, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+    elif isinstance(week_start, date):
+        start_date = week_start
+    else:
+        return None
+    end_date = start_date + timedelta(days=6)
+    return f"{start_date:%d.%m.%Y} — {end_date:%d.%m.%Y}"
+
+
+def _build_day_columns(slots: list[dict], week_start_date: str | date, instructors: list[dict]) -> list[dict]:
+    if isinstance(week_start_date, str):
+        try:
+            start_date = datetime.strptime(week_start_date, "%Y-%m-%d").date()
+        except ValueError:
+            return []
+    elif isinstance(week_start_date, date):
+        start_date = week_start_date
+    else:
+        return []
+
+    instructor_map = {}
+    for instructor in instructors or []:
+        instructor_id = instructor.get("id")
+        if instructor_id is None:
+            continue
+        instructor_map[instructor_id] = instructor.get("full_name") or instructor.get("name")
+
+    slots_by_date: dict[str, list[dict]] = {}
+    for slot in slots or []:
+        key = slot.get("slot_date") or slot.get("slotDate")
+        if not key:
+            continue
+        slots_by_date.setdefault(key, []).append(slot)
+
+    day_columns: list[dict] = []
+    for offset in range(7):
+        current_date = start_date + timedelta(days=offset)
+        iso = current_date.isoformat()
+        slot_list = slots_by_date.get(iso, [])
+        slot_list = sorted(
+            slot_list,
+            key=lambda item: (
+                item.get("start_time", ""),
+                item.get("end_time", ""),
+                item.get("id", 0),
+            ),
+        )
+
+        slot_entries: list[dict] = []
+        totals = {"occupied": 0, "free": 0, "slots": len(slot_list)}
+        for raw_slot in slot_list:
+            reservations = raw_slot.get("reservations") or []
+            occupied = sum(1 for res in reservations if (res.get("status") or "").lower() != "available")
+            total = len(reservations)
+            free = max(total - occupied, 0)
+            totals["occupied"] += occupied
+            totals["free"] += free
+
+            reservation_rows = [_reservation_display_entry(res) for res in reservations]
+
+            instructor_name = raw_slot.get("instructorName")
+            if not instructor_name:
+                instructor_id = raw_slot.get("instructorId") or raw_slot.get("instructor_id")
+                if instructor_id is not None:
+                    instructor_name = instructor_map.get(instructor_id)
+
+            label = (raw_slot.get("label") or "").strip()
+            if not label:
+                label = "С инструктором" if raw_slot.get("session_kind") == "instructor" else "Самокрутка"
+
+            slot_entries.append(
+                {
+                    "id": raw_slot.get("id"),
+                    "start_time": raw_slot.get("start_time"),
+                    "end_time": raw_slot.get("end_time"),
+                    "label": label,
+                    "instructor_name": instructor_name,
+                    "reservations": reservations,
+                    "reservation_rows": reservation_rows,
+                    "stats": {"occupied": occupied, "free": free, "total": total},
+                    "session_kind": raw_slot.get("session_kind"),
+                }
+            )
+
+        day_columns.append(
+            {
+                "iso": iso,
+                "weekday_short": WEEKDAY_SHORT_NAMES[offset],
+                "weekday_full": WEEKDAY_FULL_NAMES[offset],
+                "label": current_date.strftime("%d.%m"),
+                "slots": slot_entries,
+                "totals": totals,
+            }
+        )
+
+    return day_columns
 
 
 @api.get("/config")
@@ -683,39 +889,10 @@ async def api_create_schedule_week(request: Request, user=Depends(require_admin)
 
 @api.get("/schedule/weeks/{week_id}")
 def api_get_schedule_week(week_id: int, user=Depends(require_user)):
-    week = schedule_repository.get_week(week_id)
-    if not week:
+    payload = _load_schedule_week_payload(week_id)
+    if not payload:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Week not found")
-    slots = schedule_repository.list_slots_with_reservations(week_id)
-    if not slots:
-        try:
-            created = schedule_repository.create_default_slots_for_week(week_id)
-        except Exception as exc:  # pylint: disable=broad-except
-            log.warning("Failed to auto-create default slots for week %s: %s", week_id, exc)
-            created = 0
-        if created:
-            slots = schedule_repository.list_slots_with_reservations(week_id)
-    trainers_repository.ensure_trainers_table()
-    stands = trainers_repository.list_trainers()
-    stands_payload = [
-        {
-            "id": trainer["id"],
-            "code": trainer.get("code"),
-            "display_name": trainer.get("display_name"),
-            "title": trainer.get("title"),
-        }
-        for trainer in stands
-    ]
-    serialized_slots = [_serialize_slot(slot) for slot in slots]
-
-    instructors_payload = jsonable_encoder(instructors_repository.list_instructors())
-
-    return {
-        "week": jsonable_encoder(week),
-        "slots": serialized_slots,
-        "stands": jsonable_encoder(stands_payload),
-        "instructors": instructors_payload,
-    }
+    return payload
 
 
 @api.patch("/schedule/weeks/{week_id}")
@@ -1275,10 +1452,90 @@ def create_app() -> FastAPI:
     def root():
         return RedirectResponse(url="/app", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
+    @app.get("/schedule")
+    def schedule_default():
+        return RedirectResponse(url="/schedule/current_week", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
     @app.get("/logout")
     def logout(request: Request):
         request.session.pop(SESSION_KEY_USER, None)
         return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.get("/schedule/{slug}", response_class=HTMLResponse, name="public_schedule_page")
+    def public_schedule_page(request: Request, slug: str):
+        target_start = _week_start_for_slug(slug)
+        status_code = status.HTTP_200_OK
+        error_message: Optional[str] = None
+        if not target_start:
+            error_message = "Некорректная ссылка на неделю."
+
+        week_payload: Optional[dict] = None
+        canonical_slug: Optional[str] = None
+        week_start_date_obj: Optional[date] = target_start
+        day_columns: list[dict] = []
+        share_url: Optional[str] = None
+        week_range_label: Optional[str] = None
+
+        if not error_message and target_start:
+            week_record = schedule_repository.get_week_by_start(target_start)
+            if not week_record:
+                error_message = "Расписание для этой недели пока не создано."
+            else:
+                week_payload = _load_schedule_week_payload(week_record["id"])
+                if not week_payload:
+                    error_message = "Неделя не найдена."
+                else:
+                    week_data = week_payload.get("week") or {}
+                    week_start_iso = week_data.get("week_start_date")
+                    if isinstance(week_start_iso, str):
+                        try:
+                            week_start_date_obj = datetime.strptime(week_start_iso, "%Y-%m-%d").date()
+                        except ValueError:
+                            week_start_date_obj = target_start
+                    elif isinstance(week_start_iso, date):
+                        week_start_date_obj = week_start_iso
+
+                    day_columns = _build_day_columns(
+                        week_payload.get("slots") or [],
+                        week_start_iso or week_start_date_obj,
+                        week_payload.get("instructors") or [],
+                    )
+                    canonical_slug = _format_week_slug(week_start_iso or week_start_date_obj)
+                    week_range_label = _format_week_range_label(week_start_iso or week_start_date_obj)
+
+        if error_message:
+            status_code = status.HTTP_404_NOT_FOUND
+
+        user = get_current_user(request)
+        show_editor_button = bool(user and is_admin_user(user))
+
+        prev_week_slug = None
+        next_week_slug = None
+        if week_start_date_obj:
+            prev_week_slug = _format_week_slug(week_start_date_obj - timedelta(days=7))
+            next_week_slug = _format_week_slug(week_start_date_obj + timedelta(days=7))
+
+        if canonical_slug:
+            try:
+                share_url = str(request.url_for("public_schedule_page", slug=canonical_slug))
+            except Exception:  # pragma: no cover - fallback when URL reversing fails
+                share_url = f"/schedule/{canonical_slug}"
+
+        context = {
+            "request": request,
+            "week": week_payload.get("week") if week_payload else None,
+            "day_columns": day_columns,
+            "slug": slug,
+            "canonical_slug": canonical_slug,
+            "week_range_label": week_range_label,
+            "share_url": share_url,
+            "prev_week_slug": prev_week_slug,
+            "next_week_slug": next_week_slug,
+            "show_editor_button": show_editor_button,
+            "error_message": error_message,
+            "target_week_label": _format_week_range_label(target_start) if target_start else None,
+        }
+        return templates.TemplateResponse("public_schedule.html", context, status_code=status_code)
 
     @app.get("/auth/telegram")
     async def telegram_auth(request: Request, next: Optional[str] = None):

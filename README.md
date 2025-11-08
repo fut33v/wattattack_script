@@ -83,7 +83,8 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
      stands - показать доступные станки
      client - найти клиента по БД
      newclient - создать нового клиента
-     uploadclients - загрузить CSV клиентов
+    uploadclients - загрузить CSV (интерактивный выбор перезаписи/обновления + dry-run)
+    downloadclients - выгрузить клиентов в CSV
      uploadbikes - загрузить CSV велосипедов
      uploadstands - загрузить CSV станков
      uploadworkout - загрузить тренировку ZWO
@@ -109,9 +110,9 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 - **API эндпоинты**: `/api/clients`, `/api/bikes`, `/api/trainers`, `/api/client-links`, `/api/admins`, `/api/summary`, `/api/session`.
 - **Разработка**: запускайте фронтенд (`npm run dev`) и бэкенд (`uvicorn webapp.main:app --reload`) параллельно. Vite проксирует запросы `/api`, `/auth`, `/logout` на порт 8000.
 - **Production**: `docker-compose up webapp` соберёт React-приложение «Крутилка», положит статические файлы в `webapp/frontend/dist` и обслужит их через FastAPI (`/app/*`).
-- **Client CSV**: Ensure the columns match `scripts/load_clients.py` mapping (e.g., “Имя”, “Фамилия”, “ПОЛ”, “Ваш вес”, etc.). `/uploadclients truncate` replaces all entries; otherwise rows are upserted.
+- **Client CSV**: Ensure the columns match `scripts/load_clients.py` mapping (e.g., “Имя”, “Фамилия”, “Ваш пол”, “Ваш вес”, etc.). `/uploadclients` теперь предлагает интерактивный выбор режима (обновление, перезапись, dry-run); после выбора отправьте CSV как документ. `/downloadclients` выгружает клиентов в том же формате.
 - **Bike inventory**: The CSV should match `scripts/load_bikes.py` expectations (ID, название, владелец, размер, рост от/до, передачи, эксцентрик/ось, кассета). Trainer CSV should follow `scripts/load_trainers.py` mapping (код, модель, отображаемое имя, хозяин, оси, кассета, комментарий). Use `/bikes <поиск>` для велосипедов и `/stands <поиск>` для станков; по кнопке станка можно отредактировать тип оси и кассету. Карточки клиента автоматически показывают совместимые велосипеды и станки.
-- **CSV uploads**: Команды `/uploadclients`, `/uploadbikes`, `/uploadstands` принимают CSV как документ (можно переслать, ответить на файл, использовать `truncate` для полной перезагрузки).
+- **CSV uploads**: Команды `/uploadclients`, `/uploadbikes`, `/uploadstands` принимают CSV как документ (можно переслать, ответить на файл; для клиентов и расписания режим выбирается кнопками). `/uploadschedule` принимает XLSX-таблицу, позволяет выбрать dry-run/keep и выводит отчёт.
 - **Inventory editing**: Команды `/bikes` и `/stands` выводят списки с кнопками для редактирования допустимого роста велосипедов и параметров станков прямо в Telegram.
 - **Profile updates**: WattAttack requires `birthDate` and gender; bot defaults to `2000-01-01` if missing. Logs include payload and response for visibility.
 - **Notifier**: Draws admin IDs from DB (`admins` table). If empty, it logs an error at startup.

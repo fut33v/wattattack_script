@@ -72,6 +72,8 @@ CLIENT_ALIASES: Dict[str, Optional[str]] = {
     _normalize_yo(key.strip().lower()): value for key, value in _CLIENT_ALIAS_ENTRIES.items()
 }
 
+BLOCKED_LABELS = {"занято", "busy"}
+
 INSTRUCTOR_ALIAS_ENTRIES: Dict[str, str] = {
     "евгений балакин": "евгений балакин",
     "балакин евгений": "евгений балакин",
@@ -89,6 +91,7 @@ INSTRUCTOR_ALIAS_ENTRIES: Dict[str, str] = {
 class SlotReservation:
     stand_label: str
     client_text: str
+    is_blocked: bool = False
 
 
 @dataclass
@@ -248,6 +251,10 @@ def parse_sheet(zf: zipfile.ZipFile, sheet_path: str, shared_strings: Sequence[s
         if current_time_label is None:
             continue
 
+        column1_value = data.get((row, 1))
+        column1_trimmed = column1_value.strip() if isinstance(column1_value, str) else ""
+        is_self_service_block = bool(column1_trimmed) and column1_trimmed.lower().startswith("самокрутка")
+
         stand_label: Optional[str] = None
         for col_idx in range(1, max_col + 1):
             candidate = data.get((row, col_idx))
@@ -261,17 +268,31 @@ def parse_sheet(zf: zipfile.ZipFile, sheet_path: str, shared_strings: Sequence[s
                 if not isinstance(text, str):
                     continue
                 trimmed = text.strip()
-                if not trimmed or trimmed.lower().startswith("станок"):
+                trimmed_lower = trimmed.lower()
+                if not trimmed or trimmed_lower.startswith("станок"):
                     continue
-                if trimmed.lower() in {"самокрутка", "self"}:
+                if trimmed_lower in {"самокрутка", "self"}:
                     continue
+                is_blocked = trimmed_lower in BLOCKED_LABELS
                 slot_key = (slot_date, current_time_label)
                 entry = slots.setdefault(
                     slot_key,
                     SlotEntry(slot_date=slot_date, time_label=current_time_label, label=None, reservations=[]),
                 )
-                entry.reservations.append(SlotReservation(stand_label=stand_label, client_text=trimmed))
+                entry.reservations.append(
+                    SlotReservation(stand_label=stand_label, client_text=trimmed, is_blocked=is_blocked)
+                )
             continue
+
+        if is_self_service_block:
+            for col_idx, slot_date in col_to_date.items():
+                slot_key = (slot_date, current_time_label)
+                entry = slots.setdefault(
+                    slot_key,
+                    SlotEntry(slot_date=slot_date, time_label=current_time_label, label=None, reservations=[]),
+                )
+                if not entry.label:
+                    entry.label = column1_trimmed
 
         for col_idx, slot_date in col_to_date.items():
             text = data.get((row, col_idx))
@@ -279,6 +300,14 @@ def parse_sheet(zf: zipfile.ZipFile, sheet_path: str, shared_strings: Sequence[s
                 continue
             trimmed = text.strip()
             if not trimmed or trimmed.lower().startswith("станок"):
+                continue
+            if trimmed and trimmed.lower().startswith("самокрутка"):
+                slot_key = (slot_date, current_time_label)
+                entry = slots.setdefault(
+                    slot_key,
+                    SlotEntry(slot_date=slot_date, time_label=current_time_label, label=None, reservations=[]),
+                )
+                entry.label = trimmed
                 continue
             slot_key = (slot_date, current_time_label)
             entry = slots.setdefault(
@@ -509,7 +538,9 @@ def import_schedule(
             created_slots += 1
             for reservation in slot_entry.reservations:
                 raw_client = reservation.client_text.strip().lower()
-                if raw_client in CLIENT_ALIASES and CLIENT_ALIASES[raw_client] is None:
+                normalized_raw = _normalize_yo(raw_client)
+                alias_is_blocked = normalized_raw in CLIENT_ALIASES and CLIENT_ALIASES[normalized_raw] is None
+                if reservation.is_blocked or alias_is_blocked:
                     continue
                 normalized_stand = normalize_stand_label(reservation.stand_label)
                 if normalized_stand not in stand_lookup:
@@ -532,15 +563,17 @@ def import_schedule(
 
         for reservation in slot_entry.reservations:
             client_text = reservation.client_text.strip()
-            if not client_text:
-                continue
-            raw_client = client_text.lower()
-            if raw_client in CLIENT_ALIASES and CLIENT_ALIASES[raw_client] is None:
-                continue
+            raw_client = _normalize_yo(client_text.lower())
+            alias_value = CLIENT_ALIASES.get(raw_client)
+            alias_is_blocked = raw_client in CLIENT_ALIASES and alias_value is None
+            is_blocked = reservation.is_blocked or alias_is_blocked
 
-            client_id, client_display = resolve_client(client_text, client_lookup)
-            if not client_id:
-                unmatched_clients[client_text] += 1
+            client_id = None
+            client_display = None
+            if not is_blocked and client_text:
+                client_id, client_display = resolve_client(client_text, client_lookup)
+                if not client_id:
+                    unmatched_clients[client_text] += 1
 
             normalized_stand = normalize_stand_label(reservation.stand_label)
             stand_id = stand_lookup.get(normalized_stand)
@@ -553,9 +586,9 @@ def import_schedule(
                 else None
             )
             payload = {
-                "client_id": client_id,
-                "client_name": client_display or client_text,
-                "status": "booked",
+                "client_id": client_id if not is_blocked else None,
+                "client_name": (client_display or client_text or "Занято") if not is_blocked else (client_text or "Занято"),
+                "status": "blocked" if is_blocked else "booked",
                 "source": "import-xlsx",
             }
             if placeholder:
