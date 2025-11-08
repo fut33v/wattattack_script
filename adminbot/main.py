@@ -7,11 +7,12 @@ import html
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 import re
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
@@ -58,6 +59,14 @@ from repositories.trainers_repository import (
     trainers_count,
     get_trainer,
     update_trainer_fields,
+)
+from repositories.schedule_repository import (
+    book_available_reservation,
+    get_reservation,
+    get_slot_with_reservations,
+    list_available_slots,
+    list_future_reservations_for_client,
+    update_reservation,
 )
 from repositories.layout_repository import (
     ensure_layout_table,
@@ -108,6 +117,17 @@ PEDAL_OPTIONS: List[Tuple[str, str]] = [
 ]
 PEDAL_OPTION_LABEL_BY_CODE: Dict[str, str] = {code: label for label, code in PEDAL_OPTIONS}
 
+LOCAL_TIMEZONE = ZoneInfo(os.environ.get("WATTATTACK_LOCAL_TZ", "Europe/Moscow"))
+BOOKING_LOOKAHEAD_DAYS = int(os.environ.get("ADMINBOT_BOOKING_LOOKAHEAD_DAYS", "21"))
+BOOKING_LOOKAHEAD = timedelta(days=max(1, BOOKING_LOOKAHEAD_DAYS))
+BOOKING_CUTOFF_MINUTES = int(os.environ.get("ADMINBOT_BOOKING_CUTOFF_MINUTES", "90"))
+BOOKING_CUTOFF = timedelta(minutes=max(1, BOOKING_CUTOFF_MINUTES))
+BOOKING_SLOTS_LIMIT = max(10, int(os.environ.get("ADMINBOT_BOOKING_SLOTS_LIMIT", "80")))
+WEEKDAY_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+BOOKING_DAY_LIMIT = max(1, int(os.environ.get("ADMINBOT_BOOKING_DAY_LIMIT", "7")))
+BOOKING_REASSIGN_LIMIT = max(3, int(os.environ.get("ADMINBOT_REASSIGN_OPTIONS", "12")))
+CLIENT_BOOKINGS_LIMIT = max(5, int(os.environ.get("ADMINBOT_CLIENT_BOOKINGS_LIMIT", "10")))
+
 (
     NEWCLIENT_FIRST_NAME,
     NEWCLIENT_LAST_NAME,
@@ -157,6 +177,603 @@ def _format_optional_number(value: Optional[float]) -> str:
     if value is None:
         return "—"
     return f"{value:g}"
+
+
+def _local_now() -> datetime:
+    return datetime.now(tz=LOCAL_TIMEZONE)
+
+
+def _to_local_naive(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(LOCAL_TIMEZONE).replace(tzinfo=None)
+
+
+def _parse_date_value(value: Any) -> Optional[date]:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(value, fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
+def _parse_time_value(value: Any) -> Optional[time]:
+    if isinstance(value, time):
+        return value
+    if isinstance(value, datetime):
+        return value.time()
+    if isinstance(value, str):
+        for fmt in ("%H:%M:%S", "%H:%M"):
+            try:
+                return datetime.strptime(value, fmt).time()
+            except ValueError:
+                continue
+    return None
+
+
+def _slot_start_datetime(slot: Dict[str, Any]) -> Optional[datetime]:
+    slot_date = _parse_date_value(slot.get("slot_date"))
+    start_time_value = _parse_time_value(slot.get("start_time"))
+    if slot_date is None or start_time_value is None:
+        return None
+    combined = datetime.combine(slot_date, start_time_value)
+    return combined.replace(tzinfo=LOCAL_TIMEZONE)
+
+
+def _format_time_label(value: Any) -> Optional[str]:
+    parsed = _parse_time_value(value)
+    if parsed is None:
+        return str(value) if value is not None else None
+    return parsed.strftime("%H:%M")
+
+
+def _format_weekday_label(value: date) -> str:
+    if not isinstance(value, date):
+        return str(value)
+    idx = value.weekday()
+    prefix = WEEKDAY_SHORT[idx] if 0 <= idx < len(WEEKDAY_SHORT) else value.strftime("%a")
+    return f"{prefix} {value.strftime('%d.%m')}"
+
+
+def _format_slot_summary(slot: Dict[str, Any]) -> str:
+    slot_date = _parse_date_value(slot.get("slot_date"))
+    date_label = _format_weekday_label(slot_date) if slot_date else str(slot.get("slot_date"))
+    start_label = _format_time_label(slot.get("start_time"))
+    end_label = _format_time_label(slot.get("end_time"))
+    time_part = None
+    if start_label and end_label:
+        time_part = f"{start_label}–{end_label}"
+    elif start_label or end_label:
+        time_part = start_label or end_label
+    parts = [date_label]
+    if time_part:
+        parts.append(time_part)
+    summary = " · ".join(parts)
+    descriptor_raw = slot.get("label")
+    descriptor = str(descriptor_raw).strip() if descriptor_raw not in (None, "") else ""
+    if descriptor:
+        summary = f"{summary} ({descriptor})"
+    elif slot.get("session_kind") == "instructor":
+        instructor = (slot.get("instructor_name") or "").strip()
+        if instructor:
+            summary = f"{summary} (инструктор {instructor})"
+        else:
+            summary = f"{summary} (с инструктором)"
+    return summary
+
+
+def _format_slot_button_label(slot: Dict[str, Any]) -> str:
+    start_label = _format_time_label(slot.get("start_time")) or "—"
+    end_label = _format_time_label(slot.get("end_time")) or ""
+    if end_label:
+        time_part = f"{start_label}–{end_label}"
+    else:
+        time_part = start_label
+
+    descriptor_raw = slot.get("label")
+    descriptor = str(descriptor_raw).strip() if descriptor_raw not in (None, "") else ""
+
+    parts = [time_part]
+    if descriptor:
+        parts.append(descriptor)
+    elif slot.get("session_kind") == "instructor":
+        instructor = (slot.get("instructor_name") or "").strip()
+        if instructor:
+            parts.append(f"инструктор {instructor}")
+        else:
+            parts.append("с инструктором")
+
+    free_count = slot.get("free_count")
+    if isinstance(free_count, int):
+        parts.append(f"мест {free_count}")
+
+    return " · ".join(part for part in parts if part)
+
+
+def _group_slots_by_day(slots: Iterable[Dict[str, Any]]) -> List[Tuple[date, List[Dict[str, Any]]]]:
+    grouped: Dict[date, List[Dict[str, Any]]] = {}
+    for slot in slots:
+        slot_date = _parse_date_value(slot.get("slot_date"))
+        if slot_date is None:
+            continue
+        grouped.setdefault(slot_date, []).append(slot)
+
+    ordered: List[Tuple[date, List[Dict[str, Any]]]] = []
+    for slot_date, entries in grouped.items():
+        entries.sort(
+            key=lambda item: (
+                _parse_time_value(item.get("start_time")) or time.min,
+                item.get("id") or 0,
+            )
+        )
+        ordered.append((slot_date, entries))
+    ordered.sort(key=lambda item: item[0])
+    return ordered
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _score_bike_height(bike: Dict[str, Any], client_height: Optional[float]) -> float:
+    if client_height is None:
+        return 120.0
+
+    min_h = _to_float(bike.get("height_min_cm"))
+    max_h = _to_float(bike.get("height_max_cm"))
+
+    if min_h is not None and max_h is not None:
+        if min_h <= client_height <= max_h:
+            midpoint = (min_h + max_h) / 2
+            return abs(client_height - midpoint)
+        if client_height < min_h:
+            return 200.0 + (min_h - client_height)
+        return 200.0 + (client_height - max_h)
+
+    if min_h is not None:
+        if client_height >= min_h:
+            return client_height - min_h
+        return 200.0 + (min_h - client_height)
+
+    if max_h is not None:
+        if client_height <= max_h:
+            return max_h - client_height
+        return 200.0 + (client_height - max_h)
+
+    return 150.0
+
+
+def _match_favorite_bike_id(favorite_raw: Optional[str], bikes_map: Dict[int, Dict[str, Any]]) -> Optional[int]:
+    if not favorite_raw:
+        return None
+    needle = favorite_raw.strip().lower()
+    if not needle:
+        return None
+
+    exact_matches: List[int] = []
+    partial_matches: List[int] = []
+
+    for bike_id, bike in bikes_map.items():
+        title = (bike.get("title") or "").strip().lower()
+        owner = (bike.get("owner") or "").strip().lower()
+        if title == needle or owner == needle:
+            exact_matches.append(bike_id)
+        elif needle in title or (owner and needle in owner):
+            partial_matches.append(bike_id)
+
+    if exact_matches:
+        return exact_matches[0]
+    if partial_matches:
+        return partial_matches[0]
+    return None
+
+
+def _format_stand_label_for_booking(
+    stand: Optional[Dict[str, Any]],
+    reservation: Optional[Dict[str, Any]] = None,
+) -> str:
+    if stand:
+        code = _format_trainer_code(stand.get("code"))
+        title = (stand.get("title") or "").strip()
+        display = (stand.get("display_name") or "").strip()
+        if code and title and title.lower() != code.lower():
+            return f"{code} · {title}"
+        if title:
+            return title
+        if code:
+            return code
+        if display:
+            return display
+        stand_id = stand.get("id")
+        if stand_id is not None:
+            return f"Станок {stand_id}"
+    stand_code = _format_trainer_code((reservation or {}).get("stand_code"))
+    if stand_code:
+        return stand_code
+    if reservation and reservation.get("stand_id"):
+        return f"Станок {reservation.get('stand_id')}"
+    return "Станок"
+
+
+def _choose_best_reservation_for_client(
+    client: Dict[str, Any],
+    reservations: List[Dict[str, Any]],
+    *,
+    stands_map: Dict[int, Dict[str, Any]],
+    bikes_map: Dict[int, Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    ranked = _rank_available_reservations(client, reservations, stands_map, bikes_map)
+    if not ranked:
+        return None, None, None
+
+    best_choice = ranked[0]
+    return best_choice[3], best_choice[4], best_choice[5]
+
+
+def _rank_available_reservations(
+    client: Dict[str, Any],
+    reservations: List[Dict[str, Any]],
+    stands_map: Dict[int, Dict[str, Any]],
+    bikes_map: Dict[int, Dict[str, Any]],
+) -> List[
+    Tuple[float, float, str, Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]], str]
+]:
+    client_height = _to_float(client.get("height"))
+    favorite_bike_id = _match_favorite_bike_id(client.get("favorite_bike"), bikes_map)
+    ranked: List[
+        Tuple[float, float, str, Dict[str, Any], Optional[Dict[str, Any]], Optional[Dict[str, Any]], str]
+    ] = []
+    for reservation in reservations:
+        stand_id = reservation.get("stand_id")
+        stand = stands_map.get(stand_id) if isinstance(stand_id, int) else None
+        bike = None
+        bike_id = None
+        if stand:
+            bike_id = stand.get("bike_id")
+            if isinstance(bike_id, int):
+                bike = bikes_map.get(bike_id)
+
+        if bike_id is not None and favorite_bike_id is not None and bike_id == favorite_bike_id:
+            score = 0.0
+        elif bike is not None:
+            score = 100.0 + _score_bike_height(bike, client_height)
+        elif stand is not None:
+            score = 600.0
+        else:
+            score = 900.0
+
+        position = stand.get("position") if isinstance(stand, dict) else None
+        position_score = float(position) if isinstance(position, (int, float)) else 999.0
+        stand_label = _format_stand_label_for_booking(stand, reservation)
+        ranked.append((score, position_score, stand_label.lower(), reservation, stand, bike, stand_label))
+    ranked.sort(key=lambda item: item[:3])
+    return ranked
+
+
+def _format_reassign_option_label(
+    base_label: str,
+    stand: Optional[Dict[str, Any]],
+    bike: Optional[Dict[str, Any]],
+) -> str:
+    bike_title = None
+    if isinstance(bike, dict):
+        bike_title = bike.get("title")
+    if not bike_title and isinstance(stand, dict):
+        bike_title = stand.get("bike_title")
+    if bike_title:
+        label = f"{base_label} · {bike_title}"
+    else:
+        label = base_label
+    return _trim_label(label)
+
+
+def _format_reservation_stand_label(reservation: Dict[str, Any]) -> str:
+    code = _format_trainer_code(reservation.get("stand_code"))
+    display = (reservation.get("stand_display_name") or "").strip()
+    title = (reservation.get("stand_title") or "").strip()
+    if code:
+        return code
+    if display:
+        return display
+    if title:
+        return title
+    stand_id = reservation.get("stand_id")
+    if stand_id:
+        return f"Станок {stand_id}"
+    return "Станок"
+
+
+def _format_reservation_button_label(reservation: Dict[str, Any]) -> str:
+    slot_date = _parse_date_value(reservation.get("slot_date"))
+    start_label = _format_time_label(reservation.get("start_time")) or "—"
+    end_label = _format_time_label(reservation.get("end_time")) or ""
+    if end_label:
+        time_part = f"{start_label}–{end_label}"
+    else:
+        time_part = start_label
+    date_label = _format_weekday_label(slot_date) if slot_date else str(reservation.get("slot_date"))
+    stand_label = _format_reservation_stand_label(reservation)
+    return _trim_label(f"{date_label} · {time_part} · {stand_label}")
+
+
+def _format_reservation_detail(reservation: Dict[str, Any]) -> str:
+    slot_summary = _format_slot_summary(reservation)
+    stand_label = _format_reservation_stand_label(reservation)
+    bike_title = reservation.get("bike_title")
+    lines = [
+        f"{html.escape(slot_summary)}",
+        f"🛠 Станок: {html.escape(stand_label)}",
+    ]
+    if bike_title:
+        lines.append(f"🚲 Велосипед: {html.escape(str(bike_title))}")
+    source = reservation.get("source")
+    if source:
+        lines.append(f"📝 Источник: {html.escape(str(source))}")
+    return "\n".join(lines)
+
+
+def build_booking_success_markup(client_id: int, reservation_id: Optional[int]) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    if isinstance(reservation_id, int):
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🛠 Посадить на другой станок",
+                    callback_data=f"client_schedule_reassign|{client_id}|{reservation_id}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="➕ Записать ещё",
+                callback_data=f"client_schedule_refresh|{client_id}",
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="↩️ К клиенту", callback_data=f"client_info|{client_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_client_booking_detail_markup(client_id: int, reservation_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    text="🛠 Пересадить",
+                    callback_data=f"client_schedule_reassign|{client_id}|{reservation_id}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Удалить бронь",
+                    callback_data=f"client_booking_cancel|{client_id}|{reservation_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="↩️ Ко всем бронированиям",
+                    callback_data=f"client_bookings|{client_id}",
+                )
+            ],
+            [InlineKeyboardButton(text="↩️ К клиенту", callback_data=f"client_info|{client_id}")],
+        ]
+    )
+
+
+async def _load_inventory_maps() -> Tuple[Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]]]:
+    try:
+        trainers = await asyncio.to_thread(list_trainers)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load trainers for booking selection")
+        trainers = []
+    stands_map = {
+        row.get("id"): row
+        for row in trainers
+        if isinstance(row.get("id"), int)
+    }
+
+    try:
+        bikes = await asyncio.to_thread(list_bikes)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load bikes for booking selection")
+        bikes = []
+    bikes_map = {row.get("id"): row for row in bikes if isinstance(row.get("id"), int)}
+    return stands_map, bikes_map
+
+
+async def show_client_bookings(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    *,
+    notice: Optional[str] = None,
+) -> None:
+    try:
+        client = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s bookings", client_id)
+        await query.edit_message_text(f"❌ Не удалось получить данные клиента: {exc}")
+        return
+
+    if not client:
+        await query.edit_message_text("🔍 Клиент не найден.")
+        return
+
+    since = _to_local_naive(_local_now())
+    try:
+        bookings = await asyncio.to_thread(
+            list_future_reservations_for_client,
+            client_id,
+            since,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load future reservations for client %s", client_id)
+        await query.edit_message_text(f"❌ Не удалось загрузить бронирования: {exc}")
+        return
+
+    rows: List[List[InlineKeyboardButton]] = []
+    limited = bookings[:CLIENT_BOOKINGS_LIMIT]
+    for reservation in limited:
+        res_id = reservation.get("id")
+        if not isinstance(res_id, int):
+            continue
+        label = _format_reservation_button_label(reservation)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"client_booking|{client_id}|{res_id}",
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔄 Обновить",
+                callback_data=f"client_bookings|{client_id}",
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="↩️ К клиенту", callback_data=f"client_info|{client_id}")])
+
+    client_label = html.escape(client_display_name(client))
+    header = f"📅 Бронирования клиента <b>{client_label}</b>."
+
+    body_lines: List[str] = []
+    if bookings:
+        body_lines.append(f"Найдено {len(bookings)} активных бронирований.")
+        if len(bookings) > CLIENT_BOOKINGS_LIMIT:
+            body_lines.append(f"Показаны первые {CLIENT_BOOKINGS_LIMIT}.")
+    else:
+        body_lines.append("Нет активных записей.")
+
+    message_parts: List[str] = []
+    if notice:
+        message_parts.append(f"⚠️ {html.escape(notice)}")
+    message_parts.append(header)
+    message_parts.extend(body_lines)
+
+    await query.edit_message_text(
+        "\n".join(message_parts),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def show_client_booking_detail(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    reservation_id: int,
+) -> None:
+    try:
+        reservation = await asyncio.to_thread(get_reservation, reservation_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load reservation %s", reservation_id)
+        await query.edit_message_text(f"❌ Не удалось прочитать бронь: {exc}")
+        return
+
+    if not reservation or reservation.get("client_id") != client_id:
+        await query.answer("Бронь не найдена.", show_alert=True)
+        await show_client_bookings(query, context, client_id, notice="Эта бронь больше недоступна.")
+        return
+
+    slot_id = reservation.get("slot_id")
+    slot_details = None
+    if isinstance(slot_id, int):
+        try:
+            slot_details = await asyncio.to_thread(get_slot_with_reservations, slot_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to load slot %s for reservation %s: %s", slot_id, reservation_id, exc)
+            slot_details = None
+
+    reservation_info = dict(reservation)
+    if slot_details:
+        reservation_info.setdefault("slot_date", slot_details.get("slot_date"))
+        reservation_info.setdefault("start_time", slot_details.get("start_time"))
+        reservation_info.setdefault("end_time", slot_details.get("end_time"))
+        reservation_info.setdefault("label", slot_details.get("label"))
+        reservation_info.setdefault("session_kind", slot_details.get("session_kind"))
+        reservation_info.setdefault("instructor_name", slot_details.get("instructor_name"))
+
+    detail_text = _format_reservation_detail(reservation_info)
+    client = await asyncio.to_thread(get_client, client_id)
+    client_label = html.escape(client_display_name(client) if client else f"id={client_id}")
+    text = f"📘 Бронь #{reservation_id} для <b>{client_label}</b>.\n{detail_text}"
+
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_client_booking_detail_markup(client_id, reservation_id),
+    )
+
+
+async def cancel_client_reservation(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    reservation_id: int,
+) -> None:
+    try:
+        reservation = await asyncio.to_thread(get_reservation, reservation_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load reservation %s for cancel", reservation_id)
+        await query.edit_message_text(f"❌ Не удалось прочитать бронь: {exc}")
+        return
+
+    if not reservation or reservation.get("client_id") != client_id:
+        await query.answer("Бронь не найдена.", show_alert=True)
+        await show_client_bookings(query, context, client_id, notice="Эта бронь уже изменена.")
+        return
+
+    slot_id = reservation.get("slot_id")
+    slot_details = None
+    if isinstance(slot_id, int):
+        try:
+            slot_details = await asyncio.to_thread(get_slot_with_reservations, slot_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to load slot %s for cancel: %s", slot_id, exc)
+            slot_details = None
+
+    reservation_info = dict(reservation)
+    if slot_details:
+        reservation_info.setdefault("slot_date", slot_details.get("slot_date"))
+        reservation_info.setdefault("start_time", slot_details.get("start_time"))
+        reservation_info.setdefault("end_time", slot_details.get("end_time"))
+        reservation_info.setdefault("label", slot_details.get("label"))
+        reservation_info.setdefault("session_kind", slot_details.get("session_kind"))
+        reservation_info.setdefault("instructor_name", slot_details.get("instructor_name"))
+
+    summary = _format_slot_summary(reservation_info)
+
+    try:
+        await asyncio.to_thread(
+            update_reservation,
+            reservation_id,
+            client_id=None,
+            client_name=None,
+            status="available",
+            source="adminbot",
+            notes="cancelled via adminbot",
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to cancel reservation %s", reservation_id)
+        await query.edit_message_text(f"❌ Не удалось отменить бронь: {exc}")
+        return
+
+    notice = f"Бронь на {summary} отменена."
+    await show_client_bookings(query, context, client_id, notice=notice)
 
 PENDING_UPLOAD_KEY = "pending_inventory_upload"
 PENDING_TRAINER_EDIT_KEY = "pending_trainer_edit"
@@ -2824,6 +3441,97 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             parse_mode=ParseMode.HTML,
             reply_markup=build_client_assign_keyboard(client_id),
         )
+    elif action == "client_schedule_book" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.answer("Некорректный идентификатор.", show_alert=True)
+            return
+        await show_client_booking_days(query, context, client_id)
+    elif action == "client_schedule_refresh" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.answer("Некорректный идентификатор.", show_alert=True)
+            return
+        await show_client_booking_days(query, context, client_id)
+    elif action == "client_schedule_back" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.answer("Некорректный идентификатор.", show_alert=True)
+            return
+        await show_client_booking_days(query, context, client_id)
+    elif action == "client_schedule_day" and len(parts) >= 3:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.answer("Некорректный идентификатор.", show_alert=True)
+            return
+        date_token = parts[2]
+        await show_client_booking_slots(query, context, client_id, date_token)
+    elif action == "client_schedule_slot" and len(parts) >= 3:
+        try:
+            client_id = int(parts[1])
+            slot_id = int(parts[2])
+        except ValueError:
+            await query.answer("Некорректные параметры.", show_alert=True)
+            return
+        await book_client_on_slot(query, context, client_id, slot_id)
+    elif action == "client_bookings" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.answer("Некорректный идентификатор.", show_alert=True)
+            return
+        await show_client_bookings(query, context, client_id)
+    elif action == "client_booking" and len(parts) >= 3:
+        try:
+            client_id = int(parts[1])
+            reservation_id = int(parts[2])
+        except ValueError:
+            await query.answer("Некорректные параметры.", show_alert=True)
+            return
+        await show_client_booking_detail(query, context, client_id, reservation_id)
+    elif action == "client_booking_cancel" and len(parts) >= 3:
+        try:
+            client_id = int(parts[1])
+            reservation_id = int(parts[2])
+        except ValueError:
+            await query.answer("Некорректные параметры.", show_alert=True)
+            return
+        await cancel_client_reservation(query, context, client_id, reservation_id)
+    elif action == "client_schedule_reassign" and len(parts) >= 3:
+        try:
+            client_id = int(parts[1])
+            reservation_id = int(parts[2])
+        except ValueError:
+            await query.answer("Некорректные параметры.", show_alert=True)
+            return
+        await show_client_reassign_menu(query, context, client_id, reservation_id)
+    elif action == "client_schedule_reassign_auto" and len(parts) >= 3:
+        try:
+            client_id = int(parts[1])
+            reservation_id = int(parts[2])
+        except ValueError:
+            await query.answer("Некорректные параметры.", show_alert=True)
+            return
+        await auto_reassign_client(query, context, client_id, reservation_id)
+    elif action == "client_schedule_reassign_set" and len(parts) >= 4:
+        try:
+            client_id = int(parts[1])
+            reservation_id = int(parts[2])
+            target_reservation_id = int(parts[3])
+        except ValueError:
+            await query.answer("Некорректные параметры.", show_alert=True)
+            return
+        await set_client_reservation_stand(
+            query,
+            context,
+            client_id,
+            reservation_id,
+            target_reservation_id,
+        )
     elif action == "client_edit" and len(parts) >= 3:
         field = parts[1]
         try:
@@ -3391,6 +4099,12 @@ def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="📅 Записать на тренировку",
+                    callback_data=f"client_schedule_book|{client_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="⚡ Изменить FTP",
                     callback_data=f"client_edit|ftp|{client_id}",
                 ),
@@ -3423,6 +4137,12 @@ def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="🚴 Подбор велосипедов",
                     callback_data=f"client_bikes|{client_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 Бронирования клиента",
+                    callback_data=f"client_bookings|{client_id}",
                 )
             ],
             [InlineKeyboardButton(text="❌ Закрыть", callback_data="client_close")],
@@ -4255,6 +4975,702 @@ async def render_client_info_message(
         parse_mode=ParseMode.HTML,
         reply_markup=build_client_info_markup(client_id),
     )
+
+
+async def _resolve_stand_label(reservation: Dict[str, Any]) -> str:
+    stand_id = reservation.get("stand_id")
+    if isinstance(stand_id, int):
+        try:
+            trainer = await asyncio.to_thread(get_trainer, stand_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("Failed to load trainer %s for booking: %s", stand_id, exc)
+        else:
+            if trainer:
+                return format_trainer_button_label(trainer)
+    stand_code = _format_trainer_code(reservation.get("stand_code"))
+    if stand_code:
+        return stand_code
+    if stand_id:
+        return f"Станок {stand_id}"
+    return "Станок"
+
+
+async def show_client_booking_days(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    *,
+    notice: Optional[str] = None,
+) -> None:
+    try:
+        client = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s for booking", client_id)
+        await query.edit_message_text(f"❌ Не удалось прочитать данные клиента: {exc}")
+        return
+
+    if not client:
+        await query.edit_message_text("🔍 Клиент не найден.")
+        return
+
+    client_label = client_display_name(client)
+    headline = f"📅 Выберите день для записи <b>{html.escape(client_label)}</b>."
+
+    search_start = _local_now() + BOOKING_CUTOFF
+    search_end = search_start + BOOKING_LOOKAHEAD
+
+    try:
+        slots_raw = await asyncio.to_thread(
+            list_available_slots,
+            _to_local_naive(search_start),
+            _to_local_naive(search_end),
+            BOOKING_SLOTS_LIMIT,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load available slots for admin booking")
+        await query.edit_message_text(f"❌ Не удалось получить расписание: {exc}")
+        return
+
+    slots: List[Dict[str, Any]] = []
+    for slot in slots_raw:
+        slot_start = _slot_start_datetime(slot)
+        if slot_start is None or slot_start < search_start:
+            continue
+        slots.append(slot)
+
+    grouped = _group_slots_by_day(slots)
+    limited = grouped[:BOOKING_DAY_LIMIT]
+
+    lines: List[str] = []
+    if notice:
+        lines.append(f"⚠️ {html.escape(notice)}")
+    lines.append(headline)
+
+    markup: InlineKeyboardMarkup
+    if not limited:
+        horizon_label = _format_weekday_label(search_end.date())
+        lines.append(f"ℹ️ Свободных мест до {html.escape(horizon_label)} не найдено.")
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(text="↩️ Назад к клиенту", callback_data=f"client_info|{client_id}")]]
+        )
+    else:
+        rows: List[List[InlineKeyboardButton]] = []
+        for slot_date, day_slots in limited:
+            total_free = sum(int(slot.get("free_count") or 0) for slot in day_slots)
+            label = f"{_format_weekday_label(slot_date)} · мест {total_free}"
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=label,
+                        callback_data=f"client_schedule_day|{client_id}|{slot_date.isoformat()}",
+                    )
+                ]
+            )
+        rows.append(
+            [
+                InlineKeyboardButton(text="↩️ К клиенту", callback_data=f"client_info|{client_id}"),
+                InlineKeyboardButton(
+                    text="🔄 Обновить", callback_data=f"client_schedule_refresh|{client_id}"
+                ),
+            ]
+        )
+        markup = InlineKeyboardMarkup(rows)
+
+    await query.edit_message_text(
+        "\n\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=markup,
+    )
+
+
+async def show_client_booking_slots(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    date_token: str,
+    *,
+    notice: Optional[str] = None,
+) -> None:
+    try:
+        target_date = date.fromisoformat(date_token)
+    except ValueError:
+        await query.answer("Некорректная дата.", show_alert=True)
+        return
+
+    try:
+        client = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s for booking", client_id)
+        await query.edit_message_text(f"❌ Не удалось прочитать данные клиента: {exc}")
+        return
+
+    if not client:
+        await query.edit_message_text("🔍 Клиент не найден.")
+        return
+
+    client_label = client_display_name(client)
+    day_label = _format_weekday_label(target_date)
+
+    start_dt_local = datetime.combine(target_date, time.min, tzinfo=LOCAL_TIMEZONE)
+    end_dt_local = datetime.combine(target_date, time.max, tzinfo=LOCAL_TIMEZONE)
+    cutoff_threshold = _local_now() + BOOKING_CUTOFF
+
+    try:
+        slots_raw = await asyncio.to_thread(
+            list_available_slots,
+            _to_local_naive(start_dt_local),
+            _to_local_naive(end_dt_local),
+            BOOKING_SLOTS_LIMIT,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load available slots for admin booking day %s", date_token)
+        await query.edit_message_text(f"❌ Не удалось получить слоты: {exc}")
+        return
+
+    slots: List[Dict[str, Any]] = []
+    for slot in slots_raw:
+        slot_start = _slot_start_datetime(slot)
+        if slot_start is None or slot_start < cutoff_threshold:
+            continue
+        slots.append(slot)
+
+    if not slots:
+        await show_client_booking_days(
+            query,
+            context,
+            client_id,
+            notice="Свободных мест на выбранный день больше нет.",
+        )
+        return
+
+    rows: List[List[InlineKeyboardButton]] = []
+    for slot in slots:
+        slot_id = slot.get("id")
+        if not isinstance(slot_id, int):
+            continue
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=_format_slot_button_label(slot),
+                    callback_data=f"client_schedule_slot|{client_id}|{slot_id}",
+                )
+            ]
+        )
+
+    if not rows:
+        await show_client_booking_days(
+            query,
+            context,
+            client_id,
+            notice="Свободных мест на выбранный день больше нет.",
+        )
+        return
+
+    rows.append(
+        [
+            InlineKeyboardButton(text="← Дни", callback_data=f"client_schedule_back|{client_id}"),
+            InlineKeyboardButton(text="↩️ К клиенту", callback_data=f"client_info|{client_id}"),
+        ]
+    )
+
+    lines: List[str] = []
+    if notice:
+        lines.append(f"⚠️ {html.escape(notice)}")
+    lines.append(
+        f"🗓 <b>{html.escape(day_label)}</b>\n"
+        f"Выберите слот для записи {html.escape(client_label)}."
+    )
+
+    await query.edit_message_text(
+        "\n\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def book_client_on_slot(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    slot_id: int,
+) -> None:
+    try:
+        client = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s for booking", client_id)
+        await query.edit_message_text(f"❌ Не удалось прочитать данные клиента: {exc}")
+        return
+
+    if not client:
+        await query.edit_message_text("🔍 Клиент не найден.")
+        return
+
+    client_label = client_display_name(client)
+
+    try:
+        slot_details = await asyncio.to_thread(get_slot_with_reservations, slot_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load slot %s for booking", slot_id)
+        await query.edit_message_text(f"❌ Не удалось получить детали слота: {exc}")
+        return
+
+    if not slot_details:
+        await show_client_booking_days(
+            query,
+            context,
+            client_id,
+            notice="Слот больше не существует.",
+        )
+        return
+
+    slot_start = _slot_start_datetime(slot_details)
+    if slot_start and slot_start < _local_now():
+        await show_client_booking_days(
+            query,
+            context,
+            client_id,
+            notice="Этот слот уже начался.",
+        )
+        return
+
+    reservations = slot_details.get("reservations") or []
+    available_reservations = [
+        res for res in reservations if (res.get("status") or "").lower() == "available"
+    ]
+    if not available_reservations:
+        await show_client_booking_days(
+            query,
+            context,
+            client_id,
+            notice="Свободных мест на этом слоте больше нет.",
+        )
+        return
+
+    stands_map, bikes_map = await _load_inventory_maps()
+
+    reservation, stand, bike = _choose_best_reservation_for_client(
+        client,
+        available_reservations,
+        stands_map=stands_map,
+        bikes_map=bikes_map,
+    )
+    if reservation is None:
+        await show_client_booking_days(
+            query,
+            context,
+            client_id,
+            notice="Не удалось подобрать подходящий станок. Попробуйте другой слот.",
+        )
+        return
+
+    booked: Optional[Dict[str, Any]] = None
+    try:
+        booked = await asyncio.to_thread(
+            book_available_reservation,
+            reservation["id"],
+            client_id=client_id,
+            client_name=client_label,
+            status="booked",
+            source="adminbot",
+            notes="manual booking via adminbot",
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Booking attempt failed for reservation %s", reservation.get("id"))
+        booked = None
+
+    slot_date = _parse_date_value(slot_details.get("slot_date"))
+    date_token = slot_date.isoformat() if slot_date else None
+
+    if not booked:
+        notice = "Не удалось занять место — попробуйте другой слот."
+        if date_token:
+            await show_client_booking_slots(
+                query,
+                context,
+                client_id,
+                date_token,
+                notice=notice,
+            )
+        else:
+            await show_client_booking_days(
+                query,
+                context,
+                client_id,
+                notice=notice,
+            )
+        return
+
+    if stand:
+        stand_label = _format_stand_label_for_booking(stand, booked)
+    else:
+        stand_label = await _resolve_stand_label(booked)
+    slot_summary = _format_slot_summary(slot_details)
+    bike_line = ""
+    bike_title = bike.get("title") if isinstance(bike, dict) else None
+    if bike_title:
+        bike_line = f"\n🚲 Велосипед: {html.escape(str(bike_title))}."
+    text = (
+        f"✅ <b>{html.escape(client_label)}</b> записан на {html.escape(slot_summary)}.\n"
+        f"🛠 Место: {html.escape(stand_label)}.{bike_line}"
+    )
+    markup = build_booking_success_markup(client_id, booked.get("id"))
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
+
+async def show_client_reassign_menu(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    reservation_id: int,
+    *,
+    notice: Optional[str] = None,
+) -> None:
+    try:
+        reservation = await asyncio.to_thread(get_reservation, reservation_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load reservation %s", reservation_id)
+        await query.edit_message_text(f"❌ Не удалось прочитать бронь: {exc}")
+        return
+
+    if not reservation:
+        await query.answer("Бронь не найдена.", show_alert=True)
+        return
+    if reservation.get("client_id") != client_id:
+        await query.answer("Эта бронь уже изменилась.", show_alert=True)
+        return
+
+    try:
+        client = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s", client_id)
+        await query.edit_message_text(f"❌ Не удалось получить данные клиента: {exc}")
+        return
+
+    if not client:
+        await query.edit_message_text("🔍 Клиент не найден.")
+        return
+
+    slot_id = reservation.get("slot_id")
+    if not isinstance(slot_id, int):
+        await query.edit_message_text("⚠️ Неверные данные слота для брони.")
+        return
+
+    try:
+        slot_details = await asyncio.to_thread(get_slot_with_reservations, slot_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load slot %s for reassign", slot_id)
+        await query.edit_message_text(f"❌ Не удалось получить слот: {exc}")
+        return
+
+    if not slot_details:
+        await query.edit_message_text("⚠️ Слот больше не существует.")
+        return
+
+    available_reservations = [
+        row
+        for row in slot_details.get("reservations") or []
+        if (row.get("status") or "").lower() == "available"
+    ]
+
+    if not available_reservations:
+        await query.edit_message_text(
+            "⚠️ Свободных станков для этого слота пока нет.",
+            reply_markup=build_booking_success_markup(client_id, reservation_id),
+        )
+        return
+
+    stands_map, bikes_map = await _load_inventory_maps()
+    ranked = _rank_available_reservations(client, available_reservations, stands_map, bikes_map)
+    if not ranked:
+        await query.edit_message_text(
+            "⚠️ Не удалось подобрать подходящие станки. Попробуйте позже.",
+            reply_markup=build_booking_success_markup(client_id, reservation_id),
+        )
+        return
+
+    slot_summary = _format_slot_summary(slot_details)
+    client_label = client_display_name(client)
+    current_stand = stands_map.get(reservation.get("stand_id"))
+    current_label = _format_stand_label_for_booking(current_stand, reservation)
+    current_bike = None
+    if isinstance(current_stand, dict):
+        current_bike = current_stand.get("bike_title")
+    current_line = f"🛠 Текущий станок: {html.escape(current_label)}"
+    if current_bike:
+        current_line += f" · {html.escape(str(current_bike))}"
+
+    lines: List[str] = [
+        f"🔁 Пересадка клиента <b>{html.escape(client_label)}</b>.",
+        f"Слот: {html.escape(slot_summary)}.",
+        current_line,
+        "Выберите свободный станок или воспользуйтесь автоматическим подбором.",
+    ]
+    if notice:
+        lines.insert(0, f"⚠️ {html.escape(notice)}")
+
+    rows: List[List[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="✨ Автовыбор",
+                callback_data=f"client_schedule_reassign_auto|{client_id}|{reservation_id}",
+            )
+        ]
+    ]
+    for option in ranked[:BOOKING_REASSIGN_LIMIT]:
+        target_res = option[3]
+        target_id = target_res.get("id")
+        if not isinstance(target_id, int):
+            continue
+        label = _format_reassign_option_label(option[6], option[4], option[5])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"client_schedule_reassign_set|{client_id}|{reservation_id}|{target_id}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="↩️ Список дней",
+                callback_data=f"client_schedule_refresh|{client_id}",
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="↩️ К клиенту", callback_data=f"client_info|{client_id}")])
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def auto_reassign_client(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    reservation_id: int,
+) -> None:
+    try:
+        reservation = await asyncio.to_thread(get_reservation, reservation_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load reservation %s", reservation_id)
+        await query.edit_message_text(f"❌ Не удалось прочитать бронь: {exc}")
+        return
+
+    if not reservation or reservation.get("client_id") != client_id:
+        await query.answer("Бронь не найдена либо уже изменена.", show_alert=True)
+        return
+
+    try:
+        client = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s", client_id)
+        await query.edit_message_text(f"❌ Не удалось получить данные клиента: {exc}")
+        return
+
+    if not client:
+        await query.edit_message_text("🔍 Клиент не найден.")
+        return
+
+    slot_id = reservation.get("slot_id")
+    if not isinstance(slot_id, int):
+        await query.edit_message_text("⚠️ Неверные данные слота для брони.")
+        return
+
+    try:
+        slot_details = await asyncio.to_thread(get_slot_with_reservations, slot_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load slot %s for reassign", slot_id)
+        await query.edit_message_text(f"❌ Не удалось получить слот: {exc}")
+        return
+
+    if not slot_details:
+        await query.edit_message_text("⚠️ Слот больше не существует.")
+        return
+
+    available_reservations = [
+        row
+        for row in slot_details.get("reservations") or []
+        if (row.get("status") or "").lower() == "available"
+    ]
+
+    if not available_reservations:
+        await show_client_reassign_menu(
+            query,
+            context,
+            client_id,
+            reservation_id,
+            notice="Свободных станков пока нет.",
+        )
+        return
+
+    stands_map, bikes_map = await _load_inventory_maps()
+    ranked = _rank_available_reservations(client, available_reservations, stands_map, bikes_map)
+    if not ranked:
+        await show_client_reassign_menu(
+            query,
+            context,
+            client_id,
+            reservation_id,
+            notice="Не удалось подобрать станки автоматически.",
+        )
+        return
+
+    best_option = ranked[0]
+    target_reservation = best_option[3]
+    target_id = target_reservation.get("id")
+    if not isinstance(target_id, int):
+        await show_client_reassign_menu(
+            query,
+            context,
+            client_id,
+            reservation_id,
+            notice="Некорректный станок для пересадки.",
+        )
+        return
+
+    await set_client_reservation_stand(query, context, client_id, reservation_id, target_id)
+
+
+async def set_client_reservation_stand(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    reservation_id: int,
+    target_reservation_id: int,
+) -> None:
+    try:
+        client = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s", client_id)
+        await query.edit_message_text(f"❌ Не удалось получить данные клиента: {exc}")
+        return
+
+    if not client:
+        await query.edit_message_text("🔍 Клиент не найден.")
+        return
+
+    try:
+        current_res = await asyncio.to_thread(get_reservation, reservation_id)
+        target_res = await asyncio.to_thread(get_reservation, target_reservation_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception(
+            "Failed to load reservations %s -> %s", reservation_id, target_reservation_id
+        )
+        await query.edit_message_text(f"❌ Не удалось прочитать данные брони: {exc}")
+        return
+
+    if not current_res or current_res.get("client_id") != client_id:
+        await query.answer("Текущая бронь не найдена или уже изменена.", show_alert=True)
+        return
+
+    if not target_res:
+        await show_client_reassign_menu(
+            query,
+            context,
+            client_id,
+            reservation_id,
+            notice="Целевой станок больше не существует.",
+        )
+        return
+
+    if current_res.get("slot_id") != target_res.get("slot_id"):
+        await query.answer("Нельзя пересаживать между разными слотами.", show_alert=True)
+        return
+
+    if (target_res.get("status") or "").lower() != "available":
+        await show_client_reassign_menu(
+            query,
+            context,
+            client_id,
+            reservation_id,
+            notice="Этот станок уже занят.",
+        )
+        return
+
+    slot_id = current_res.get("slot_id")
+    try:
+        slot_details = await asyncio.to_thread(get_slot_with_reservations, slot_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load slot %s for reassignment", slot_id)
+        await query.edit_message_text(f"❌ Не удалось получить слот: {exc}")
+        return
+
+    if not slot_details:
+        await query.edit_message_text("⚠️ Слот больше не существует.")
+        return
+
+    stands_map, bikes_map = await _load_inventory_maps()
+    target_stand = stands_map.get(target_res.get("stand_id"))
+    target_bike = None
+    if isinstance(target_stand, dict):
+        bike_id = target_stand.get("bike_id")
+        if isinstance(bike_id, int):
+            target_bike = bikes_map.get(bike_id)
+
+    client_label = client_display_name(client)
+    try:
+        booked = await asyncio.to_thread(
+            book_available_reservation,
+            target_reservation_id,
+            client_id=client_id,
+            client_name=client_label,
+            status="booked",
+            source="adminbot",
+            notes="reassigned via adminbot",
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to book target reservation %s", target_reservation_id)
+        booked = None
+
+    if not booked:
+        await show_client_reassign_menu(
+            query,
+            context,
+            client_id,
+            reservation_id,
+            notice="Не удалось занять выбранный станок. Его успели занять.",
+        )
+        return
+
+    try:
+        await asyncio.to_thread(
+            update_reservation,
+            reservation_id,
+            client_id=None,
+            client_name=None,
+            status="available",
+            source="adminbot",
+            notes="released via adminbot",
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Failed to release old reservation %s: %s", reservation_id, exc)
+
+    if target_stand:
+        stand_label = _format_stand_label_for_booking(target_stand, booked)
+    else:
+        stand_label = await _resolve_stand_label(booked)
+
+    slot_summary = _format_slot_summary(slot_details)
+    bike_line = ""
+    bike_title = None
+    if isinstance(target_bike, dict) and target_bike.get("title"):
+        bike_title = target_bike["title"]
+    elif isinstance(target_stand, dict) and target_stand.get("bike_title"):
+        bike_title = target_stand["bike_title"]
+    if bike_title:
+        bike_line = f"\n🚲 Велосипед: {html.escape(str(bike_title))}."
+
+    text = (
+        f"✅ <b>{html.escape(client_label)}</b> пересажен на новый станок.\n"
+        f"{html.escape(slot_summary)}\n"
+        f"🛠 Место: {html.escape(stand_label)}.{bike_line}"
+    )
+    markup = build_booking_success_markup(client_id, booked.get("id"))
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
 
 
 async def render_client_bike_suggestions(
