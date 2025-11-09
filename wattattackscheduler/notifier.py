@@ -464,6 +464,30 @@ def format_workout_reminder(client: Dict[str, Any], reservations: List[Dict[str,
         else:
             end_str = str(end_time)
 
+        # Calculate actual time remaining
+        now = datetime.now()
+        time_remaining_msg = f"До встречи в «Крутилке» через {reminder_hours} часов! 🚴‍♀️"
+        
+        # Only calculate precise time if we have valid date and time
+        if isinstance(slot_date, date) and isinstance(start_time, time):
+            workout_datetime = datetime.combine(slot_date, start_time)
+            # Assume MSK timezone (GMT+3)
+            time_diff = workout_datetime - now
+            hours_remaining = time_diff.total_seconds() / 3600
+            hours_remaining_int = int(hours_remaining)
+            
+            # Format the time remaining message
+            if hours_remaining_int > 0:
+                time_remaining_msg = f"До встречи в «Крутилке» через {hours_remaining_int} часов! 🚴‍♀️"
+            elif hours_remaining_int == 0:
+                minutes_remaining = int((time_diff.total_seconds() % 3600) / 60)
+                if minutes_remaining > 0:
+                    time_remaining_msg = f"До встречи в «Крутилке» через {minutes_remaining} минут! 🚴‍♀️"
+                else:
+                    time_remaining_msg = "Ваша тренировка начинается прямо сейчас! 🚴‍♀️"
+            else:
+                time_remaining_msg = "Ваша тренировка уже началась! 🚴‍♀️"
+
         # Session type
         session_kind = reservation.get("session_kind", "self_service")
         instructor_name = reservation.get("instructor_name", "")
@@ -491,7 +515,7 @@ def format_workout_reminder(client: Dict[str, Any], reservations: List[Dict[str,
             f"🕘 Время: {start_str}-{end_str}\n"
             f"🏋️ Станок: {stand_info}\n"
             f"🧑‍🏫 Тип: {session_info}\n\n"
-            f"До встречи в «Крутилке» через {reminder_hours} часов! 🚴‍♀️"
+            f"{time_remaining_msg}"
         )
     else:
         # Multiple reservations
