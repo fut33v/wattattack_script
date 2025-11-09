@@ -921,6 +921,319 @@ async def _send_confirmation_message(
     return BOOK_SELECT_DAY
 
 
+def _format_slot_summary(slot: Dict[str, Any]) -> str:
+    slot_date = _parse_date(slot.get("slot_date"))
+    date_label = _format_day_label(slot_date) if slot_date else str(slot.get("slot_date"))
+    start_label = _format_time_label(slot.get("start_time"))
+    end_label = _format_time_label(slot.get("end_time"))
+    time_part = None
+    if start_label and end_label:
+        time_part = f"{start_label}–{end_label}"
+    elif start_label or end_label:
+        time_part = start_label or end_label
+    parts = [date_label]
+    if time_part:
+        parts.append(time_part)
+    summary = " · ".join(parts)
+    descriptor_raw = slot.get("label")
+    descriptor = str(descriptor_raw).strip() if descriptor_raw not in (None, "") else ""
+    if descriptor:
+        summary = f"{summary} ({descriptor})"
+    elif slot.get("session_kind") == "instructor":
+        instructor = (slot.get("instructor_name") or "").strip()
+        if instructor:
+            summary = f"{summary} (инструктор {instructor})"
+        else:
+            summary = f"{summary} (с инструктором)"
+    return summary
+
+
+def _format_cancellation_summary(slot: Dict[str, Any]) -> str:
+    slot_date = _parse_date(slot.get("slot_date"))
+    date_label = _format_day_label(slot_date) if slot_date else str(slot.get("slot_date"))
+    start_label = _format_time_label(slot.get("start_time"))
+    end_label = _format_time_label(slot.get("end_time"))
+    time_part = None
+    if start_label and end_label:
+        time_part = f"{start_label}–{end_label}"
+    elif start_label or end_label:
+        time_part = start_label or end_label
+    parts = [date_label]
+    if time_part:
+        parts.append(time_part)
+    summary = " · ".join(parts)
+    descriptor_raw = slot.get("label")
+    descriptor = str(descriptor_raw).strip() if descriptor_raw not in (None, "") else ""
+    if descriptor:
+        summary = f"{summary} ({descriptor})"
+    elif slot.get("session_kind") == "instructor":
+        instructor = (slot.get("instructor_name") or "").strip()
+        if instructor:
+            summary = f"{summary} (инструктор {instructor})"
+        else:
+            summary = f"{summary} (с инструктором)"
+    return summary
+
+
+def _format_time_label(value: Any) -> Optional[str]:
+    parsed = _parse_time(value)
+    if parsed is None:
+        return str(value) if value is not None else None
+    return parsed.strftime("%H:%M")
+
+
+def _format_reservation_summary(slot: Dict[str, Any]) -> str:
+    slot_date = _parse_date(slot.get("slot_date"))
+    date_label = _format_day_label(slot_date) if slot_date else str(slot.get("slot_date"))
+    start_label = _format_time_label(slot.get("start_time"))
+    end_label = _format_time_label(slot.get("end_time"))
+    time_part = None
+    if start_label and end_label:
+        time_part = f"{start_label}–{end_label}"
+    elif start_label or end_label:
+        time_part = start_label or end_label
+    parts = [date_label]
+    if time_part:
+        parts.append(time_part)
+    summary = " · ".join(parts)
+    descriptor_raw = slot.get("label")
+    descriptor = str(descriptor_raw).strip() if descriptor_raw not in (None, "") else ""
+    if descriptor:
+        summary = f"{summary} ({descriptor})"
+    elif slot.get("session_kind") == "instructor":
+        instructor = (slot.get("instructor_name") or "").strip()
+        if instructor:
+            summary = f"{summary} (инструктор {instructor})"
+        else:
+            summary = f"{summary} (с инструктором)"
+    return summary
+
+
+async def _cancel_booking_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /cancel command to show bookings that can be cancelled."""
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await message.reply_text("Сначала привяжите свою анкету через /start, затем повторите попытку.")
+        return
+
+    client_id = client.get("id")
+    if not isinstance(client_id, int):
+        await message.reply_text("Не удалось определить вашу анкету. Обратитесь к администратору.")
+        return
+
+    now_local = _local_now()
+    try:
+        reservations = schedule_repository.list_future_reservations_for_client(
+            client_id,
+            _to_local_naive(now_local),
+        )
+    except Exception:
+        LOGGER.exception("Failed to fetch future reservations for client %s", client_id)
+        await message.reply_text("Не удалось получить список записей. Попробуйте позже.")
+        return
+
+    if not reservations:
+        await message.reply_text("⏳ У вас нет будущих записей для отмены.")
+        return
+
+    # Create inline keyboard with cancel buttons for each reservation
+    keyboard_rows: List[List[InlineKeyboardButton]] = []
+    for entry in reservations[:10]:  # Limit to first 10 reservations
+        reservation_id = entry.get("id")
+        if not isinstance(reservation_id, int):
+            continue
+            
+        slot_label = _format_time_range(entry.get("start_time"), entry.get("end_time"))
+        slot_date_value = _parse_date(entry.get("slot_date"))
+        if slot_date_value:
+            slot_label = f"{slot_date_value.strftime('%d.%m (%a)')} · {slot_label}"
+        
+        # Add session type info
+        session_kind = entry.get("session_kind")
+        instructor_name = (entry.get("instructor_name") or "").strip()
+        if session_kind == "instructor":
+            if instructor_name:
+                slot_label += f" · Инструктор: {instructor_name}"
+            else:
+                slot_label += " · Инструктор: уточняется"
+        else:
+            slot_label += " · Самокрутка"
+            
+        button = InlineKeyboardButton(
+            text=slot_label,
+            callback_data=f"cancel_booking:{reservation_id}"
+        )
+        keyboard_rows.append([button])
+
+    keyboard_rows.append([InlineKeyboardButton("Отмена", callback_data="cancel_booking_cancel")])
+    
+    await message.reply_text(
+        "Выберите запись для отмены:",
+        reply_markup=InlineKeyboardMarkup(keyboard_rows)
+    )
+
+
+async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle callback queries for booking cancellation."""
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    
+    data = query.data or ""
+    if data == "cancel_booking_cancel":
+        await query.edit_message_text("Отмена записи отменена.")
+        return
+    
+    if not data.startswith("cancel_booking:"):
+        return
+        
+    try:
+        reservation_id = int(data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await query.edit_message_text("Некорректный идентификатор записи.")
+        return
+
+    # Get user and client info
+    user = update.effective_user
+    if user is None:
+        await query.edit_message_text("Не удалось определить пользователя.")
+        return
+        
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await query.edit_message_text("Сначала привяжите свою анкету через /start.")
+        return
+
+    client_id = client.get("id")
+    if not isinstance(client_id, int):
+        await query.edit_message_text("Не удалось определить вашу анкету.")
+        return
+
+    # Get reservation details before cancelling
+    try:
+        reservation = schedule_repository.get_reservation(reservation_id)
+    except Exception:
+        LOGGER.exception("Failed to fetch reservation %s", reservation_id)
+        await query.edit_message_text("Не удалось получить информацию о записи.")
+        return
+
+    if not reservation:
+        await query.edit_message_text("Запись не найдена.")
+        return
+
+    # Check if reservation belongs to this client
+    if reservation.get("client_id") != client_id:
+        await query.edit_message_text("Эта запись не принадлежит вам.")
+        return
+
+    # Get slot details for notification
+    slot_id = reservation.get("slot_id")
+    slot_details = None
+    if isinstance(slot_id, int):
+        try:
+            slot_details = schedule_repository.get_slot_with_reservations(slot_id)
+        except Exception:
+            LOGGER.warning("Failed to load slot %s for reservation %s", slot_id, reservation_id)
+
+    # Cancel the reservation by updating its status
+    try:
+        cancelled_reservation = schedule_repository.update_reservation(
+            reservation_id,
+            client_id=None,
+            client_name=None,
+            status="available",
+            source="krutilkavnbot",
+            notes=f"cancelled via /cancel command by client {client_id}"
+        )
+    except Exception as exc:
+        LOGGER.exception("Failed to cancel reservation %s", reservation_id)
+        await query.edit_message_text(f"❌ Не удалось отменить запись: {exc}")
+        return
+
+    if not cancelled_reservation:
+        await query.edit_message_text("❌ Не удалось отменить запись.")
+        return
+
+    # Prepare notification details
+    reservation_info = dict(reservation)
+    if slot_details:
+        reservation_info.setdefault("slot_date", slot_details.get("slot_date"))
+        reservation_info.setdefault("start_time", slot_details.get("start_time"))
+        reservation_info.setdefault("end_time", slot_details.get("end_time"))
+        reservation_info.setdefault("label", slot_details.get("label"))
+        reservation_info.setdefault("session_kind", slot_details.get("session_kind"))
+        reservation_info.setdefault("instructor_name", slot_details.get("instructor_name"))
+
+    # Format the cancellation message for the user
+    slot_summary = _format_cancellation_summary(reservation_info)
+    await query.edit_message_text(f"✅ Запись на {slot_summary} отменена.")
+
+    # Notify admins about the cancellation
+    try:
+        await _notify_admins_of_cancellation(context, client, reservation_info)
+    except Exception:
+        LOGGER.exception("Failed to notify admins of booking cancellation")
+
+
+async def _notify_admins_of_cancellation(
+    context: ContextTypes.DEFAULT_TYPE,
+    client: Dict[str, Any],
+    reservation: Dict[str, Any]
+) -> None:
+    """Send notification to all admins about a cancelled booking."""
+    try:
+        admin_ids = get_admin_ids()
+    except Exception:
+        LOGGER.exception("Failed to load admin IDs for cancellation notification")
+        return
+
+    if not admin_ids:
+        LOGGER.debug("No admin IDs found for cancellation notification")
+        return
+
+    # Format the cancellation details
+    client_name = _format_client_display_name(client)
+    
+    slot_date = _parse_date(reservation.get("slot_date"))
+    start_time = _parse_time(reservation.get("start_time"))
+    
+    date_str = slot_date.strftime('%d.%m.%Y') if slot_date else "неизвестная дата"
+    time_str = start_time.strftime('%H:%M') if start_time else "неизвестное время"
+    
+    # Determine if it's with an instructor or self-service
+    session_type = ""
+    if reservation.get("session_kind") == "instructor":
+        instructor_name = (reservation.get("instructor_name") or "").strip()
+        if instructor_name:
+            session_type = f"\n🧑‍🏫 С инструктором: {instructor_name}"
+        else:
+            session_type = "\n🧑‍🏫 С инструктором (имя уточняется)"
+    else:
+        session_type = "\n🔄 Самокрутка"
+
+    # Create the notification message
+    message = (
+        f"🔔 Отмена записи!\n\n"
+        f"Клиент: {client_name}\n"
+        f"Дата и время: {date_str} в {time_str}"
+        f"{session_type}\n\n"
+        f"Запись отменена через бота krutilkavnbot"
+    )
+
+    # Send notification to all admins
+    for admin_id in admin_ids:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=message)
+        except Exception as e:
+            LOGGER.warning(f"Failed to send cancellation notification to admin {admin_id}: {e}")
+
+
 def _find_clients_by_last_name(last_name: str) -> List[Dict[str, Any]]:
     normalized = _normalize_last_name(last_name)
     results = search_clients(last_name, limit=MAX_SUGGESTIONS * 2)
@@ -1042,6 +1355,8 @@ def _format_gender_label(gender: Optional[str]) -> str:
 
 def _skip_keyboard(callback: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("ОК", callback_data=callback)]])
+
+
 
 
 async def _send_gender_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -1946,9 +2261,11 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application.add_handler(booking_conversation)
     application.add_handler(CommandHandler("mybookings", _my_bookings_handler))
     application.add_handler(CommandHandler("history", _history_handler))
+    application.add_handler(CommandHandler("cancel", _cancel_booking_handler))
     application.add_handler(CommandHandler("help", _help_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _fallback_text_handler))
     application.add_handler(CallbackQueryHandler(_handle_admin_decision, pattern=r"^(approve|reject):"))
+    application.add_handler(CallbackQueryHandler(_handle_cancel_booking_callback, pattern=r"^cancel_booking:"))
     application.add_handler(MessageHandler(filters.COMMAND, _unknown_command_handler))
 
     return application
