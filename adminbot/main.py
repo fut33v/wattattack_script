@@ -1571,6 +1571,7 @@ async def process_clients_document(
     message: Message,
     truncate: bool = False,
     update_existing: bool = False,
+    dry_run: bool = False,
 ) -> None:
     try:
         file = await document.get_file()
@@ -1586,6 +1587,7 @@ async def process_clients_document(
             bytes(data),
             truncate,
             update_existing,
+            dry_run,
         )
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to import clients")
@@ -1593,9 +1595,10 @@ async def process_clients_document(
         return
 
     mode_suffix = " Режим обновления." if update_existing else ""
+    dry_run_suffix = " Режим предпросмотра (без изменений)." if dry_run else ""
     await message.reply_text(
-        "✅ Импорт завершён. Добавлено: {0}, обновлено: {1}.{2}".format(
-            inserted, updated, mode_suffix
+        "✅ Импорт завершён. Добавлено: {0}, обновлено: {1}.{2}{3}".format(
+            inserted, updated, mode_suffix, dry_run_suffix
         )
     )
 
