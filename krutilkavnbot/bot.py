@@ -18,7 +18,7 @@ from telegram.ext import (
     filters,
 )
 
-from repositories import bikes_repository, schedule_repository, trainers_repository
+from repositories import bikes_repository, message_repository, schedule_repository, trainers_repository
 from repositories.client_repository import create_client, get_client, search_clients
 from repositories.client_link_repository import (
     get_link_by_client,
@@ -1535,6 +1535,33 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     message = update.effective_message
     if message is None or not message.text:
         return
+    await message.reply_text(
+        "Доступные команды:\n"
+        "/start — привязать или создать анкету.\n"
+        "/book — забронировать свободный слот.\n"
+        "/mybookings — показать ваши будущие записи.\n"
+        "/history — показать историю бронирований."
+    )
+
+
+async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or not message.text:
+        return
+    
+    # Store the message in the database
+    if user is not None:
+        try:
+            message_repository.store_user_message(
+                tg_user_id=user.id,
+                message_text=message.text,
+                tg_username=user.username,
+                tg_full_name=f"{user.first_name or ''} {user.last_name or ''}".strip()
+            )
+        except Exception:
+            LOGGER.exception("Failed to store user message")
+    
     await message.reply_text(
         "Доступные команды:\n"
         "/start — привязать или создать анкету.\n"

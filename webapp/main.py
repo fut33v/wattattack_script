@@ -30,6 +30,7 @@ from repositories import (
     client_link_repository,
     client_repository,
     instructors_repository,
+    message_repository,
     schedule_repository,
     trainers_repository,
 )
@@ -1585,8 +1586,38 @@ def api_delete_client_link(client_id: int, user=Depends(require_admin)):
     return {"status": "ok"}
 
 
+@api.get("/messages")
+def api_list_messages(user=Depends(require_admin), page: int = 1, page_size: int = 50):
+    """Return paginated list of user messages."""
+    if page < 1:
+        page = 1
+    if page_size < 1 or page_size > 100:
+        page_size = 50
+        
+    offset = (page - 1) * page_size
+    try:
+        messages = message_repository.list_user_messages(limit=page_size, offset=offset)
+        total = message_repository.get_user_message_count()
+        
+        pagination = {
+            "page": page,
+            "pageSize": page_size,
+            "total": total,
+            "totalPages": (total + page_size - 1) // page_size
+        }
+        
+        return _json_success({
+            "items": jsonable_encoder(messages),
+            "pagination": pagination
+        })
+    except Exception as exc:
+        log.exception("Failed to fetch user messages")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch messages") from exc
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
+
     app = FastAPI(title="Крутилка Admin API")
     app.add_middleware(
         SessionMiddleware,
@@ -1601,6 +1632,7 @@ def create_app() -> FastAPI:
         """Ensure instructor directory exists before first request."""
         try:
             instructors_repository.ensure_instructors_table()
+            message_repository.ensure_user_messages_table()
         except Exception as exc:  # pylint: disable=broad-except
             log.warning("Failed to ensure instructors table on startup: %s", exc)
 
