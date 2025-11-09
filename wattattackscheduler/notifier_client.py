@@ -43,7 +43,7 @@ DEFAULT_ADMIN_SEED = os.environ.get("TELEGRAM_ADMIN_IDS", "")
 DEFAULT_REMINDER_HOURS = int(os.environ.get("WORKOUT_REMINDER_HOURS", "4"))
 
 
-def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Notify Telegram admins about new WattAttack activities.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -130,7 +130,6 @@ def save_state(path: Path, state: Dict[str, Any]) -> None:
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-
 def telegram_send_message(
     token: str,
     chat_id: str,
@@ -150,6 +149,30 @@ def telegram_send_message(
     if response.status_code != 200:
         LOGGER.error(
             "Failed to send Telegram message to %s (%s): %s",
+            chat_id,
+            response.status_code,
+            response.text,
+        )
+        response.raise_for_status()
+
+
+def telegram_send_document(
+    token: str,
+    chat_id: str,
+    file_path: Path,
+    filename: str,
+    *,
+    caption: str = "",
+    timeout: float,
+) -> None:
+    url = f"https://api.telegram.org/bot{token}/sendDocument"
+    with file_path.open("rb") as file_handle:
+        files = {"document": (filename, file_handle, "application/octet-stream")}
+        data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+        response = requests.post(url, data=data, files=files, timeout=timeout)
+    if response.status_code != 200:
+        LOGGER.error(
+            "Failed to send document to %s (%s): %s",
             chat_id,
             response.status_code,
             response.text,
@@ -197,30 +220,6 @@ def format_duration(seconds: Any) -> str:
     if hours:
         return f"{hours}ч {minutes:02d}м"
     return f"{minutes}м {secs:02d}с"
-
-
-def telegram_send_document(
-    token: str,
-    chat_id: str,
-    file_path: Path,
-    filename: str,
-    *,
-    caption: str = "",
-    timeout: float,
-) -> None:
-    url = f"https://api.telegram.org/bot{token}/sendDocument"
-    with file_path.open("rb") as file_handle:
-        files = {"document": (filename, file_handle, "application/octet-stream")}
-        data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
-        response = requests.post(url, data=data, files=files, timeout=timeout)
-    if response.status_code != 200:
-        LOGGER.error(
-            "Failed to send document to %s (%s): %s",
-            chat_id,
-            response.status_code,
-            response.text,
-        )
-        response.raise_for_status()
 
 
 def format_start_time(activity: Dict[str, Any]) -> str:
@@ -542,11 +541,11 @@ def send_activity_fit(
     timeout: float,
 ) -> None:
     fit_id = activity.get("fitFileId")
-    caption = format_activity_meta(activity, account_name, profile)
     
     # Get krutilkavnbot token for sending to clients
     krutilkavn_token = os.environ.get(KRUTILKAVN_BOT_TOKEN_ENV)
     
+    caption = format_activity_meta(activity, account_name, profile)
     if not fit_id:
         LOGGER.info("Activity %s has no FIT file", activity.get("id"))
         # Send to admins
@@ -565,6 +564,10 @@ def send_activity_fit(
         if krutilkavn_token:
             send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, None)
         return
+    
+    # Send to matching clients if krutilkavnbot token is available
+    if krutilkavn_token:
+        send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, None)
 
     temp_file = None
     try:
@@ -572,7 +575,6 @@ def send_activity_fit(
             temp_file = Path(tmp.name)
         client.download_fit_file(str(fit_id), temp_file, timeout=timeout)
         filename = f"activity_{activity.get('id')}.fit"
-        
         # Send to admins
         for chat_id in admin_ids:
             try:
@@ -716,7 +718,7 @@ def send_to_matching_clients(
     LOGGER.info("Sent activity information to %d matching clients", sent_count)
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Iterable[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args(argv)
 
