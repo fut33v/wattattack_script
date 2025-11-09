@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable, Dict, Final, List, Optional, Tuple
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, User
+from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update, User
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -26,6 +26,8 @@ from repositories.client_link_repository import (
     link_user_to_client,
 )
 from repositories.admin_repository import get_admin_ids, is_admin
+
+import os
 
 LOGGER = logging.getLogger(__name__)
 
@@ -752,15 +754,10 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
                 markup = _build_slot_keyboard(refreshed)
                 text = f"Свободные слоты {_format_day_label(selected_date_obj)}:"
                 await query.edit_message_text(text, reply_markup=markup)
-                return BOOK_SELECT_SLOT
+        _clear_booking_state(context)
+        return ConversationHandler.END
 
-        success = await _edit_day_selection_message(query, context)
-        if not success:
-            await query.edit_message_text("Свободных мест больше нет. Попробуйте позже.")
-            _clear_booking_state(context)
-            return ConversationHandler.END
-        return BOOK_SELECT_DAY
-
+    # Booking was successful, send confirmation message
     stand_label = _format_stand_label(stand, reservation)
     bike_label = None
     if bike:
@@ -805,13 +802,123 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("\n".join(summary_lines))
     except Exception:
         LOGGER.debug("Failed to edit confirmation message", exc_info=True)
-        try:
-            await query.message.reply_text("\n".join(summary_lines))
-        except Exception:
-            LOGGER.exception("Failed to send booking confirmation follow-up")
+        if query.message is not None:
+            try:
+                await query.message.reply_text("\n".join(summary_lines))
+            except Exception:
+                LOGGER.exception("Failed to send booking confirmation follow-up")
+    
+    # Notify admins about the new booking
+    try:
+        await _notify_admins_of_booking(context, client, slot, stand, bike)
+    except Exception:
+        LOGGER.exception("Failed to notify admins of new booking")
 
     _clear_booking_state(context)
     return ConversationHandler.END
+
+
+async def _notify_admins_of_booking(
+    context: ContextTypes.DEFAULT_TYPE,
+    client: Dict[str, Any],
+    slot: Dict[str, Any],
+    stand: Optional[Dict[str, Any]],
+    bike: Optional[Dict[str, Any]]
+) -> None:
+    """Send notification to all admins about a new booking."""
+    try:
+        admin_ids = get_admin_ids()
+    except Exception:
+        LOGGER.exception("Failed to load admin IDs for booking notification")
+        return
+
+    if not admin_ids:
+        LOGGER.debug("No admin IDs found for booking notification")
+        return
+
+    # Format the booking details
+    client_name = _format_client_display_name(client)
+    
+    slot_date = _parse_date(slot.get("slot_date"))
+    start_time = _parse_time(slot.get("start_time"))
+    
+    date_str = slot_date.strftime('%d.%m.%Y') if slot_date else "неизвестная дата"
+    time_str = start_time.strftime('%H:%M') if start_time else "неизвестное время"
+    
+    stand_label = _format_stand_label(stand, None)
+    
+    bike_info = ""
+    if bike:
+        bike_title = (bike.get("title") or "").strip()
+        bike_owner = (bike.get("owner") or "").strip()
+        if bike_title or bike_owner:
+            bike_info = f"\n🚲 Велосипед: {bike_title} ({bike_owner})" if bike_title and bike_owner else f"\n🚲 Велосипед: {bike_title or bike_owner}"
+
+    # Determine if it's with an instructor or self-service
+    session_type = ""
+    if slot.get("session_kind") == "instructor":
+        instructor_name = (slot.get("instructor_name") or "").strip()
+        if instructor_name:
+            session_type = f"\n🧑‍🏫 С инструктором: {instructor_name}"
+        else:
+            session_type = "\n🧑‍🏫 С инструктором (имя уточняется)"
+    else:
+        session_type = "\n🔄 Самокрутка"
+    
+    # Create the notification message
+    message = (
+        f"🔔 Новая запись!\n\n"
+        f"Клиент: {client_name}\n"
+        f"Дата и время: {date_str} в {time_str}"
+        f"{session_type}\n"
+        f"🏋️ Станок: {stand_label}"
+        f"{bike_info}\n\n"
+        f"Запись создана через бота krutilkavnbot"
+    )
+
+    # Send notification to all admins
+    for admin_id in admin_ids:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=message)
+        except Exception as e:
+            LOGGER.warning(f"Failed to send booking notification to admin {admin_id}: {e}")
+
+
+async def _send_confirmation_message(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    reservation: Dict[str, Any],
+    slot: Dict[str, Any],
+    stand: Optional[Dict[str, Any]],
+    bike: Optional[Dict[str, Any]],
+) -> int:
+    client = reservation.get("client")
+    client_display_name = _format_client_display_name(client)
+
+    if not client:
+        await query.edit_message_text("Клиент не найден. Попробуйте снова.")
+        _clear_booking_state(context)
+        return ConversationHandler.END
+
+    if not slot:
+        await query.edit_message_text("Слот не найден. Попробуйте снова.")
+        _clear_booking_state(context)
+        return ConversationHandler.END
+
+    if not stand:
+        await query.edit_message_text("Станок не найден. Попробуйте снова.")
+        _clear_booking_state(context)
+        return ConversationHandler.END
+
+    if slot.get("slot_type") == "select":
+        return BOOK_SELECT_SLOT
+
+    success = await _edit_day_selection_message(query, context)
+    if not success:
+        await query.edit_message_text("Свободных мест больше нет. Попробуйте позже.")
+        _clear_booking_state(context)
+        return ConversationHandler.END
+    return BOOK_SELECT_DAY
 
 
 def _find_clients_by_last_name(last_name: str) -> List[Dict[str, Any]]:
