@@ -180,3 +180,30 @@ export interface FillTemplateResponse {
   created: number;
   slots: ScheduleSlot[];
 }
+
+export interface WorkoutNotification {
+  id: number;
+  reservation_id: number;
+  notification_type: string;
+  sent_at: string;
+  client_id?: number | null;
+  slot_id: number;
+  stand_id?: number | null;
+  stand_code?: string | null;
+  client_name?: string | null;
+  status: string;
+  slot_date: string;
+  start_time: string;
+  end_time: string;
+  label?: string | null;
+  session_kind: string;
+  client_first_name?: string | null;
+  client_last_name?: string | null;
+  client_full_name?: string | null;
+  stand_title?: string | null;
+}
+
+export interface WorkoutNotificationListResponse {
+  items: WorkoutNotification[];
+  pagination: Pagination;
+}

@@ -1,11 +1,14 @@
 """Helpers for managing training schedule weeks, slots, and reservations."""
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, time, timedelta
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .db_utils import db_connection, dict_cursor
 from . import trainers_repository, instructors_repository
+
+LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_TEMPLATE_SLOTS: Tuple[Tuple[str, str, str, Optional[str]], ...] = (
@@ -970,3 +973,172 @@ def _ensure_slot_capacity(conn, slot_id: int) -> int:
             )
             placeholders += 1
     return placeholders
+
+
+def ensure_workout_notifications_table() -> None:
+    """Create table to track sent workout notifications."""
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workout_notifications (
+                id SERIAL PRIMARY KEY,
+                reservation_id INTEGER NOT NULL REFERENCES schedule_reservations (id) ON DELETE CASCADE,
+                notification_type TEXT NOT NULL,
+                sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(reservation_id, notification_type)
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS workout_notifications_reservation_idx ON workout_notifications (reservation_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS workout_notifications_type_sent_idx ON workout_notifications (notification_type, sent_at)"
+        )
+        conn.commit()
+
+
+def record_notification_sent(reservation_id: int, notification_type: str) -> bool:
+    """Record that a notification was sent for a reservation."""
+    ensure_workout_notifications_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        try:
+            cur.execute(
+                """
+                INSERT INTO workout_notifications (reservation_id, notification_type)
+                VALUES (%s, %s)
+                ON CONFLICT (reservation_id, notification_type) DO NOTHING
+                RETURNING id
+                """,
+                (reservation_id, notification_type)
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return row is not None  # True if inserted, False if conflict
+        except Exception:
+            LOGGER.exception("Failed to record notification for reservation %s", reservation_id)
+            return False
+
+
+def was_notification_sent(reservation_id: int, notification_type: str) -> bool:
+    """Check if a notification was already sent for a reservation."""
+    ensure_workout_notifications_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            "SELECT 1 FROM workout_notifications WHERE reservation_id = %s AND notification_type = %s",
+            (reservation_id, notification_type)
+        )
+        return cur.fetchone() is not None
+
+
+def list_workout_notifications(limit: int = 100, offset: int = 0) -> List[Dict]:
+    """List all workout notifications with reservation and client details."""
+    ensure_workout_notifications_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                wn.*,
+                r.client_id,
+                r.slot_id,
+                r.stand_id,
+                r.stand_code,
+                r.client_name,
+                r.status,
+                s.slot_date,
+                s.start_time,
+                s.end_time,
+                s.label,
+                s.session_kind,
+                c.first_name AS client_first_name,
+                c.last_name AS client_last_name,
+                c.full_name AS client_full_name,
+                t.code AS stand_code,
+                t.title AS stand_title
+            FROM workout_notifications wn
+            JOIN schedule_reservations r ON r.id = wn.reservation_id
+            JOIN schedule_slots s ON s.id = r.slot_id
+            LEFT JOIN clients c ON c.id = r.client_id
+            LEFT JOIN trainers t ON t.id = r.stand_id
+            ORDER BY wn.sent_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (limit, offset)
+        )
+        rows = cur.fetchall()
+    return rows
+
+
+def get_workout_notification_settings() -> Dict[str, Any]:
+    """Get workout notification settings from environment or database."""
+    # For now, we'll just return the environment variable
+    # In the future, we could store this in a settings table
+    import os
+    reminder_hours = int(os.environ.get("WORKOUT_REMINDER_HOURS", "4"))
+    return {"reminder_hours": reminder_hours}
+
+
+def update_workout_notification_settings(reminder_hours: int) -> bool:
+    """Update workout notification settings.
+    
+    Note: This is a placeholder. In a real implementation, we would store
+    this in a database settings table. For now, we just validate the input.
+    """
+    if reminder_hours < 1 or reminder_hours > 168:  # 1 hour to 1 week
+        return False
+    # In a real implementation, we would store this in the database
+    return True
+
+
+def list_upcoming_reservations(since: datetime, until: datetime) -> List[Dict]:
+    """Return all upcoming reservations within a time window."""
+
+    ensure_schedule_tables()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                r.*,
+                s.slot_date,
+                s.start_time,
+                s.end_time,
+                s.label,
+                s.session_kind,
+                s.instructor_id,
+                i.full_name AS instructor_name,
+                t.code AS stand_code,
+                t.display_name AS stand_display_name,
+                t.title AS stand_title,
+                b.title AS bike_title,
+                b.owner AS bike_owner,
+                c.first_name AS client_first_name,
+                c.last_name AS client_last_name,
+                c.full_name AS client_full_name
+            FROM schedule_reservations AS r
+            JOIN schedule_slots AS s ON s.id = r.slot_id
+            LEFT JOIN schedule_instructors AS i ON i.id = s.instructor_id
+            LEFT JOIN trainers AS t ON t.id = r.stand_id
+            LEFT JOIN bike_layout AS bl ON bl.stand_id = t.id
+            LEFT JOIN bikes AS b ON b.id = bl.bike_id
+            LEFT JOIN clients AS c ON c.id = r.client_id
+            WHERE r.client_id IS NOT NULL
+              AND r.status = 'booked'
+              AND (
+                    (s.slot_date > %(since_date)s)
+                    OR (s.slot_date = %(since_date)s AND s.start_time >= %(since_time)s)
+                  )
+              AND (
+                    (s.slot_date < %(until_date)s)
+                    OR (s.slot_date = %(until_date)s AND s.start_time <= %(until_time)s)
+                  )
+            ORDER BY s.slot_date, s.start_time, r.id
+            """,
+            {
+                "since_date": since.date(),
+                "since_time": since.time(),
+                "until_date": until.date(),
+                "until_time": until.time(),
+            },
+        )
+        rows = cur.fetchall()
+    return rows

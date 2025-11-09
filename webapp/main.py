@@ -1337,6 +1337,73 @@ def api_clear_reservation(reservation_id: int, user=Depends(require_admin)):
     return response
 
 
+@api.get("/schedule/notifications")
+def api_get_workout_notifications(page: int = 1, user=Depends(require_user)):
+    """Get list of workout notifications."""
+    page = max(page, 1)
+    limit = 50
+    offset = (page - 1) * limit
+    
+    try:
+        notifications = schedule_repository.list_workout_notifications(limit=limit, offset=offset)
+        total_count = len(notifications)  # In a real implementation, we'd get the actual count
+        total_pages = max(math.ceil(total_count / limit), 1) if total_count > 0 else 1
+        
+        return _json_success({
+            "items": jsonable_encoder(notifications),
+            "pagination": {
+                "page": page,
+                "pageSize": limit,
+                "total": total_count,
+                "totalPages": total_pages,
+            },
+        })
+    except Exception as exc:
+        log.exception("Failed to fetch workout notifications")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch notifications") from exc
+
+
+@api.get("/schedule/notification-settings")
+def api_get_notification_settings(user=Depends(require_admin)):
+    """Get workout notification settings."""
+    try:
+        settings = schedule_repository.get_workout_notification_settings()
+        return {"settings": settings}
+    except Exception as exc:
+        log.exception("Failed to fetch notification settings")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch settings") from exc
+
+
+@api.post("/schedule/notification-settings")
+async def api_update_notification_settings(request: Request, user=Depends(require_admin)):
+    """Update workout notification settings."""
+    try:
+        payload = await request.json()
+        reminder_hours = payload.get("reminder_hours")
+        
+        if reminder_hours is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "reminder_hours is required")
+        
+        if not isinstance(reminder_hours, int):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "reminder_hours must be an integer")
+        
+        if reminder_hours < 1 or reminder_hours > 168:  # 1 hour to 1 week
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "reminder_hours must be between 1 and 168")
+        
+        # Update the settings (in a real implementation, this would be stored in the database)
+        success = schedule_repository.update_workout_notification_settings(reminder_hours)
+        
+        if not success:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Failed to update settings")
+        
+        return {"settings": {"reminder_hours": reminder_hours}}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("Failed to update notification settings")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to update settings") from exc
+
+
 @api.get("/admins")
 def api_admins(user=Depends(require_admin)):
     rows = admin_repository.list_admins()

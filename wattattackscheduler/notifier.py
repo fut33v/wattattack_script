@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date, time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -19,6 +19,14 @@ from repositories.admin_repository import (
     seed_admins_from_env,
     get_admin_ids,
 )
+from repositories.schedule_repository import (
+    list_upcoming_reservations,
+    ensure_workout_notifications_table,
+    was_notification_sent,
+    record_notification_sent,
+)
+from repositories.client_link_repository import get_link_by_client
+from repositories.client_repository import get_client
 
 LOGGER = logging.getLogger(__name__)
 
@@ -31,6 +39,7 @@ DEFAULT_STATE_PATH = Path("notifier_state.json")
 DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
 MAX_TRACKED_IDS = int(os.environ.get("WATTATTACK_TRACKED_LIMIT", "200"))
 DEFAULT_ADMIN_SEED = os.environ.get("TELEGRAM_ADMIN_IDS", "")
+DEFAULT_REMINDER_HOURS = int(os.environ.get("WORKOUT_REMINDER_HOURS", "4"))
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -71,6 +80,12 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Fetch activities and update state without sending Telegram messages",
+    )
+    parser.add_argument(
+        "--reminder-hours",
+        type=int,
+        default=DEFAULT_REMINDER_HOURS,
+        help="Hours before workout to send reminder (default: 4)",
     )
     return parser.parse_args(argv)
 
@@ -310,6 +325,211 @@ def extract_athlete_field(profile: Dict[str, Any], field: str) -> str:
     return ""
 
 
+def send_workout_reminders(*, timeout: float, reminder_hours: int = DEFAULT_REMINDER_HOURS) -> None:
+    """Send workout reminders to clients via krutilkavnbot."""
+    # Get the krutilkavnbot token
+    krutilkavn_token = os.environ.get("KRUTILKAVN_BOT_TOKEN")
+    if not krutilkavn_token:
+        LOGGER.info("KRUTILKAVN_BOT_TOKEN not set, skipping workout reminders")
+        return
+
+    # Ensure the notifications table exists
+    try:
+        ensure_workout_notifications_table()
+    except Exception:
+        LOGGER.exception("Failed to ensure workout notifications table")
+        return
+
+    # Calculate time window for reminders (N hours before the workout)
+    now = datetime.now()
+    since = now + timedelta(hours=reminder_hours-1)  # Slightly wider window to ensure we catch everything
+    until = now + timedelta(hours=reminder_hours+1)
+
+    try:
+        # Get all upcoming reservations in the time window
+        reservations = list_upcoming_reservations(since, until)
+        LOGGER.info("Found %d upcoming reservations for workout reminders", len(reservations))
+    except Exception as exc:
+        LOGGER.exception("Failed to fetch upcoming reservations: %s", exc)
+        return
+
+    # Filter out reservations for which we've already sent notifications
+    notification_type = f"reminder_{reminder_hours}h"
+    unsent_reservations = []
+    for reservation in reservations:
+        reservation_id = reservation.get("id")
+        if reservation_id and not was_notification_sent(reservation_id, notification_type):
+            unsent_reservations.append(reservation)
+        else:
+            LOGGER.debug("Skipping reservation %s - notification already sent", reservation_id)
+
+    if not unsent_reservations:
+        LOGGER.info("No new workout reminders to send")
+        return
+
+    # Group reservations by client
+    client_reservations = {}
+    for reservation in unsent_reservations:
+        client_id = reservation.get("client_id")
+        if client_id:
+            if client_id not in client_reservations:
+                client_reservations[client_id] = []
+            client_reservations[client_id].append(reservation)
+
+    # Send reminders to each client
+    sent_count = 0
+    for client_id, reservations in client_reservations.items():
+        try:
+            # Get client information
+            client = get_client(client_id)
+            if not client:
+                LOGGER.warning("Client %s not found", client_id)
+                continue
+
+            # Get Telegram user ID for the client
+            link = get_link_by_client(client_id)
+            if not link:
+                LOGGER.debug("Client %s is not linked to Telegram", client_id)
+                continue
+
+            tg_user_id = link.get("tg_user_id")
+            if not tg_user_id:
+                LOGGER.debug("Client %s has no Telegram user ID", client_id)
+                continue
+
+            # Format reminder message
+            message = format_workout_reminder(client, reservations, reminder_hours)
+            
+            # Send reminder via krutilkavnbot
+            try:
+                telegram_send_message(
+                    krutilkavn_token,
+                    str(tg_user_id),
+                    message,
+                    timeout=timeout,
+                    parse_mode="HTML",
+                )
+                
+                # Record that we sent the notification for each reservation
+                for reservation in reservations:
+                    reservation_id = reservation.get("id")
+                    if reservation_id:
+                        record_notification_sent(reservation_id, notification_type)
+                
+                LOGGER.info("Sent workout reminder to client %s (Telegram user %s)", client_id, tg_user_id)
+                sent_count += len(reservations)
+            except requests.HTTPError as exc:
+                LOGGER.warning("Failed to send workout reminder to client %s: %s", client_id, exc)
+        except Exception as exc:
+            LOGGER.exception("Error processing workout reminder for client %s: %s", client_id, exc)
+
+    LOGGER.info("Sent %d workout reminders", sent_count)
+
+
+def format_workout_reminder(client: Dict[str, Any], reservations: List[Dict[str, Any]], reminder_hours: int) -> str:
+    """Format a workout reminder message for a client."""
+    # Get client name
+    first_name = client.get("first_name", "")
+    last_name = client.get("last_name", "")
+    full_name = client.get("full_name", "")
+    
+    if first_name and last_name:
+        client_name = f"{first_name} {last_name}"
+    elif full_name:
+        client_name = full_name
+    else:
+        client_name = first_name or last_name or "Клиент"
+
+    # Format reservation details
+    if len(reservations) == 1:
+        reservation = reservations[0]
+        slot_date = reservation.get("slot_date")
+        start_time = reservation.get("start_time")
+        end_time = reservation.get("end_time")
+        
+        # Format date and time
+        if isinstance(slot_date, date):
+            date_str = slot_date.strftime("%d.%m.%Y")
+        else:
+            date_str = str(slot_date)
+            
+        if isinstance(start_time, time):
+            start_str = start_time.strftime("%H:%M")
+        else:
+            start_str = str(start_time)
+            
+        if isinstance(end_time, time):
+            end_str = end_time.strftime("%H:%M")
+        else:
+            end_str = str(end_time)
+
+        # Session type
+        session_kind = reservation.get("session_kind", "self_service")
+        instructor_name = reservation.get("instructor_name", "")
+        
+        if session_kind == "instructor":
+            if instructor_name:
+                session_info = f"с инструктором {instructor_name}"
+            else:
+                session_info = "с инструктором"
+        else:
+            session_info = "самокрутка"
+
+        # Stand information
+        stand_code = reservation.get("stand_code", "")
+        stand_title = reservation.get("stand_title", "")
+        
+        if stand_code and stand_title and stand_code != stand_title:
+            stand_info = f"{stand_code} ({stand_title})"
+        else:
+            stand_info = stand_code or stand_title or "станок"
+
+        message = (
+            f"👋 <b>{client_name}</b>, напоминаем о предстоящей тренировке!\n\n"
+            f"📅 Дата: {date_str}\n"
+            f"🕘 Время: {start_str}-{end_str}\n"
+            f"🏋️ Станок: {stand_info}\n"
+            f"🧑‍🏫 Тип: {session_info}\n\n"
+            f"До встречи в «Крутилке» через {reminder_hours} часов! 🚴‍♀️"
+        )
+    else:
+        # Multiple reservations
+        message = f"👋 <b>{client_name}</b>, у вас запланированы следующие тренировки:\n\n"
+        
+        for reservation in reservations:
+            slot_date = reservation.get("slot_date")
+            start_time = reservation.get("start_time")
+            
+            # Format date and time
+            if isinstance(slot_date, date):
+                date_str = slot_date.strftime("%d.%m")
+            else:
+                date_str = str(slot_date)
+                
+            if isinstance(start_time, time):
+                time_str = start_time.strftime("%H:%M")
+            else:
+                time_str = str(start_time)
+
+            # Session type
+            session_kind = reservation.get("session_kind", "self_service")
+            instructor_name = reservation.get("instructor_name", "")
+            
+            if session_kind == "instructor":
+                if instructor_name:
+                    session_info = f"с инструктором {instructor_name}"
+                else:
+                    session_info = "с инструктором"
+            else:
+                session_info = "самокрутка"
+
+            message += f"• {date_str} в {time_str} ({session_info})\n"
+        
+        message += f"\nДо встречи в «Крутилке» через {reminder_hours} часов! 🚴‍♀️"
+
+    return message
+
+
 def send_activity_fit(
     *,
     client: WattAttackClient,
@@ -487,6 +707,13 @@ def main(argv: Iterable[str] | None = None) -> int:
         # still save to keep state in sync if first run
         if not args.state.exists():
             save_state(args.state, state)
+
+    # Send workout reminders to clients
+    if not args.dry_run:
+        try:
+            send_workout_reminders(timeout=args.timeout, reminder_hours=args.reminder_hours)
+        except Exception:
+            LOGGER.exception("Failed to send workout reminders")
 
     return 0
 

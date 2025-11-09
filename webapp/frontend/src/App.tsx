@@ -17,6 +17,8 @@ import AdminsPage from "./pages/AdminsPage";
 import SchedulePage from "./pages/SchedulePage";
 import ScheduleOverviewPage from "./pages/ScheduleOverviewPage";
 import InstructorsPage from "./pages/InstructorsPage";
+import NotificationsPage from "./pages/NotificationsPage";
+import NotificationSettingsPage from "./pages/NotificationSettingsPage";
 
 import "./styles/layout.css";
 
@@ -61,6 +63,8 @@ export default function App() {
           <Route path="/clients/:id" element={<ClientEditPage />} />
           <Route path="/schedule" element={<ScheduleOverviewPage />} />
           <Route path="/schedule/manage" element={<SchedulePage />} />
+          <Route path="/schedule/notifications" element={<NotificationsPage />} />
+          <Route path="/schedule/settings" element={<NotificationSettingsPage />} />
           <Route path="/instructors" element={<InstructorsPage />} />
           <Route path="/bikes" element={<BikesPage />} />
           <Route path="/trainers" element={<TrainersPage />} />
