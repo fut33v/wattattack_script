@@ -53,7 +53,7 @@ services:
         "-m",
         "wattattackscheduler",
         "--interval",
-        "${WATTATTACK_INTERVAL_SECONDS:-1800}",
+        "${WATTATTACK_INTERVAL_SECONDS:-300}",
         "--notifier-args",
         "--accounts",
         "/app/accounts.json",
