@@ -1778,16 +1778,51 @@ def create_app() -> FastAPI:
             return index_file.read_text(encoding="utf-8")
 
         @app.get("/app", response_class=HTMLResponse)
-        def serve_spa_root() -> HTMLResponse:
-            return HTMLResponse(_index_html())
+        def serve_spa_root(request: Request):
+            # Check if user is logged in
+            user = get_current_user(request)
+            if not user:
+                # If not logged in, redirect to login
+                return HTMLResponse(_index_html())
+            
+            # Check if user is admin
+            if is_admin_user(user):
+                # Serve the full SPA for admin users
+                return HTMLResponse(_index_html())
+            else:
+                # Serve placeholder for non-admin users
+                context = {
+                    "request": request,
+                }
+                return templates.TemplateResponse("non_admin_placeholder.html", context)
 
         @app.get("/app/{path:path}")
-        def serve_spa_asset(path: str):
+        def serve_spa_asset(request: Request, path: str):
+            # Check if user is logged in
+            user = get_current_user(request)
+            if not user:
+                # If not logged in, serve the SPA (login page)
+                target = (dist_root / path).resolve()
+                if dist_root in target.parents or target == dist_root:
+                    if target.is_file():
+                        return FileResponse(target)
+                return HTMLResponse(_index_html())
+            
+            # Check if user is admin
+            if not is_admin_user(user):
+                # For non-admin users, redirect to placeholder for any /app/* path
+                context = {
+                    "request": request,
+                }
+                return templates.TemplateResponse("non_admin_placeholder.html", context)
+            
+            # For admin users, serve the SPA normally
             target = (dist_root / path).resolve()
             if dist_root in target.parents or target == dist_root:
                 if target.is_file():
                     return FileResponse(target)
             return HTMLResponse(_index_html())
+
     else:
         @app.get("/app")
         def spa_placeholder():

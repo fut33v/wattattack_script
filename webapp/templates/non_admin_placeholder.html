@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Крутилка</title>
+    <style>
+      :root {
+        font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+        color: #111;
+        background-color: #f5f5f5;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 0;
+        background: linear-gradient(120deg, #f8f8fb, #eef2ff);
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .placeholder {
+        max-width: 600px;
+        padding: 40px;
+        background: #fff;
+        border-radius: 16px;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+        text-align: center;
+      }
+
+      .placeholder h1 {
+        margin: 0 0 16px;
+        font-size: 32px;
+        font-weight: 700;
+      }
+
+      .placeholder p {
+        margin: 0 0 24px;
+        font-size: 16px;
+        line-height: 1.5;
+        color: #444;
+      }
+
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        border-radius: 8px;
+        border: 1px solid rgba(17, 17, 17, 0.15);
+        padding: 12px 24px;
+        font-size: 16px;
+        font-weight: 600;
+        text-decoration: none;
+        background: #4338ca;
+        color: #fff;
+        transition: background 0.2s ease;
+        cursor: pointer;
+      }
+
+      .btn:hover {
+        background: #3730a3;
+      }
+
+      .btn.secondary {
+        background: #fff;
+        color: #111;
+        border-color: rgba(17, 17, 17, 0.15);
+        margin-left: 12px;
+      }
+
+      .btn.secondary:hover {
+        background: #f0f0ff;
+      }
+
+      .actions {
+        margin-top: 32px;
+        display: flex;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 12px;
+      }
+
+      @media (max-width: 768px) {
+        .placeholder {
+          margin: 20px;
+          padding: 30px 20px;
+        }
+        
+        .actions {
+          flex-direction: column;
+        }
+        
+        .btn.secondary {
+          margin-left: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="placeholder">
+      <h1>Добро пожаловать в Крутилку!</h1>
+      <p>
+        Для просмотра расписания перейдите по ссылкам ниже:
+      </p>
+      
+      <div class="actions">
+        <a class="btn" href="/schedule/current_week">
+          Текущая неделя
+        </a>
+        <a class="btn secondary" href="/schedule/next_week">
+          Следующая неделя
+        </a>
+      </div>
+    </div>
+  </body>
+</html>
