@@ -17,6 +17,7 @@ const NAV_LINKS = [
   { to: "/schedule/manage", label: "Редактор", adminOnly: true },
   { to: "/schedule/notifications", label: "Уведомления", adminOnly: true },
   { to: "/schedule/settings", label: "Настройки", adminOnly: true },
+  { to: "/messaging", label: "Рассылка", adminOnly: true },
   { to: "/instructors", label: "Инструкторы", adminOnly: true },
   { to: "/bikes", label: "Велосипеды", adminOnly: false },
   { to: "/trainers", label: "Тренажеры", adminOnly: false },

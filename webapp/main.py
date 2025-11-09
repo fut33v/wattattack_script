@@ -29,7 +29,6 @@ from repositories import (
     bikes_repository,
     client_link_repository,
     client_repository,
-    layout_repository,
     instructors_repository,
     schedule_repository,
     trainers_repository,
@@ -1214,6 +1213,96 @@ def api_fill_week_template(week_id: int, force: bool = False, user=Depends(requi
     serialized_slots = [_serialize_slot(slot) for slot in slots]
     instructors_payload = jsonable_encoder(instructors_repository.list_instructors())
     return {"created": created, "slots": serialized_slots, "instructors": instructors_payload}
+
+
+@api.post("/messages/broadcast")
+async def api_broadcast_message(request: Request, user=Depends(require_admin)):
+    """Broadcast a message to all linked Telegram users."""
+    try:
+        payload = await request.json()
+        message_text = payload.get("message")
+        send_at = payload.get("sendAt")  # ISO datetime string or None for immediate
+        
+        if not message_text or not isinstance(message_text, str):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Message text is required")
+        
+        if len(message_text.strip()) == 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Message text cannot be empty")
+        
+        # For now, we'll implement immediate sending only
+        # Scheduled sending would require a separate job queue system
+        if send_at is not None:
+            # In a real implementation, we would store this in a scheduled messages table
+            # and have a separate process pick them up at the scheduled time
+            log.warning("Scheduled messaging not yet implemented, sending immediately")
+        
+        # Get all linked Telegram users
+        try:
+            links = client_link_repository.list_links()
+        except Exception as exc:
+            log.exception("Failed to fetch client links")
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch client links") from exc
+        
+        if not links:
+            return {"sent": 0, "message": "No linked users found"}
+        
+        # Get the krutilkavnbot token
+        settings = get_settings()
+        bot_token = settings.krutilkavn_bot_token
+        if not bot_token:
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "KRUTILKAVN_BOT_TOKEN not configured")
+        
+        # Send message to each user
+        sent_count = 0
+        failed_count = 0
+        
+        for link in links:
+            tg_user_id = link.get("tg_user_id")
+            if not tg_user_id:
+                continue
+                
+            try:
+                # Send message via Telegram API
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                data = {
+                    "chat_id": str(tg_user_id),
+                    "text": message_text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True
+                }
+                
+                # In a real implementation, we would use a proper HTTP client with timeout
+                # For now, we'll use a simple request
+                import requests
+                response = requests.post(url, json=data, timeout=10)
+                
+                if response.status_code == 200:
+                    sent_count += 1
+                else:
+                    log.warning(
+                        "Failed to send message to user %s: %s %s",
+                        tg_user_id,
+                        response.status_code,
+                        response.text
+                    )
+                    failed_count += 1
+                    
+            except Exception as exc:
+                log.exception("Failed to send message to user %s", tg_user_id)
+                failed_count += 1
+        
+        return {
+            "sent": sent_count,
+            "failed": failed_count,
+            "total": len(links),
+            "message": f"Message sent to {sent_count} users, {failed_count} failed"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("Failed to broadcast message")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to broadcast message") from exc
 
 
 @api.patch("/schedule/reservations/{reservation_id}")

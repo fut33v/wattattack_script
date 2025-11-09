@@ -20,6 +20,7 @@ class Settings:
     telegram_login_bot_username: str
     session_secret_key: str
     telegram_login_bot_token: str
+    krutilkavn_bot_token: str
     base_url: Optional[str] = None
     clients_page_size: int = 25
 
@@ -34,12 +35,17 @@ def get_settings() -> Settings:
         or os.environ.get("KRUTILKAVN_BOT_TOKEN")
         or telegram_bot_token
     )
+    krutilkavn_token = (
+        os.environ.get("KRUTILKAVN_BOT_TOKEN")
+        or telegram_bot_token
+    )
     if not login_token:
         raise RuntimeError("Telegram login bot token is required")
     return Settings(
         telegram_bot_token=telegram_bot_token,
         telegram_login_bot_username=_env("TELEGRAM_LOGIN_BOT_USERNAME", required=True),
         telegram_login_bot_token=login_token,
+        krutilkavn_bot_token=krutilkavn_token,
         session_secret_key=_env("WEBAPP_SECRET_KEY", required=True),
         base_url=os.environ.get("WEBAPP_BASE_URL"),
         clients_page_size=default_page_size,

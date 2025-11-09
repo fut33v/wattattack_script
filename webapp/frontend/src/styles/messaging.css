@@ -1,0 +1,197 @@
+.messaging-page {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.messaging-stats {
+  margin-bottom: 30px;
+}
+
+.stat-card {
+  background: linear-gradient(135deg, rgba(30, 40, 70, 0.7), rgba(20, 25, 50, 0.7));
+  border: 1px solid rgba(79, 155, 255, 0.2);
+  border-radius: 12px;
+  padding: 20px;
+  text-align: center;
+}
+
+.stat-label {
+  font-size: 14px;
+  color: #a0a8c8;
+  margin-bottom: 8px;
+}
+
+.stat-value {
+  font-size: 28px;
+  font-weight: 600;
+  color: #4f9bff;
+  line-height: 1;
+}
+
+.messaging-form {
+  background: linear-gradient(135deg, rgba(30, 40, 70, 0.7), rgba(20, 25, 50, 0.7));
+  border: 1px solid rgba(79, 155, 255, 0.2);
+  border-radius: 12px;
+  padding: 24px;
+  margin-bottom: 30px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 500;
+  color: #e0e4ff;
+}
+
+.form-group input[type="checkbox"] {
+  margin-right: 8px;
+}
+
+.form-hint {
+  font-size: 13px;
+  color: #a0a8c8;
+  margin-top: 4px;
+  font-weight: normal;
+}
+
+.form-group textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 12px;
+  background: rgba(10, 15, 30, 0.6);
+  border: 1px solid rgba(79, 155, 255, 0.3);
+  border-radius: 8px;
+  color: #f4f6ff;
+  font-family: inherit;
+  resize: vertical;
+  transition: border-color 0.2s;
+}
+
+.form-group textarea:focus {
+  outline: none;
+  border-color: #4f9bff;
+  box-shadow: 0 0 0 2px rgba(79, 155, 255, 0.2);
+}
+
+.char-count {
+  text-align: right;
+  font-size: 12px;
+  color: #a0a8c8;
+  margin-top: 4px;
+}
+
+.scheduled-time-input {
+  margin-top: 12px;
+  padding: 16px;
+  background: rgba(10, 15, 30, 0.4);
+  border-radius: 8px;
+  border: 1px solid rgba(79, 155, 255, 0.1);
+}
+
+.scheduled-time-input label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 500;
+  color: #e0e4ff;
+}
+
+.scheduled-time-input input[type="datetime-local"] {
+  width: 100%;
+  padding: 10px;
+  background: rgba(10, 15, 30, 0.6);
+  border: 1px solid rgba(79, 155, 255, 0.3);
+  border-radius: 8px;
+  color: #f4f6ff;
+  font-family: inherit;
+}
+
+.scheduled-time-input input[type="datetime-local"]:focus {
+  outline: none;
+  border-color: #4f9bff;
+  box-shadow: 0 0 0 2px rgba(79, 155, 255, 0.2);
+}
+
+.scheduled-preview {
+  margin-top: 8px;
+  font-size: 14px;
+  color: #a0a8c8;
+}
+
+.form-actions {
+  margin-top: 30px;
+}
+
+.button.primary {
+  background: linear-gradient(135deg, #4f9bff, #7c53ff);
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.button.primary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.button.primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.form-message {
+  margin-top: 16px;
+  padding: 12px;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.form-message.success {
+  background: rgba(67, 210, 159, 0.15);
+  border: 1px solid rgba(67, 210, 159, 0.3);
+  color: #43d29f;
+}
+
+.form-message.error {
+  background: rgba(255, 107, 139, 0.15);
+  border: 1px solid rgba(255, 107, 139, 0.3);
+  color: #ff6b8b;
+}
+
+.messaging-info {
+  background: linear-gradient(135deg, rgba(30, 40, 70, 0.7), rgba(20, 25, 50, 0.7));
+  border: 1px solid rgba(79, 155, 255, 0.2);
+  border-radius: 12px;
+  padding: 24px;
+}
+
+.messaging-info h3 {
+  margin-top: 0;
+  margin-bottom: 16px;
+  color: #e0e4ff;
+}
+
+.messaging-info ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.messaging-info li {
+  margin-bottom: 8px;
+  color: #a0a8c8;
+}
+
+.messaging-info li:last-child {
+  margin-bottom: 0;
+}
+
+.messaging-info strong {
+  color: #4f9bff;
+}
