@@ -361,7 +361,7 @@
                     <div class="empty">Нет слотов</div>
                   {% else %}
                     {% for slot in day.slots %}
-                      <details class="slot-card" {% if loop.first %}open{% endif %}>
+                      <details class="slot-card" {% if loop.revindex0 < 2 %}open{% endif %}>
                         <summary>
                           <div class="slot-summary-header">
                             <span class="slot-time">{{ slot.start_time }}–{{ slot.end_time }}</span>
