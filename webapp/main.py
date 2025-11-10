@@ -25,7 +25,7 @@ from fastapi import (
 )
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -1765,11 +1765,86 @@ def create_app() -> FastAPI:
     def root():
         return RedirectResponse(url="/app", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
+    @app.get("/schedule/{slug}")
+    def schedule_week(slug: str, request: Request):
+        # Convert slug to week start date
+        week_start = _week_start_for_slug(slug)
+        if not week_start:
+            # Try to parse as a specific date slug
+            try:
+                week_start = datetime.strptime(slug, "%Y-%m-%d").date()
+                # Normalize to Monday of the week
+                week_start = week_start - timedelta(days=week_start.weekday())
+            except ValueError:
+                return templates.TemplateResponse(
+                    "public_schedule.html",
+                    {
+                        "request": request,
+                        "error_message": "Недопустимый формат даты в URL"
+                    }
+                )
+        
+        # Get or create the week
+        try:
+            week = schedule_repository.get_or_create_week(week_start_date=week_start)
+        except Exception as e:
+            log.error("Failed to get or create week for %s: %s", week_start, e)
+            return templates.TemplateResponse(
+                "public_schedule.html",
+                {
+                    "request": request,
+                    "error_message": "Не удалось загрузить расписание"
+                }
+            )
+        
+        # Load schedule data
+        payload = _load_schedule_week_payload(week["id"])
+        if not payload:
+            return templates.TemplateResponse(
+                "public_schedule.html",
+                {
+                    "request": request,
+                    "error_message": "Не удалось загрузить данные расписания"
+                }
+            )
+        
+        # Build day columns for display
+        day_columns = _build_day_columns(
+            payload["slots"],
+            week["week_start_date"],
+            payload["instructors"]
+        )
+        
+        # Calculate navigation slugs
+        current_week_start = date.today() - timedelta(days=date.today().weekday())
+        prev_week_start = week_start - timedelta(days=7)
+        next_week_start = week_start + timedelta(days=7)
+        
+        prev_week_slug = _format_week_slug(prev_week_start)
+        next_week_slug = _format_week_slug(next_week_start)
+        current_week_slug = _format_week_slug(current_week_start)
+        
+        # Format week range label
+        week_range_label = _format_week_range_label(week["week_start_date"])
+        
+        # Context for template
+        context = {
+            "request": request,
+            "week": week,
+            "day_columns": day_columns,
+            "prev_week_slug": prev_week_slug,
+            "next_week_slug": next_week_slug,
+            "canonical_slug": slug,
+            "week_range_label": week_range_label,
+            "share_url": f"{request.url.scheme}://{request.url.netloc}/schedule/{slug}"
+        }
+        
+        return templates.TemplateResponse("public_schedule.html", context)
+
     @app.get("/schedule")
     def schedule_default():
         return RedirectResponse(url="/schedule/current_week", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
-    @app.get("/auth/telegram")
     @app.get("/auth/telegram")
     async def telegram_auth(request: Request, next: Optional[str] = None):
         settings = get_settings()
