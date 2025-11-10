@@ -24,6 +24,10 @@ from repositories.schedule_repository import (
     ensure_workout_notifications_table,
     was_notification_sent,
     record_notification_sent,
+    ensure_activity_ids_table,
+    was_activity_id_seen,
+    record_seen_activity_id,
+    get_seen_activity_ids_for_account,
 )
 from repositories.client_link_repository import get_link_by_client
 from repositories.client_repository import get_client, search_clients
@@ -43,7 +47,7 @@ DEFAULT_ADMIN_SEED = os.environ.get("TELEGRAM_ADMIN_IDS", "")
 DEFAULT_REMINDER_HOURS = int(os.environ.get("WORKOUT_REMINDER_HOURS", "4"))
 
 
-def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Notify Telegram admins about new WattAttack activities.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -58,7 +62,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--state",
         type=Path,
         default=Path(os.environ.get(STATE_ENV, DEFAULT_STATE_PATH)),
-        help="Path to JSON file used to remember previously seen activities",
+        help="Path to JSON file used to remember previously seen activities (deprecated - now using database)",
     )
     parser.add_argument(
         "--admins",
@@ -256,6 +260,59 @@ def format_activity_meta(
     if account_name:
         lines.append(f"<b>{account_name}</b>")
     lines.append(f"<b>{name}</b>")
+    if profile:
+        athlete_name = extract_athlete_name(profile)
+        if athlete_name:
+            lines.append(f"Атлет: {athlete_name}")
+        gender = extract_athlete_field(profile, "gender")
+        if gender:
+            lines.append(f"Пол: {'М' if gender.upper().startswith('M') else 'Ж'}")
+        weight = extract_athlete_field(profile, "weight")
+        if weight:
+            lines.append(f"Вес: {weight} кг")
+        ftp_value = extract_athlete_field(profile, "ftp")
+        if ftp_value:
+            lines.append(f"FTP: {ftp_value} Вт")
+
+    lines.append(f"Дата: {date_str}")
+    lines.append(f"Дистанция: {distance_km:.1f} км")
+    lines.append(f"Время: {duration}")
+    if elevation is not None:
+        lines.append(f"Набор высоты: {elevation} м")
+    if power_avg:
+        lines.append(f"Средняя мощность: {power_avg} Вт")
+    if cadence_avg:
+        lines.append(f"Средний каденс: {cadence_avg} об/мин")
+    if heartrate_avg:
+        lines.append(f"Средний пульс: {heartrate_avg} уд/мин")
+
+    return "\n".join(lines)
+
+
+def format_strava_activity_description(
+    activity: Dict[str, Any],
+    account_name: Optional[str],
+    profile: Optional[Dict[str, Any]],
+) -> str:
+    """Format activity description for Strava (without HTML tags)."""
+    name = activity.get("mapNameRu") or activity.get("name") or "Без названия"
+    date_str = format_start_time(activity)
+    distance = activity.get("distance", 0) or 0
+    try:
+        distance_km = float(distance) / 1000
+    except (TypeError, ValueError):
+        distance_km = 0.0
+    duration = format_duration(activity.get("elapsedTime"))
+    elevation = activity.get("totalElevationGain")
+    power_avg = activity.get("averageWatts")
+    cadence_avg = activity.get("averageCadence")
+    heartrate_avg = activity.get("averageHeartrate")
+
+    lines: List[str] = []
+    lines.append("Прямиком из Крутилки!")
+    if account_name:
+        lines.append(f"{account_name}")
+    lines.append(f"{name}")
     if profile:
         athlete_name = extract_athlete_name(profile)
         if athlete_name:
@@ -562,13 +619,10 @@ def send_activity_fit(
         
         # Send to matching clients if krutilkavnbot token is available
         if krutilkavn_token:
-            send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, None)
+            send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, None, account_name)
         return
     
-    # Send to matching clients if krutilkavnbot token is available
-    if krutilkavn_token:
-        send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, None)
-
+    # For activities with FIT files, we need to download the file first
     temp_file = None
     try:
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -590,8 +644,9 @@ def send_activity_fit(
                 pass
                 
         # Send to matching clients if krutilkavnbot token is available
+        # Only send to matching clients AFTER we have downloaded the FIT file
         if krutilkavn_token:
-            send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, temp_file)
+            send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, temp_file, account_name)
     except Exception:
         LOGGER.exception("Failed to download/send FIT %s", fit_id)
         # Send error message to admins
@@ -606,9 +661,10 @@ def send_activity_fit(
             except requests.HTTPError:
                 pass
         # Send error message to matching clients if krutilkavnbot token is available
+        # Send without FIT file when there was an error downloading it
         if krutilkavn_token:
             error_caption = f"Не удалось отправить FIT для активности {activity.get('id')}"
-            send_to_matching_clients(activity, profile, error_caption, krutilkavn_token, timeout, None)
+            send_to_matching_clients(activity, profile, error_caption, krutilkavn_token, timeout, None, account_name)
     finally:
         if temp_file and temp_file.exists():
             try:
@@ -624,6 +680,7 @@ def send_to_matching_clients(
     krutilkavn_token: str,
     timeout: float,
     temp_file: Optional[Path] = None,
+    account_name: Optional[str] = None,
 ) -> None:
     """Send activity information or file to clients whose names match the athlete profile."""
     # Extract athlete name from profile
@@ -672,13 +729,22 @@ def send_to_matching_clients(
     
     # For each matching client, check if they're linked to a Telegram user and send the message/file
     sent_count = 0
+    strava_uploaded_count = 0
+    LOGGER.debug("Processing %d exact matches for athlete %s", len(exact_matches), athlete_name)
     for client in exact_matches:
         client_id = client.get("id")
+        LOGGER.debug("=== PROCESSING CLIENT MATCH ===")
+        LOGGER.debug("Processing client: %s", client)
         if not client_id:
+            LOGGER.debug("Client has no ID, skipping")
             continue
             
+        LOGGER.debug("Processing client %s for athlete %s", client_id, athlete_name)
+        
         # Get the Telegram link for this client
         link = get_link_by_client(client_id)
+        LOGGER.debug("Retrieved link for client %s: %s", client_id, link)
+        
         if not link:
             LOGGER.debug("Client %s is not linked to Telegram, skipping", client_id)
             continue
@@ -688,9 +754,14 @@ def send_to_matching_clients(
             LOGGER.debug("Client %s has no Telegram user ID, skipping", client_id)
             continue
             
-        # Send the message/file to the client
+        LOGGER.debug("Client %s is linked to Telegram user %s", client_id, tg_user_id)
+            
+        # Send the message/file to the client via Telegram
         try:
+            LOGGER.debug("Attempting to send to client %s (Telegram user %s)", client_id, tg_user_id)
             if temp_file and temp_file.exists():
+                LOGGER.debug("Temp file exists: %s", temp_file)
+                LOGGER.debug("Sending FIT file to client %s", client_id)
                 filename = f"activity_{activity.get('id')}.fit"
                 telegram_send_document(
                     krutilkavn_token,
@@ -702,6 +773,7 @@ def send_to_matching_clients(
                 )
                 LOGGER.info("Sent FIT file to client %s (Telegram user %s)", client_id, tg_user_id)
             else:
+                LOGGER.debug("Sending activity info (no FIT file) to client %s", client_id)
                 telegram_send_message(
                     krutilkavn_token,
                     str(tg_user_id),
@@ -714,12 +786,80 @@ def send_to_matching_clients(
             LOGGER.warning("Failed to send to client %s (Telegram user %s): %s", client_id, tg_user_id, exc)
         except Exception as exc:
             LOGGER.exception("Unexpected error sending to client %s (Telegram user %s): %s", client_id, tg_user_id, exc)
+        
+        # Upload to Strava if the client has connected their Strava account
+        # This is in a separate try-catch block to ensure Strava upload happens even if Telegram sending fails
+        try:
+            LOGGER.debug("=== STRAVA UPLOAD SECTION START ===")
+            LOGGER.info("Checking Strava upload for client %s (Telegram user %s)", client_id, tg_user_id)
+            
+            # Log the current state before checking conditions
+            LOGGER.debug("Strava upload pre-checks:")
+            LOGGER.debug("  - temp_file parameter: %s", temp_file)
+            LOGGER.debug("  - temp_file exists: %s", temp_file.exists() if temp_file else False)
+            LOGGER.debug("  - link data: %s", link)
+            
+            if temp_file and temp_file.exists():
+                LOGGER.debug("✓ Temp file exists for Strava upload for client %s", client_id)
+                # Check if the client has Strava integration enabled
+                strava_access_token = link.get("strava_access_token")
+                strava_token_expires_at = link.get("strava_token_expires_at")
+                
+                LOGGER.debug("Strava tokens for client %s: access_token=%s, expires_at=%s", client_id, bool(strava_access_token), strava_token_expires_at)
+                
+                if strava_access_token and strava_token_expires_at:
+                    LOGGER.debug("✓ Client %s has Strava integration enabled", client_id)
+                    LOGGER.debug("Attempting Strava token refresh for client %s", client_id)
+                    # Refresh token if needed
+                    from strava_client import refresh_strava_token_if_needed
+                    updated_link = refresh_strava_token_if_needed(link)
+                    
+                    # Use the updated token if available, otherwise use the existing one
+                    if updated_link and updated_link.get("strava_access_token"):
+                        strava_access_token = updated_link["strava_access_token"]
+                        LOGGER.debug("Using refreshed Strava token for client %s", client_id)
+                    else:
+                        LOGGER.debug("Using existing Strava token for client %s", client_id)
+                    
+                    LOGGER.info("Attempting Strava upload for client %s (Telegram user %s)", client_id, tg_user_id)
+                    
+                    # Upload the FIT file to Strava
+                    from strava_client import StravaClient
+                    strava_client = StravaClient(strava_access_token)
+                    
+                    # Use "КРУТИЛКА!" as the activity name
+                    activity_name = "КРУТИЛКА!"
+                    # Use the Strava-specific description without HTML tags
+                    activity_description = format_strava_activity_description(activity, account_name, profile)
+                    
+                    LOGGER.debug("Uploading activity to Strava for client %s: name=%s, description=%s, file=%s", 
+                               client_id, activity_name, activity_description, temp_file)
+                    
+                    upload_response = strava_client.upload_activity(
+                        str(temp_file),
+                        name=activity_name,
+                        description=activity_description
+                    )
+                    
+                    LOGGER.info("SUCCESS: Uploaded activity to Strava for client %s (Telegram user %s): %s", client_id, tg_user_id, upload_response)
+                    strava_uploaded_count += 1
+                    LOGGER.debug("Strava upload counter incremented to: %d", strava_uploaded_count)
+                else:
+                    LOGGER.debug("✗ Strava integration not enabled for client %s: access_token=%s, expires_at=%s", client_id, bool(strava_access_token), strava_token_expires_at)
+            else:
+                LOGGER.debug("✗ No temp file for Strava upload for client %s", client_id)
+            LOGGER.debug("=== STRAVA UPLOAD SECTION END ===")
+        except Exception as exc:
+            LOGGER.exception("FAILED: Strava upload failed for client %s (Telegram user %s): %s", client_id, tg_user_id, exc)
     
+    LOGGER.info("=== FINAL RESULTS ===")
     LOGGER.info("Sent activity information to %d matching clients", sent_count)
+    LOGGER.info("Uploaded activities to Strava for %d clients", strava_uploaded_count)
+    LOGGER.info("=== END OF CLIENT PROCESSING ===")
 
 
-def main(argv: Iterable[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args(argv)
 
     if not args.token:
@@ -729,6 +869,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 2
 
     ensure_admin_table()
+    ensure_activity_ids_table()  # Ensure our activity IDs table exists
     seed_admins_from_env(args.admins)
     admin_ids = get_admin_ids()
     if not admin_ids:
@@ -743,17 +884,18 @@ def main(argv: Iterable[str] | None = None) -> int:
         LOGGER.error("Failed to load accounts: %s", exc)
         return 2
 
-    state = load_state(args.state)
-    state.setdefault("accounts", {})
+    # Note: We're not using the state file anymore, but keeping it for backward compatibility
+    # state = load_state(args.state)
+    # state.setdefault("accounts", {})
 
     any_changes = False
 
     for account_id, account in accounts.items():
         LOGGER.info("Checking account %s", account.get("name", account_id))
-        known_ids = set(
-            str(item)
-            for item in state.get("accounts", {}).get(account_id, {}).get("known_ids", [])
-        )
+        
+        # Get known activity IDs from database instead of JSON file
+        known_ids = set(get_seen_activity_ids_for_account(account_id))
+        LOGGER.debug("Found %d previously seen activity IDs for account %s", len(known_ids), account_id)
 
         client = WattAttackClient(account["base_url"])
         try:
@@ -795,8 +937,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         new_items: List[Dict[str, Any]] = []
         for activity in activities:
             activity_id = str(activity.get("id"))
-            if activity_id and activity_id not in known_ids:
+            if activity_id and not was_activity_id_seen(account_id, activity_id):
                 new_items.append(activity)
+                # Record the activity ID immediately after checking
+                record_seen_activity_id(account_id, activity_id)
 
         if new_items:
             any_changes = True
@@ -815,20 +959,20 @@ def main(argv: Iterable[str] | None = None) -> int:
         else:
             LOGGER.info("No new activities for %s", account_id)
 
-        updated_ids = [
-            str(activity.get("id"))
-            for activity in activities
-            if activity.get("id") is not None
-        ]
-        updated_ids = updated_ids[:MAX_TRACKED_IDS]
-        state["accounts"][account_id] = {"known_ids": updated_ids}
+        # Update known IDs in database (this is now redundant but kept for consistency)
+        # We're recording each ID immediately after checking, so this is just for consistency
+        for activity in activities:
+            activity_id = str(activity.get("id"))
+            if activity_id:
+                record_seen_activity_id(account_id, activity_id)
 
-    if any_changes:
-        save_state(args.state, state)
-    else:
-        # still save to keep state in sync if first run
-        if not args.state.exists():
-            save_state(args.state, state)
+    # Note: We're not saving state to JSON file anymore
+    # if any_changes:
+    #     save_state(args.state, state)
+    # else:
+    #     # still save to keep state in sync if first run
+    #     if not args.state.exists():
+    #         save_state(args.state, state)
 
     # Send workout reminders to clients
     if not args.dry_run:

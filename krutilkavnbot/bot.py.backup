@@ -1358,47 +1358,6 @@ async def _handle_strava_disconnect(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text("Произошла ошибка при отключении Strava.")
 
 
-async def _strava_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /strava command to manage Strava integration."""
-    message = update.effective_message
-    user = update.effective_user
-    if message is None or user is None:
-        return
-
-    # Check if user is linked to a client
-    link = get_link_by_user(user.id)
-    if not link:
-        await message.reply_text("Сначала привяжите свою анкету через /start.")
-        return
-
-    # Check if Strava is already connected
-    strava_connected = bool(link.get("strava_access_token"))
-
-    keyboard_buttons = []
-    
-    if strava_connected:
-        keyboard_buttons.append([InlineKeyboardButton("🔄 Обновить подключение Strava", callback_data="strava_connect")])
-        keyboard_buttons.append([InlineKeyboardButton("❌ Отключить Strava", callback_data="strava_disconnect")])
-    else:
-        keyboard_buttons.append([InlineKeyboardButton("🔌 Подключить Strava", callback_data="strava_connect")])
-    
-    keyboard_buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="profile_back")])
-
-    strava_status = "✅ Подключена" if strava_connected else "❌ Не подключена"
-    
-    strava_text = (
-        f"🏅 Strava: {strava_status}\n\n"
-        "Настройте интеграцию с Strava для автоматической загрузки ваших тренировок.\n\n"
-        "• При подключении вы будете перенаправлены на сайт Strava для авторизации\n"
-        "• После подтверждения ваши тренировки будут автоматически загружаться в Strava"
-    )
-
-    await message.reply_text(strava_text, reply_markup=InlineKeyboardMarkup(keyboard_buttons))
-
-
-# Removed upload command functionality - no longer needed
-
-
 async def _notify_admins_of_cancellation(
     context: ContextTypes.DEFAULT_TYPE,
     client: Dict[str, Any],
@@ -2508,16 +2467,12 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application.add_handler(CommandHandler("history", _history_handler))
     application.add_handler(CommandHandler("cancel", _cancel_booking_handler))
     application.add_handler(CommandHandler("help", _help_handler))
-    application.add_handler(CommandHandler("strava", _strava_command_handler))  # Add Strava command handler
     
-    # Strava integration handlers
     # Strava integration handlers
     application.add_handler(CallbackQueryHandler(_handle_strava_callback, pattern=r"^strava_connect$"))
     application.add_handler(CallbackQueryHandler(_handle_strava_cancel, pattern=r"^strava_cancel$"))
     application.add_handler(CallbackQueryHandler(_handle_strava_disconnect, pattern=r"^strava_disconnect$"))
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"code="), _handle_strava_webhook))
-    
-    # Placeholder for future document handlers
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _fallback_text_handler))
     application.add_handler(CallbackQueryHandler(_handle_admin_decision, pattern=r"^(approve|reject):"))

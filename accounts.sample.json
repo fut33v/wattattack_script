@@ -1,9 +1,8 @@
 [
   {
-    "id": "rider1",
-    "name": "Rider One",
-    "email": "user@example.com",
-    "password": "change-me",
-    "base_url": "https://wattattack.com"
+    "id": "main",
+    "name": "Основной аккаунт",
+    "email": "account@example.com",
+    "password": "secret"
   }
 ]

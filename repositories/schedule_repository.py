@@ -178,8 +178,17 @@ def update_week(week_id: int, **fields: object) -> Optional[Dict]:
     assignments = []
     params: List[object] = []
     for column, value in fields.items():
-        if column == "week_start_date":
-            value = _normalize_week_start(value)
+        if column == "week_start_date" and isinstance(value, (date, str)):
+            if isinstance(value, str):
+                # Try to parse string as date
+                try:
+                    parsed_date = datetime.strptime(value, "%Y-%m-%d").date()
+                    value = _normalize_week_start(parsed_date)
+                except ValueError:
+                    # If parsing fails, leave value as is
+                    pass
+            else:
+                value = _normalize_week_start(value)
         assignments.append(f"{column} = %s")
         params.append(value)
     params.append(week_id)
@@ -1088,6 +1097,114 @@ def update_workout_notification_settings(reminder_hours: int) -> bool:
         return False
     # In a real implementation, we would store this in the database
     return True
+
+
+def ensure_activity_ids_table() -> None:
+    """Create table to track seen activity IDs."""
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS seen_activity_ids (
+                id SERIAL PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                activity_id TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE(account_id, activity_id)
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS seen_activity_ids_account_idx ON seen_activity_ids (account_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS seen_activity_ids_activity_idx ON seen_activity_ids (activity_id)"
+        )
+        conn.commit()
+
+
+def record_seen_activity_id(account_id: str, activity_id: str) -> bool:
+    """Record that an activity ID has been seen for an account."""
+    ensure_activity_ids_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        try:
+            cur.execute(
+                """
+                INSERT INTO seen_activity_ids (account_id, activity_id)
+                VALUES (%s, %s)
+                ON CONFLICT (account_id, activity_id) DO NOTHING
+                RETURNING id
+                """,
+                (account_id, activity_id)
+            )
+            row = cur.fetchone()
+            conn.commit()
+            return row is not None  # True if inserted, False if conflict
+        except Exception:
+            LOGGER.exception("Failed to record seen activity ID for account %s, activity %s", account_id, activity_id)
+            return False
+
+
+def was_activity_id_seen(account_id: str, activity_id: str) -> bool:
+    """Check if an activity ID has been seen for an account."""
+    ensure_activity_ids_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            "SELECT 1 FROM seen_activity_ids WHERE account_id = %s AND activity_id = %s",
+            (account_id, activity_id)
+        )
+        return cur.fetchone() is not None
+
+
+def get_seen_activity_ids_for_account(account_id: str, limit: int = 200) -> List[str]:
+    """Get the most recent activity IDs seen for an account."""
+    ensure_activity_ids_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT activity_id
+            FROM seen_activity_ids
+            WHERE account_id = %s
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (account_id, limit)
+        )
+        rows = cur.fetchall()
+    return [row["activity_id"] for row in rows]
+
+
+def delete_activity_id(account_id: str, activity_id: str) -> bool:
+    """Delete a specific activity ID for an account."""
+    ensure_activity_ids_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        try:
+            cur.execute(
+                """
+                DELETE FROM seen_activity_ids
+                WHERE account_id = %s AND activity_id = %s
+                """,
+                (account_id, activity_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0  # True if at least one row was deleted
+        except Exception:
+            LOGGER.exception("Failed to delete activity ID %s for account %s", activity_id, account_id)
+            return False
+
+
+def list_all_accounts() -> List[str]:
+    """Get a list of all accounts that have activity IDs."""
+    ensure_activity_ids_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT account_id
+            FROM seen_activity_ids
+            ORDER BY account_id
+            """
+        )
+        rows = cur.fetchall()
+    return [row["account_id"] for row in rows]
 
 
 def list_upcoming_reservations(since: datetime, until: datetime) -> List[Dict]:

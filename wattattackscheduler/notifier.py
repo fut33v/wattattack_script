@@ -24,9 +24,16 @@ from repositories.schedule_repository import (
     ensure_workout_notifications_table,
     was_notification_sent,
     record_notification_sent,
+    ensure_activity_ids_table,
+    was_activity_id_seen,
+    record_seen_activity_id,
+    get_seen_activity_ids_for_account,
 )
 from repositories.client_link_repository import get_link_by_client
 from repositories.client_repository import get_client, search_clients
+
+# Import the send_to_matching_clients function from notifier_client
+from wattattackscheduler.notifier_client import send_to_matching_clients
 
 LOGGER = logging.getLogger(__name__)
 
@@ -58,7 +65,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--state",
         type=Path,
         default=Path(os.environ.get(STATE_ENV, DEFAULT_STATE_PATH)),
-        help="Path to JSON file used to remember previously seen activities",
+        help="Path to JSON file used to remember previously seen activities (deprecated - now using database)",
     )
     parser.add_argument(
         "--admins",
@@ -587,7 +594,7 @@ def send_activity_fit(
         
         # Send to matching clients if krutilkavnbot token is available
         if krutilkavn_token:
-            send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, None)
+            send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, None, None)
         return
 
     temp_file = None
@@ -613,7 +620,7 @@ def send_activity_fit(
                 
         # Send to matching clients if krutilkavnbot token is available
         if krutilkavn_token:
-            send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, temp_file)
+            send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, temp_file, None)
     except Exception:
         LOGGER.exception("Failed to download/send FIT %s", fit_id)
         # Send error message to admins
@@ -630,115 +637,13 @@ def send_activity_fit(
         # Send error message to matching clients if krutilkavnbot token is available
         if krutilkavn_token:
             error_caption = f"Не удалось отправить FIT для активности {activity.get('id')}"
-            send_to_matching_clients(activity, profile, error_caption, krutilkavn_token, timeout, None)
+            send_to_matching_clients(activity, profile, error_caption, krutilkavn_token, timeout, None, None)
     finally:
         if temp_file and temp_file.exists():
             try:
                 temp_file.unlink()
             except OSError:
                 LOGGER.debug("Failed to remove temp file %s", temp_file)
-
-
-def send_to_matching_clients(
-    activity: Dict[str, Any],
-    profile: Dict[str, Any],
-    caption: str,
-    krutilkavn_token: str,
-    timeout: float,
-    temp_file: Optional[Path] = None,
-) -> None:
-    """Send activity information or file to clients whose names match the athlete profile."""
-    # Extract athlete name from profile
-    athlete_name = extract_athlete_name(profile)
-    if not athlete_name:
-        LOGGER.debug("No athlete name found in profile, skipping client matching")
-        return
-    
-    LOGGER.info("Searching for clients matching athlete name: %s", athlete_name)
-    
-    # Search for clients with matching names
-    matching_clients = search_clients(athlete_name, limit=100)
-    if not matching_clients:
-        LOGGER.info("No clients found matching athlete name: %s", athlete_name)
-        return
-    
-    # Filter clients by exact name match
-    exact_matches = []
-    athlete_name_lower = athlete_name.lower()
-    
-    for client in matching_clients:
-        # Check various name combinations
-        first_name = client.get("first_name", "") or ""
-        last_name = client.get("last_name", "") or ""
-        full_name = client.get("full_name", "") or ""
-        
-        # Create possible name combinations
-        client_names = [
-            f"{first_name} {last_name}".strip(),
-            full_name.strip(),
-            first_name.strip(),
-            last_name.strip()
-        ]
-        
-        # Check if any of the client names match the athlete name
-        for client_name in client_names:
-            if client_name and client_name.lower() == athlete_name_lower:
-                exact_matches.append(client)
-                break
-    
-    if not exact_matches:
-        LOGGER.info("No exact name matches found for athlete: %s", athlete_name)
-        return
-    
-    LOGGER.info("Found %d exact client matches for athlete: %s", len(exact_matches), athlete_name)
-    
-    # For each matching client, check if they're linked to a Telegram user and send the message/file
-    sent_count = 0
-    for client in exact_matches:
-        client_id = client.get("id")
-        if not client_id:
-            continue
-            
-        # Get the Telegram link for this client
-        link = get_link_by_client(client_id)
-        if not link:
-            LOGGER.debug("Client %s is not linked to Telegram, skipping", client_id)
-            continue
-            
-        tg_user_id = link.get("tg_user_id")
-        if not tg_user_id:
-            LOGGER.debug("Client %s has no Telegram user ID, skipping", client_id)
-            continue
-            
-        # Send the message/file to the client
-        try:
-            if temp_file and temp_file.exists():
-                filename = f"activity_{activity.get('id')}.fit"
-                telegram_send_document(
-                    krutilkavn_token,
-                    str(tg_user_id),
-                    temp_file,
-                    filename,
-                    caption=caption,
-                    timeout=timeout,
-                )
-                LOGGER.info("Sent FIT file to client %s (Telegram user %s)", client_id, tg_user_id)
-            else:
-                telegram_send_message(
-                    krutilkavn_token,
-                    str(tg_user_id),
-                    caption,
-                    timeout=timeout,
-                )
-                LOGGER.info("Sent activity info to client %s (Telegram user %s)", client_id, tg_user_id)
-            sent_count += 1
-        except requests.HTTPError as exc:
-            LOGGER.warning("Failed to send to client %s (Telegram user %s): %s", client_id, tg_user_id, exc)
-        except Exception as exc:
-            LOGGER.exception("Unexpected error sending to client %s (Telegram user %s): %s", client_id, tg_user_id, exc)
-    
-    LOGGER.info("Sent activity information to %d matching clients", sent_count)
-
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -751,6 +656,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     ensure_admin_table()
+    ensure_activity_ids_table()  # Ensure our activity IDs table exists
     seed_admins_from_env(args.admins)
     admin_ids = get_admin_ids()
     if not admin_ids:
@@ -765,17 +671,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOGGER.error("Failed to load accounts: %s", exc)
         return 2
 
-    state = load_state(args.state)
-    state.setdefault("accounts", {})
+    # Note: We're not using the state file anymore, but keeping it for backward compatibility
+    # state = load_state(args.state)
+    # state.setdefault("accounts", {})
 
     any_changes = False
 
     for account_id, account in accounts.items():
         LOGGER.info("Checking account %s", account.get("name", account_id))
-        known_ids = set(
-            str(item)
-            for item in state.get("accounts", {}).get(account_id, {}).get("known_ids", [])
-        )
+        
+        # Get known activity IDs from database instead of JSON file
+        known_ids = set(get_seen_activity_ids_for_account(account_id))
+        LOGGER.debug("Found %d previously seen activity IDs for account %s", len(known_ids), account_id)
 
         client = WattAttackClient(account["base_url"])
         try:
@@ -817,8 +724,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         new_items: List[Dict[str, Any]] = []
         for activity in activities:
             activity_id = str(activity.get("id"))
-            if activity_id and activity_id not in known_ids:
+            if activity_id and not was_activity_id_seen(account_id, activity_id):
                 new_items.append(activity)
+                # Record the activity ID immediately after checking
+                record_seen_activity_id(account_id, activity_id)
 
         if new_items:
             any_changes = True
@@ -837,20 +746,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             LOGGER.info("No new activities for %s", account_id)
 
-        updated_ids = [
-            str(activity.get("id"))
-            for activity in activities
-            if activity.get("id") is not None
-        ]
-        updated_ids = updated_ids[:MAX_TRACKED_IDS]
-        state["accounts"][account_id] = {"known_ids": updated_ids}
+        # Update known IDs in database (this is now redundant but kept for completeness)
+        # We're recording each ID immediately after checking, so this is just for consistency
+        for activity in activities:
+            activity_id = str(activity.get("id"))
+            if activity_id:
+                record_seen_activity_id(account_id, activity_id)
 
-    if any_changes:
-        save_state(args.state, state)
-    else:
-        # still save to keep state in sync if first run
-        if not args.state.exists():
-            save_state(args.state, state)
+    # Note: We're not saving state to JSON file anymore
+    # if any_changes:
+    #     save_state(args.state, state)
+    # else:
+    #     # still save to keep state in sync if first run
+    #     if not args.state.exists():
+    #         save_state(args.state, state)
 
     # Send workout reminders to clients
     if not args.dry_run:

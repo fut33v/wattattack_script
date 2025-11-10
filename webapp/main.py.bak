@@ -1695,51 +1695,6 @@ def api_get_activity_ids(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch activity IDs") from exc
 
 
-@api.delete("/activities/{account_id}/{activity_id}")
-def api_delete_activity_id(
-    account_id: str,
-    activity_id: str,
-    user=Depends(require_admin)
-):
-    """Delete a specific activity ID for an account."""
-    try:
-        success = schedule_repository.delete_activity_id(account_id, activity_id)
-        if success:
-            return {"status": "ok", "message": "Activity ID deleted successfully"}
-        else:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Activity ID not found")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        log.exception("Failed to delete activity ID %s for account %s", activity_id, account_id)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to delete activity ID") from exc
-
-
-@api.get("/strava/authorize")
-def strava_authorize(state: str = None, user=Depends(require_admin)):
-    """Generate Strava authorization URL for a client."""
-    try:
-        from strava_client import StravaClient
-        client = StravaClient()
-        auth_url = client.get_authorization_url(state=state or "")
-        # Redirect to Strava authorization page
-        return RedirectResponse(url=auth_url)
-    except Exception as exc:
-        log.exception("Failed to generate Strava authorization URL")
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to generate Strava authorization URL") from exc
-
-
-@api.get("/activities/accounts")
-def api_list_accounts(user=Depends(require_admin)):
-    """Get list of all accounts that have activity IDs."""
-    try:
-        accounts = schedule_repository.list_all_accounts()
-        return {"accounts": accounts}
-    except Exception as exc:
-        log.exception("Failed to fetch accounts")
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch accounts") from exc
-
-
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -1769,7 +1724,110 @@ def create_app() -> FastAPI:
     def schedule_default():
         return RedirectResponse(url="/schedule/current_week", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
-    @app.get("/auth/telegram")
+    @app.get("/logout")
+    def logout(request: Request):
+        https_only=False,
+    )
+    app.include_router(api)
+
+    @app.on_event("startup")
+    def _startup_seed_instructors() -> None:
+        """Ensure instructor directory exists before first request."""
+        try:
+            instructors_repository.ensure_instructors_table()
+            message_repository.ensure_user_messages_table()
+        except Exception as exc:  # pylint: disable=broad-except
+            log.warning("Failed to ensure instructors table on startup: %s", exc)
+
+    @app.get("/")
+    def root():
+        return RedirectResponse(url="/app", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    @app.get("/schedule")
+    def schedule_default():
+        return RedirectResponse(url="/schedule/current_week", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    @app.get("/logout")
+    def logout(request: Request):
+        request.session.pop(SESSION_KEY_USER, None)
+        return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.get("/schedule/{slug}", response_class=HTMLResponse, name="public_schedule_page")
+    def public_schedule_page(request: Request, slug: str):
+        target_start = _week_start_for_slug(slug)
+        status_code = status.HTTP_200_OK
+        error_message: Optional[str] = None
+        if not target_start:
+            error_message = "Некорректная ссылка на неделю."
+
+        week_payload: Optional[dict] = None
+        canonical_slug: Optional[str] = None
+        week_start_date_obj: Optional[date] = target_start
+        day_columns: list[dict] = []
+        share_url: Optional[str] = None
+        week_range_label: Optional[str] = None
+
+        if not error_message and target_start:
+            week_record = schedule_repository.get_week_by_start(target_start)
+            if not week_record:
+                error_message = "Расписание для этой недели пока не создано."
+            else:
+                week_payload = _load_schedule_week_payload(week_record["id"])
+                if not week_payload:
+                    error_message = "Неделя не найдена."
+                else:
+                    week_data = week_payload.get("week") or {}
+                    week_start_iso = week_data.get("week_start_date")
+                    if isinstance(week_start_iso, str):
+                        try:
+                            week_start_date_obj = datetime.strptime(week_start_iso, "%Y-%m-%d").date()
+                        except ValueError:
+                            week_start_date_obj = target_start
+                    elif isinstance(week_start_iso, date):
+                        week_start_date_obj = week_start_iso
+
+                    day_columns = _build_day_columns(
+                        week_payload.get("slots") or [],
+                        week_start_iso or week_start_date_obj,
+                        week_payload.get("instructors") or [],
+                    )
+                    canonical_slug = _format_week_slug(week_start_iso or week_start_date_obj)
+                    week_range_label = _format_week_range_label(week_start_iso or week_start_date_obj)
+
+        if error_message:
+            status_code = status.HTTP_404_NOT_FOUND
+
+        user = get_current_user(request)
+        show_editor_button = bool(user and is_admin_user(user))
+
+        prev_week_slug = None
+        next_week_slug = None
+        if week_start_date_obj:
+            prev_week_slug = _format_week_slug(week_start_date_obj - timedelta(days=7))
+            next_week_slug = _format_week_slug(week_start_date_obj + timedelta(days=7))
+
+        if canonical_slug:
+            try:
+                share_url = str(request.url_for("public_schedule_page", slug=canonical_slug))
+            except Exception:  # pragma: no cover - fallback when URL reversing fails
+                share_url = f"/schedule/{canonical_slug}"
+
+        context = {
+            "request": request,
+            "week": week_payload.get("week") if week_payload else None,
+            "day_columns": day_columns,
+            "slug": slug,
+            "canonical_slug": canonical_slug,
+            "week_range_label": week_range_label,
+            "share_url": share_url,
+            "prev_week_slug": prev_week_slug,
+            "next_week_slug": next_week_slug,
+            "show_editor_button": show_editor_button,
+            "error_message": error_message,
+            "target_week_label": _format_week_range_label(target_start) if target_start else None,
+        }
+        return templates.TemplateResponse("public_schedule.html", context, status_code=status_code)
+
     @app.get("/auth/telegram")
     async def telegram_auth(request: Request, next: Optional[str] = None):
         settings = get_settings()
@@ -1860,11 +1918,6 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def api_health():
         return {"status": "ok"}
-
-    @app.get("/logout")
-    def logout(request: Request):
-        request.session.pop(SESSION_KEY_USER, None)
-        return RedirectResponse(url="/app", status_code=status.HTTP_303_SEE_OTHER)
 
     @app.get("/api/logout")
     def api_logout(request: Request):

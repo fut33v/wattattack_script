@@ -60,6 +60,12 @@ export default function ClientLinksPage() {
     updateMutation.mutate({ clientId: row.client_id, payload });
   }
 
+  function handleStravaConnect(row: ClientLinkRow) {
+    // Get the Strava authorization URL from the backend
+    const stravaAuthUrl = `/strava/authorize?state=${row.tg_user_id}`;
+    window.open(stravaAuthUrl, '_blank');
+  }
+
   return (
     <Panel title="Связки" subtitle="Привязка клиентов к Telegram-аккаунтам">
       {listQuery.isLoading ? (
@@ -99,6 +105,19 @@ export default function ClientLinksPage() {
               )
             },
             {
+              key: "strava",
+              title: "Strava",
+              render: (item) => (
+                <div>
+                  {item.strava_access_token ? (
+                    <span className="status-badge status-badge--success">Подключена</span>
+                  ) : (
+                    <span className="status-badge status-badge--warning">Не подключена</span>
+                  )}
+                </div>
+              )
+            },
+            {
               key: "created_at",
               title: "Создано",
               render: (item) => item.created_at ?? "—"
@@ -122,6 +141,13 @@ export default function ClientLinksPage() {
             {updateMutation.isPending ? "Сохраняю…" : "Сохранить"}
           </button>
         </form>
+        <button
+          type="button"
+          className="button"
+          onClick={() => handleStravaConnect(item)}
+        >
+          Strava
+        </button>
         <button
           type="button"
           className="button danger"

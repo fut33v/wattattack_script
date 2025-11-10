@@ -98,6 +98,10 @@ export interface ClientLinkRow {
   tg_user_id: number;
   tg_username?: string | null;
   tg_full_name?: string | null;
+  strava_access_token?: string | null;
+  strava_refresh_token?: string | null;
+  strava_token_expires_at?: string | null;
+  strava_athlete_id?: number | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -206,4 +210,20 @@ export interface WorkoutNotification {
 export interface WorkoutNotificationListResponse {
   items: WorkoutNotification[];
   pagination: Pagination;
+}
+
+export interface ActivityIdRecord {
+  id: number;
+  account_id: string;
+  activity_id: string;
+  created_at: string;
+}
+
+export interface ActivityIdListResponse {
+  items: ActivityIdRecord[];
+  pagination: Pagination;
+}
+
+export interface AccountListResponse {
+  accounts: string[];
 }
