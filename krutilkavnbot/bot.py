@@ -1452,6 +1452,51 @@ async def _notify_admins_of_cancellation(
             LOGGER.warning(f"Failed to send cancellation notification to admin {admin_id}: {e}")
 
 
+async def _notify_admins_of_new_message(
+    context: ContextTypes.DEFAULT_TYPE,
+    user: User,
+    message_text: str
+) -> None:
+    """Send notification to all admins about a new user message."""
+    try:
+        admin_ids = get_admin_ids()
+    except Exception:
+        LOGGER.exception("Failed to load admin IDs for message notification")
+        return
+
+    if not admin_ids:
+        LOGGER.debug("No admin IDs found for message notification")
+        return
+
+    # Format user information
+    user_parts = []
+    if user.first_name:
+        user_parts.append(user.first_name)
+    if user.last_name:
+        user_parts.append(user.last_name)
+    user_display_name = " ".join(user_parts) if user_parts else "Без имени"
+    
+    if user.username:
+        user_display = f"{user_display_name} (@{user.username})"
+    else:
+        user_display = user_display_name
+
+    # Create the notification message
+    notification = (
+        f"✉️ Новое сообщение от пользователя!\n\n"
+        f"Пользователь: {user_display}\n"
+        f"ID: {user.id}\n\n"
+        f"Сообщение:\n{message_text}"
+    )
+
+    # Send notification to all admins
+    for admin_id in admin_ids:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=notification)
+        except Exception as e:
+            LOGGER.warning(f"Failed to send message notification to admin {admin_id}: {e}")
+
+
 def _find_clients_by_last_name(last_name: str) -> List[Dict[str, Any]]:
     normalized = _normalize_last_name(last_name)
     results = search_clients(last_name, limit=MAX_SUGGESTIONS * 2)
@@ -1751,19 +1796,6 @@ async def _unknown_command_handler(update: Update, context: ContextTypes.DEFAULT
 
 async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
-    if message is None or not message.text:
-        return
-    await message.reply_text(
-        "Доступные команды:\n"
-        "/start — привязать или создать анкету.\n"
-        "/book — забронировать свободный слот.\n"
-        "/mybookings — показать ваши будущие записи.\n"
-        "/history — показать историю бронирований."
-    )
-
-
-async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
     user = update.effective_user
     if message is None or not message.text:
         return
@@ -1777,6 +1809,9 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
                 tg_username=user.username,
                 tg_full_name=f"{user.first_name or ''} {user.last_name or ''}".strip()
             )
+            
+            # Notify admins about the new message
+            await _notify_admins_of_new_message(context, user, message.text)
         except Exception:
             LOGGER.exception("Failed to store user message")
     
