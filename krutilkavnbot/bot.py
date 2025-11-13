@@ -8,6 +8,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update, User
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -19,7 +20,7 @@ from telegram.ext import (
 )
 
 from repositories import bikes_repository, message_repository, schedule_repository, trainers_repository
-from repositories.client_repository import create_client, get_client, search_clients
+from repositories.client_repository import create_client, get_client, search_clients, update_client_fields
 from repositories.client_link_repository import (
     get_link_by_client,
     get_link_by_user,
@@ -37,6 +38,9 @@ LOGGER = logging.getLogger(__name__)
 _GREETING_KEY: Final[str] = "krutilkavnbot:greeting"
 _CANDIDATES_KEY: Final[str] = "krutilkavnbot:candidates"
 _FORM_KEY: Final[str] = "krutilkavnbot:form"
+_PROFILE_EDIT_FIELD_KEY: Final[str] = "krutilkavnbot:profile_edit_field"
+_RELINK_MODE_KEY: Final[str] = "krutilkavnbot:relink_mode"
+_FORM_STEP_KEY: Final[str] = "krutilkavnbot:form_step"
 _PENDING_APPROVALS_KEY: Final[str] = "krutilkavnbot:pending_approvals"
 _LAST_SEARCH_KEY: Final[str] = "krutilkavnbot:last_name"
 _BOOKING_STATE_KEY: Final[str] = "krutilkavnbot:booking"
@@ -69,6 +73,55 @@ MAX_SUGGESTIONS: Final[int] = 6
 ) = range(10)
 
 BOOK_SELECT_DAY, BOOK_SELECT_SLOT = range(100, 102)
+
+_FORM_STEP_HINTS: Final[Dict[int, str]] = {
+    FORM_FIRST_NAME: "Сейчас ждём ваше имя (только текст).",
+    FORM_LAST_NAME: "Сейчас ждём вашу фамилию.",
+    FORM_WEIGHT: "Сейчас ждём ваш вес в килограммах (например, 72.5).",
+    FORM_HEIGHT: "Сейчас ждём ваш рост в сантиметрах (например, 178).",
+    FORM_GENDER: "Нужно выбрать пол кнопками «М» или «Ж».",
+    FORM_FTP: "Введите FTP в ваттах или нажмите «ОК», чтобы оставить 150.",
+    FORM_PEDALS: "Выберите тип педалей на клавиатуре ниже.",
+    FORM_GOAL: "Опишите цель или нажмите «ОК», чтобы пропустить.",
+}
+
+_PROFILE_EDIT_FIELDS: Final[Dict[str, Dict[str, str]]] = {
+    "first_name": {
+        "label": "Имя",
+        "prompt": "🖊️ Введите новое имя (или отправьте /start, чтобы отменить).",
+        "type": "text",
+    },
+    "last_name": {
+        "label": "Фамилия",
+        "prompt": "🖊️ Введите новую фамилию (или /start для отмены).",
+        "type": "text",
+    },
+    "weight": {
+        "label": "Вес",
+        "prompt": "⚖️ Введите новый вес в килограммах (например, 72.5).",
+        "type": "positive_float",
+    },
+    "height": {
+        "label": "Рост",
+        "prompt": "📏 Введите новый рост в сантиметрах (например, 178).",
+        "type": "positive_float",
+    },
+    "ftp": {
+        "label": "FTP",
+        "prompt": "⚡ Введите новое значение FTP в ваттах (например, 220).",
+        "type": "positive_float",
+    },
+    "gender": {
+        "label": "Пол",
+        "prompt": "Выберите новый пол с помощью кнопок ниже.",
+        "type": "gender",
+    },
+    "pedals": {
+        "label": "Педали",
+        "prompt": "Выберите тип педалей с помощью кнопок ниже.",
+        "type": "pedals",
+    },
+}
 
 _PEDAL_CHOICES: Final[List[Tuple[str, str]]] = [
     ("топталки (под кроссовки)", "platform"),
@@ -1528,6 +1581,113 @@ def _get_form(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Any]:
     return form
 
 
+def _peek_form(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Any]:
+    form = context.user_data.get(_FORM_KEY)
+    return form if isinstance(form, dict) else {}
+
+
+def _set_form_step(context: ContextTypes.DEFAULT_TYPE, step: int) -> None:
+    context.user_data[_FORM_STEP_KEY] = step
+
+
+def _current_form_step(context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
+    return context.user_data.get(_FORM_STEP_KEY)
+
+
+def _clear_form_step(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(_FORM_STEP_KEY, None)
+
+
+async def _remind_form_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, step: int) -> int:
+    message = update.effective_message
+    if message is None:
+        return step
+
+    form = _peek_form(context)
+    hint = _FORM_STEP_HINTS.get(step, "Продолжим заполнение анкеты.")
+    details: List[str] = []
+    if step == FORM_FIRST_NAME:
+        last_name = (form.get("last_name") or "").strip()
+        if last_name:
+            details.append(f"Фамилия уже сохранена: {last_name}.")
+    elif step == FORM_LAST_NAME:
+        first_name = (form.get("first_name") or "").strip()
+        if first_name:
+            details.append(f"Имя уже указано: {first_name}.")
+
+    lines = [
+        "📝 Вы уже создаёте новую анкету.",
+        hint,
+    ]
+    if details:
+        lines.extend(details)
+    lines.append("Чтобы начать заново, отправьте /cancel и затем /start.")
+
+    await message.reply_text("\n".join(lines))
+
+    if step == FORM_GENDER:
+        await _send_gender_prompt(context, message.chat_id)
+    elif step == FORM_FTP:
+        await _send_ftp_prompt(context, message.chat_id)
+    elif step == FORM_PEDALS:
+        await _send_pedals_prompt(context, message.chat_id)
+    elif step == FORM_GOAL:
+        await _send_goal_prompt(context, message.chat_id)
+
+    return step
+
+
+def _describe_expected_input(
+    context: ContextTypes.DEFAULT_TYPE,
+    user: Optional[User] = None,
+) -> str:
+    edit_state = _profile_edit_state(context)
+    if edit_state:
+        field = edit_state["field"]
+        config = _PROFILE_EDIT_FIELDS.get(field, {})
+        prompt = config.get("prompt")
+        if prompt:
+            return prompt
+        return "Отправьте новое значение или используйте /start для отмены."
+
+    step = _current_form_step(context)
+    form = _peek_form(context)
+    if step is not None:
+        hint = _FORM_STEP_HINTS.get(step, "")
+        details: List[str] = []
+        if step == FORM_FIRST_NAME:
+            last_name = (form.get("last_name") or "").strip()
+            if last_name:
+                details.append(f"Фамилия уже сохранена: {last_name}.")
+        elif step == FORM_LAST_NAME:
+            first_name = (form.get("first_name") or "").strip()
+            if first_name:
+                details.append(f"Имя уже указано: {first_name}.")
+        elif step == FORM_WEIGHT:
+            details.append("Введите число, например 72.5.")
+        elif step == FORM_HEIGHT:
+            details.append("Введите число в сантиметрах, например 178.")
+        text_parts = ["📝 Вы заполняете анкету."]
+        if hint:
+            text_parts.append(hint)
+        if details:
+            text_parts.extend(details)
+        text_parts.append("Чтобы начать заново, отправьте /start.")
+        return "\n".join(text_parts)
+
+    if user is not None:
+        link, _ = _fetch_linked_client(user.id)
+        if link:
+            if context.user_data.get(_RELINK_MODE_KEY):
+                return "Отправьте фамилию клиента, чтобы привязать другую анкету."
+            return "Вы уже привязаны к анкете. Используйте /start, чтобы открыть меню изменений."
+
+    last_search = (context.user_data.get(_LAST_SEARCH_KEY) or "").strip()
+    if last_search:
+        return "Сейчас ждём вашу фамилию заново, чтобы выбрать анкету или создать новую."
+    return "Сейчас бот ждёт вашу фамилию текстом, чтобы найти анкету в базе."
+
+
 def _start_new_client_form(context: ContextTypes.DEFAULT_TYPE, last_name: str) -> Dict[str, Any]:
     form = {
         "last_name": last_name.strip(),
@@ -1539,6 +1699,87 @@ def _start_new_client_form(context: ContextTypes.DEFAULT_TYPE, last_name: str) -
 
 def _clear_form(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop(_FORM_KEY, None)
+    _clear_form_step(context)
+
+
+def _profile_edit_state(context: ContextTypes.DEFAULT_TYPE) -> Optional[Dict[str, str]]:
+    state = context.user_data.get(_PROFILE_EDIT_FIELD_KEY)
+    if isinstance(state, dict) and "field" in state:
+        field = state.get("field")
+        if isinstance(field, str) and field in _PROFILE_EDIT_FIELDS:
+            return {"field": field}
+    return None
+
+
+def _set_profile_edit_field(context: ContextTypes.DEFAULT_TYPE, field: str) -> None:
+    if field in _PROFILE_EDIT_FIELDS:
+        context.user_data[_PROFILE_EDIT_FIELD_KEY] = {"field": field}
+
+
+def _clear_profile_edit_field(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(_PROFILE_EDIT_FIELD_KEY, None)
+
+
+def _reset_authorization_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_candidates(context)
+    _clear_form(context)
+    _clear_profile_edit_field(context)
+    context.user_data.pop(_LAST_SEARCH_KEY, None)
+
+
+def _format_profile_summary(client: Dict[str, Any]) -> str:
+    display_name = _format_client_display_name(client)
+    client_id = client.get("id")
+    gender_label = _format_gender_label(client.get("gender"))
+    weight_label = _format_optional_number(client.get("weight"))
+    height_label = _format_optional_number(client.get("height"))
+    ftp_label = _format_optional_number(client.get("ftp"))
+    pedals_label = (client.get("pedals") or "—").strip() or "—"
+    lines = [
+        f"👤 Анкета: {display_name} (ID {client_id})",
+        f"Пол: {gender_label}",
+        f"Вес: {weight_label} кг",
+        f"Рост: {height_label} см",
+        f"FTP: {ftp_label} Вт",
+        f"Педали: {pedals_label}",
+        "",
+        "Выберите, что изменить:",
+    ]
+    return "\n".join(lines)
+
+
+def _build_profile_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Имя", callback_data="profile:edit:first_name"),
+                InlineKeyboardButton("Фамилия", callback_data="profile:edit:last_name"),
+            ],
+            [
+                InlineKeyboardButton("Вес", callback_data="profile:edit:weight"),
+                InlineKeyboardButton("Рост", callback_data="profile:edit:height"),
+            ],
+            [
+                InlineKeyboardButton("Пол", callback_data="profile:edit:gender"),
+                InlineKeyboardButton("FTP", callback_data="profile:edit:ftp"),
+            ],
+            [
+                InlineKeyboardButton("Педали", callback_data="profile:edit:pedals"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Привязать другую анкету", callback_data="profile:relink"),
+            ],
+        ]
+    )
+
+
+async def _send_profile_menu(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    client: Dict[str, Any],
+) -> None:
+    summary = _format_profile_summary(client)
+    await context.bot.send_message(chat_id, summary, reply_markup=_build_profile_menu_keyboard())
 
 
 def _pending_approvals(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Dict[str, Any]]:
@@ -1616,6 +1857,27 @@ def _format_gender_label(gender: Optional[str]) -> str:
     return _GENDER_LABELS.get(gender, gender)
 
 
+def _compose_full_name(first_name: Optional[str], last_name: Optional[str]) -> Optional[str]:
+    parts = []
+    first = (first_name or "").strip()
+    last = (last_name or "").strip()
+    if first:
+        parts.append(first)
+    if last:
+        parts.append(last)
+    full_name = " ".join(parts).strip()
+    return full_name or None
+
+
+def _profile_field_updates(client: Dict[str, Any], field: str, value: object) -> Dict[str, object]:
+    updates: Dict[str, object] = {field: value}
+    if field == "first_name":
+        updates["full_name"] = _compose_full_name(value, client.get("last_name"))
+    elif field == "last_name":
+        updates["full_name"] = _compose_full_name(client.get("first_name"), value)
+    return updates
+
+
 def _skip_keyboard(callback: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("ОК", callback_data=callback)]])
 
@@ -1657,6 +1919,26 @@ async def _send_goal_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
         "Если не хотите указывать, нажмите «ОК».",
         reply_markup=_skip_keyboard("form:skip:goal"),
     )
+
+
+async def _send_profile_gender_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("М", callback_data="profile:set:gender:male"),
+                InlineKeyboardButton("Ж", callback_data="profile:set:gender:female"),
+            ]
+        ]
+    )
+    await context.bot.send_message(chat_id, "👤 Выберите новый пол:", reply_markup=keyboard)
+
+
+async def _send_profile_pedals_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    rows = [
+        [InlineKeyboardButton(label, callback_data=f"profile:set:pedals:{code}")]
+        for label, code in _PEDAL_CHOICES
+    ]
+    await context.bot.send_message(chat_id, "🚴 Выберите тип педалей:", reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def _request_admin_approval(
@@ -1734,17 +2016,20 @@ async def _start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         LOGGER.debug("Cannot handle /start without message or user in update %s", update.update_id)
         return ConversationHandler.END
 
-    _clear_candidates(context)
-    _clear_form(context)
+    current_step = _current_form_step(context)
+    if current_step is not None and current_step in _FORM_STEP_HINTS:
+        return await _remind_form_progress(update, context, current_step)
+
+    _reset_authorization_flow(context)
     greeting: str = context.application.bot_data.get(_GREETING_KEY, DEFAULT_GREETING)
 
-    linked_client_name: Optional[str] = None
+    linked_client: Optional[Dict[str, Any]] = None
     try:
         existing = get_link_by_user(user.id)
         if existing:
             client = get_client(existing["client_id"])
             if client:
-                linked_client_name = _format_client_label(client)
+                linked_client = client
     except Exception:
         LOGGER.exception("Failed to check existing link for user %s", user.id)
 
@@ -1754,21 +2039,25 @@ async def _start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "Если вы новый участник, создадим анкету прямо здесь."
     )
 
-    if linked_client_name:
+    if linked_client:
+        display_label = _format_client_label(linked_client)
         text = (
             f"{greeting}\n\n{intro}\n\n"
-            f"✅ Уже привязаны к {linked_client_name}.\n"
-            "Чтобы изменить связь, отправьте свою фамилию снова.\n\n"
-            "Для бронирования свободных слотов используйте команду /book."
+            f"✅ Ваш Telegram уже привязан к {display_label}.\n"
+            "Используйте меню ниже, чтобы обновить данные или привязать другую анкету."
         )
-    else:
-        text = (
-            f"{greeting}\n\n{intro}\n\n"
-            "Пожалуйста, введите свою фамилию, чтобы продолжить. "
-            "После подтверждения анкеты можно будет записываться через /book."
-        )
+        await message.reply_text(text, parse_mode=ParseMode.HTML)
+        await _send_profile_menu(context, message.chat_id, linked_client)
+        context.user_data[_RELINK_MODE_KEY] = False
+        return ASK_LAST_NAME
 
-    await message.reply_text(text)
+    text = (
+        f"{greeting}\n\n{intro}\n\n"
+        "Пожалуйста, введите свою <b>ФАМИЛИЮ</b>, чтобы продолжить. "
+        "После подтверждения анкеты откроются записи и история посещений."
+    )
+
+    await message.reply_text(text, parse_mode=ParseMode.HTML)
     return ASK_LAST_NAME
 
 
@@ -1786,12 +2075,15 @@ async def _help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def _unknown_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
+    user = update.effective_user
     if message is None:
         return
-    await message.reply_text(
-        "Используйте /start, чтобы привязать или создать анкету, /book — для записи, "
-        "/mybookings — увидеть будущие посещения, /history — историю."
-    )
+    expectation = _describe_expected_input(context, user)
+    lines = [
+        expectation,
+        "Команды:\n/start — привязать или создать анкету.\n/book — запись на ближайшие слоты.\n/mybookings — будущие посещения.\n/history — история визитов.",
+    ]
+    await message.reply_text("\n\n".join(lines))
 
 
 async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1799,6 +2091,12 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     user = update.effective_user
     if message is None or not message.text:
         return
+
+    edit_state = _profile_edit_state(context)
+    if edit_state:
+        handled = await _process_profile_edit_text(update, context, edit_state)
+        if handled:
+            return
     
     # Store the message in the database
     if user is not None:
@@ -1814,18 +2112,18 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             await _notify_admins_of_new_message(context, user, message.text)
         except Exception:
             LOGGER.exception("Failed to store user message")
-    
-    await message.reply_text(
-        "Доступные команды:\n"
-        "/start — привязать или создать анкету.\n"
-        "/book — забронировать свободный слот.\n"
-        "/mybookings — показать ваши будущие записи.\n"
-        "/history — показать историю бронирований."
-    )
+
+    expectation = _describe_expected_input(context, user)
+    lines = [
+        expectation,
+        "Доступные команды:\n/start — привязать или создать анкету.\n/book — забронировать свободный слот.\n/mybookings — показать будущие записи.\n/history — показать историю.",
+    ]
+    await message.reply_text("\n\n".join(lines))
 
 
 async def _handle_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     message = update.effective_message
+    user = update.effective_user
     if message is None or not message.text:
         return ASK_LAST_NAME
 
@@ -1836,6 +2134,19 @@ async def _handle_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await message.reply_text(
             "Используйте /start для привязки анкеты, /book для новых записей, "
             "/mybookings для ближайших посещений и /history для истории бронирований."
+        )
+        return ASK_LAST_NAME
+
+    relink_mode = bool(context.user_data.get(_RELINK_MODE_KEY))
+    has_link = False
+    if user is not None:
+        link_record, _ = _fetch_linked_client(user.id)
+        has_link = bool(link_record)
+
+    if has_link and not relink_mode:
+        await message.reply_text(
+            "Вы уже привязаны к анкете. Используйте /start и кнопку «Привязать другую анкету», "
+            "если хотите переключиться на другого клиента."
         )
         return ASK_LAST_NAME
 
@@ -1857,11 +2168,20 @@ async def _handle_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return ASK_LAST_NAME
 
     if not clients:
+        if has_link:
+            await message.reply_text(
+                "Не нашли такую фамилию. Уточните запрос или свяжитесь с администратором, "
+                "если нужная анкета отсутствует."
+            )
+            _clear_candidates(context)
+            return ASK_LAST_NAME
+
         _start_new_client_form(context, last_name)
         await message.reply_text(
             "🔎 Клиентов с такой фамилией не нашлось. Давайте создадим новую запись.\n"
             "🖊️ Введите своё имя:"
         )
+        _set_form_step(context, FORM_FIRST_NAME)
         _clear_candidates(context)
         return FORM_FIRST_NAME
 
@@ -1876,14 +2196,18 @@ async def _handle_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         ]
         for client in clients
     ]
-    rows.append([InlineKeyboardButton("Создать новую запись", callback_data="new_client")])
+    if not has_link:
+        rows.append([InlineKeyboardButton("Создать новую запись", callback_data="new_client")])
     keyboard = InlineKeyboardMarkup(rows)
     lines = ["📋 Нашлись такие клиенты:"]
     for client in clients:
         lines.append(f"• {_format_client_label(client)}")
     if len(clients) >= MAX_SUGGESTIONS:
         lines.append("Если не нашли нужного, уточните фамилию и отправьте снова.")
-    lines.append("ℹ️ Или нажмите «Создать новую запись», чтобы заполнить анкету.")
+    if not has_link:
+        lines.append("ℹ️ Или нажмите «Создать новую запись», чтобы заполнить анкету.")
+    else:
+        lines.append("ℹ️ Данные новой анкеты нельзя создать, пока текущая связь активна.")
 
     await message.reply_text("\n".join(lines), reply_markup=keyboard)
     return CONFIRM_LINK
@@ -1929,14 +2253,22 @@ async def _handle_link_selection(update: Update, context: ContextTypes.DEFAULT_T
             "Запрос отправлен администраторам. После подтверждения привязки вы получите уведомление. "
             "Чтобы выбрать другого клиента, отправьте новую фамилию.",
         )
+        context.user_data.pop(_RELINK_MODE_KEY, None)
 
     return ASK_LAST_NAME
 
 
 async def _handle_new_client_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    user = update.effective_user
     if query is None or query.message is None:
         return FORM_FIRST_NAME
+
+    if user is not None:
+        link, _ = _fetch_linked_client(user.id)
+        if link:
+            await query.answer("Вы уже привязаны к анкете. Создание новой записи недоступно.", show_alert=True)
+            return ASK_LAST_NAME
 
     await query.answer()
     last_name = context.user_data.get(_LAST_SEARCH_KEY, "")
@@ -1954,7 +2286,225 @@ async def _handle_new_client_request(update: Update, context: ContextTypes.DEFAU
         prompt_lines.append(f"✅ Фамилия сохранена: {last_name}")
     prompt_lines.append("🖊️ Введите своё имя:")
     await query.message.reply_text("\n".join(prompt_lines))
+    _set_form_step(context, FORM_FIRST_NAME)
     return FORM_FIRST_NAME
+
+
+async def _handle_profile_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or query.message is None or user is None:
+        return
+
+    data = query.data or ""
+    parts = data.split(":")
+    if len(parts) != 3:
+        await query.answer("Неизвестное действие.", show_alert=True)
+        return
+    field = parts[2]
+    config = _PROFILE_EDIT_FIELDS.get(field)
+    if config is None:
+        await query.answer("Недоступно.", show_alert=True)
+        return
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await query.answer("Анкета не найдена. Используйте /start.", show_alert=True)
+        return
+
+    await query.answer()
+    field_type = config.get("type")
+    chat_id = query.message.chat_id
+    if field_type == "gender":
+        await _send_profile_gender_prompt(context, chat_id)
+        return
+    if field_type == "pedals":
+        await _send_profile_pedals_prompt(context, chat_id)
+        return
+
+    _set_profile_edit_field(context, field)
+    current_value = client.get(field)
+    if isinstance(current_value, (int, float)):
+        current_display = f"{current_value:g}"
+    else:
+        current_display = (current_value or "—").strip() or "—"
+    lines = [
+        config.get("prompt", "Введите новое значение."),
+        f"Текущее значение: {current_display}",
+    ]
+    await context.bot.send_message(chat_id, "\n".join(lines))
+
+
+async def _handle_profile_gender_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or query.message is None or user is None:
+        return
+
+    data = query.data or ""
+    parts = data.split(":")
+    if len(parts) != 4:
+        await query.answer("Неизвестный выбор.", show_alert=True)
+        return
+    gender_code = parts[3]
+    if gender_code not in {"male", "female"}:
+        await query.answer("Неизвестный выбор.", show_alert=True)
+        return
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await query.answer("Анкета не найдена. Используйте /start.", show_alert=True)
+        return
+
+    client_id = client.get("id")
+    if not isinstance(client_id, int):
+        await query.answer("Некорректная анкета.", show_alert=True)
+        return
+
+    try:
+        update_client_fields(client_id, gender=gender_code)
+    except Exception:
+        LOGGER.exception("Failed to update gender for client %s", client_id)
+        await query.answer("Не удалось обновить пол.", show_alert=True)
+        return
+
+    try:
+        refreshed = get_client(client_id) or client
+    except Exception:
+        LOGGER.exception("Failed to refresh client %s after gender update", client_id)
+        refreshed = client
+
+    label = "М" if gender_code == "male" else "Ж"
+    await query.message.reply_text(f"✅ Пол обновлён: {label}")
+    await _send_profile_menu(context, query.message.chat_id, refreshed)
+
+
+async def _handle_profile_pedals_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or query.message is None or user is None:
+        return
+
+    data = query.data or ""
+    parts = data.split(":")
+    if len(parts) != 4:
+        await query.answer("Неизвестный выбор.", show_alert=True)
+        return
+    code = parts[3]
+    label = _PEDAL_LABEL_BY_CODE.get(code)
+    if label is None:
+        await query.answer("Неизвестный вариант.", show_alert=True)
+        return
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await query.answer("Анкета не найдена. Используйте /start.", show_alert=True)
+        return
+
+    client_id = client.get("id")
+    if not isinstance(client_id, int):
+        await query.answer("Некорректная анкета.", show_alert=True)
+        return
+
+    try:
+        update_client_fields(client_id, pedals=label)
+    except Exception:
+        LOGGER.exception("Failed to update pedals for client %s", client_id)
+        await query.answer("Не удалось обновить педали.", show_alert=True)
+        return
+
+    try:
+        refreshed = get_client(client_id) or client
+    except Exception:
+        LOGGER.exception("Failed to refresh client %s after pedals update", client_id)
+        refreshed = client
+
+    await query.message.reply_text(f"✅ Педали обновлены: {label}")
+    await _send_profile_menu(context, query.message.chat_id, refreshed)
+
+
+async def _handle_profile_relink_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or query.message is None:
+        return
+
+    await query.answer()
+    _reset_authorization_flow(context)
+    context.user_data[_RELINK_MODE_KEY] = True
+    await query.message.reply_text(
+        "Отправьте фамилию клиента, которого нужно привязать. "
+        "Создание новой анкеты отключено, пока текущая связь активна."
+    )
+
+
+async def _process_profile_edit_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    edit_state: Dict[str, str],
+) -> bool:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or message.text is None or user is None:
+        return False
+
+    field = edit_state.get("field")
+    if not field:
+        _clear_profile_edit_field(context)
+        return False
+
+    config = _PROFILE_EDIT_FIELDS.get(field)
+    if config is None:
+        _clear_profile_edit_field(context)
+        return False
+
+    raw_value = message.text.strip()
+    if not raw_value:
+        await message.reply_text("⚠️ Значение не должно быть пустым.")
+        return True
+
+    field_type = config.get("type")
+    if field_type == "text":
+        new_value: object = raw_value
+    elif field_type == "positive_float":
+        ok, parsed = _parse_positive_float(raw_value)
+        if not ok or parsed is None:
+            await message.reply_text("⚠️ Введите положительное число (например, 72.5).")
+            return True
+        new_value = parsed
+    else:
+        return False
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await message.reply_text("Не удалось найти вашу анкету. Используйте /start.")
+        _clear_profile_edit_field(context)
+        return True
+
+    client_id = client.get("id")
+    if not isinstance(client_id, int):
+        await message.reply_text("Анкета недоступна. Попробуйте позже.")
+        _clear_profile_edit_field(context)
+        return True
+
+    updates = _profile_field_updates(client, field, new_value)
+    try:
+        update_client_fields(client_id, **updates)
+    except Exception:
+        LOGGER.exception("Failed to update client %s field %s", client_id, field)
+        await message.reply_text("❌ Не удалось сохранить значение. Попробуйте позже.")
+        return True
+
+    _clear_profile_edit_field(context)
+
+    try:
+        refreshed = get_client(client_id) or client
+    except Exception:
+        LOGGER.exception("Failed to refresh client %s after manual edit", client_id)
+        refreshed = client
+
+    await message.reply_text(f"✅ {config.get('label', 'Поле')} обновлено.")
+    await _send_profile_menu(context, message.chat_id, refreshed)
+    return True
 
 
 async def _handle_form_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1980,6 +2530,7 @@ async def _handle_form_first_name(update: Update, context: ContextTypes.DEFAULT_
         )
     else:
         await message.reply_text("🖊️ Введите свою фамилию:")
+    _set_form_step(context, FORM_LAST_NAME)
     return FORM_LAST_NAME
 
 
@@ -1998,6 +2549,7 @@ async def _handle_form_last_name(update: Update, context: ContextTypes.DEFAULT_T
     await message.reply_text(
         "⚖️ Введите ваш вес в килограммах (например, 72.5). Это обязательное поле."
     )
+    _set_form_step(context, FORM_WEIGHT)
     return FORM_WEIGHT
 
 
@@ -2021,6 +2573,7 @@ async def _keep_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.message.reply_text(
         "⚖️ Введите ваш вес в килограммах (например, 72.5). Это обязательное поле."
     )
+    _set_form_step(context, FORM_WEIGHT)
     return FORM_WEIGHT
 
 
@@ -2041,6 +2594,7 @@ async def _handle_form_weight(update: Update, context: ContextTypes.DEFAULT_TYPE
     await message.reply_text(
         "📏 Введите ваш рост в сантиметрах (например, 178). Это обязательное поле."
     )
+    _set_form_step(context, FORM_HEIGHT)
     return FORM_HEIGHT
 
 
@@ -2059,6 +2613,7 @@ async def _handle_form_height(update: Update, context: ContextTypes.DEFAULT_TYPE
     form = _get_form(context)
     form["height"] = height
     await _send_gender_prompt(context, message.chat_id)
+    _set_form_step(context, FORM_GENDER)
     return FORM_GENDER
 
 
@@ -2088,6 +2643,7 @@ async def _handle_gender_selection(update: Update, context: ContextTypes.DEFAULT
         LOGGER.debug("Failed to edit gender selection message", exc_info=True)
 
     await _send_ftp_prompt(context, query.message.chat_id)
+    _set_form_step(context, FORM_FTP)
     return FORM_FTP
 
 
@@ -2113,6 +2669,7 @@ async def _handle_form_ftp(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     form = _get_form(context)
     form["ftp"] = 150.0 if ftp is None else ftp
     await _send_pedals_prompt(context, message.chat_id)
+    _set_form_step(context, FORM_PEDALS)
     return FORM_PEDALS
 
 
@@ -2129,6 +2686,7 @@ async def _skip_ftp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     except Exception:
         LOGGER.debug("Failed to edit FTP skip message", exc_info=True)
     await _send_pedals_prompt(context, query.message.chat_id)
+    _set_form_step(context, FORM_PEDALS)
     return FORM_PEDALS
 
 
@@ -2163,6 +2721,7 @@ async def _handle_pedals_selection(update: Update, context: ContextTypes.DEFAULT
     except Exception:
         LOGGER.debug("Failed to edit pedals selection message", exc_info=True)
     await _send_goal_prompt(context, query.message.chat_id)
+    _set_form_step(context, FORM_GOAL)
     return FORM_GOAL
 
 
@@ -2233,8 +2792,8 @@ async def _finalize_client_creation(
         or gender not in {"male", "female"}
     ):
         await send_message("⚠️ Анкета заполнена не полностью. Начните заново командой /start.")
-        _clear_form(context)
-        return ASK_LAST_NAME
+        _reset_authorization_flow(context)
+        return ConversationHandler.END
 
     try:
         client = create_client(
@@ -2288,14 +2847,13 @@ async def _finalize_client_creation(
             "⚠️ Запись создана, но привязка не удалась. Попробуйте ещё раз позже или обратитесь к администратору."
         )
 
-    _clear_form(context)
+    _reset_authorization_flow(context)
 
-    return ASK_LAST_NAME
+    return ConversationHandler.END
 
 
 async def _cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    _clear_candidates(context)
-    _clear_form(context)
+    _reset_authorization_flow(context)
     message = update.effective_message
     if message is not None:
         await message.reply_text("Авторизация прервана. Чтобы начать заново, используйте /start.")
@@ -2514,9 +3072,13 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
                 MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_form_goal),
             ],
         },
-        fallbacks=[CommandHandler("cancel", _cancel_handler)],
+        fallbacks=[
+            CommandHandler("cancel", _cancel_handler),
+            CommandHandler("start", _start_handler),
+        ],
         name="client_authorization",
         persistent=False,
+        allow_reentry=True,
     )
 
     application.add_handler(conversation)
@@ -2554,6 +3116,10 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     
     # Placeholder for future document handlers
     
+    application.add_handler(CallbackQueryHandler(_handle_profile_edit_callback, pattern=r"^profile:edit:[a-z_]+$"))
+    application.add_handler(CallbackQueryHandler(_handle_profile_gender_selection, pattern=r"^profile:set:gender:(male|female)$"))
+    application.add_handler(CallbackQueryHandler(_handle_profile_pedals_selection, pattern=r"^profile:set:pedals:[^:]+$"))
+    application.add_handler(CallbackQueryHandler(_handle_profile_relink_callback, pattern=r"^profile:relink$"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _fallback_text_handler))
     application.add_handler(CallbackQueryHandler(_handle_admin_decision, pattern=r"^(approve|reject):"))
     application.add_handler(CallbackQueryHandler(_handle_cancel_booking_callback, pattern=r"^cancel_booking:"))
