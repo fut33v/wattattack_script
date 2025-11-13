@@ -2114,10 +2114,18 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             LOGGER.exception("Failed to store user message")
 
     expectation = _describe_expected_input(context, user)
-    lines = [
-        expectation,
-        "Доступные команды:\n/start — привязать или создать анкету.\n/book — забронировать свободный слот.\n/mybookings — показать будущие записи.\n/history — показать историю.",
-    ]
+    lines = [expectation]
+
+    if user is not None:
+        link, _ = _fetch_linked_client(user.id)
+        if link:
+            lines.append(
+                "ℹ️ Переписка с оператором «Крутилки» пока доступна только через сообщения канала @krutilkavn."
+            )
+
+    lines.append(
+        "Доступные команды:\n/start — привязать или создать анкету.\n/book — забронировать свободный слот.\n/mybookings — показать будущие записи.\n/history — показать историю."
+    )
     await message.reply_text("\n\n".join(lines))
 
 
