@@ -46,6 +46,9 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 - **Activity notifications**: Notifier (and krutilkafitbot) send FIT files and metadata when new workouts appear. Admin list reused from the DB.
 - **Docker-ready**: `docker-compose.yml` provides services for bot (`bot`), scheduler (`scheduler`), and Postgres (`db`, exposed on host port 55432). Volume `postgres_data` persists DB state.
 
+## Contributor Guide
+See `AGENTS.md` for repository-wide guidelines on structure, workflows, and review expectations.
+
 ## Setup
 1. Install backend dependencies: `pip install -r requirements.txt` (Python 3.11+).
 2. Install frontend dependencies: `cd webapp/frontend && npm install` (Node.js 18+), затем вернитесь в корень `cd ../..`.
