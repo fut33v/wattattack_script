@@ -95,13 +95,23 @@ See `AGENTS.md` for repository-wide guidelines on structure, workflows, and revi
      addadmin - добавить администратора
      removeadmin - удалить администратора
      ```
-   - Для `krutilkafitbot`:
+  - Для `krutilkafitbot`:
      ```
      start - показать список аккаунтов
      help - подсказать доступные команды
      recent - последние N активностей для аккаунта
      latest - последняя активность каждого аккаунта
      ```
+  - Для `krutilkavnbot`:
+    ```
+    start - привязать Telegram к анкете или открыть меню редактирования данных
+    help - подсказать доступные команды
+    book - забронировать свободный слот
+    mybookings - показать будущие записи
+    history - показать историю посещений
+    cancel - отменить текущий ввод или бронирование
+    strava - подключить или отключить синхронизацию Strava
+    ```
 
 ## Usage Notes
 - **Administrators**: Only admins can invoke commands or interact with inline keyboards. Non-admins receive “Недостаточно прав”.
