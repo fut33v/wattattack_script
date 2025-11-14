@@ -59,6 +59,7 @@ type RacePayload = {
   sbp_phone: string;
   payment_instructions?: string | null;
   notes?: string | null;
+  description?: string | null;
   is_active: boolean;
   clusters: string[];
   slug?: string | null;
@@ -73,6 +74,7 @@ function readRacePayload(form: HTMLFormElement): RacePayload {
   const sbp = String(formData.get("sbp_phone") ?? "").trim();
   const paymentInstructions = String(formData.get("payment_instructions") ?? "").trim();
   const notes = String(formData.get("notes") ?? "").trim();
+  const description = String(formData.get("description") ?? "").trim();
   const slug = String(formData.get("slug") ?? "").trim();
   const isActive = formData.get("is_active") === "on";
   const clusters = buildClustersPayload(formData.get("clusters"));
@@ -83,6 +85,7 @@ function readRacePayload(form: HTMLFormElement): RacePayload {
     sbp_phone: sbp,
     payment_instructions: paymentInstructions || null,
     notes: notes || null,
+    description: description || null,
     is_active: isActive,
     clusters,
     slug: slug || null
@@ -328,6 +331,10 @@ export default function RacesPage() {
                   <textarea name="payment_instructions" rows={3} placeholder="Переведите по СБП и пришлите скрин." />
                 </label>
                 <label>
+                  Описание
+                  <textarea name="description" rows={3} placeholder="Коротко о формате, регламенте, трассе" />
+                </label>
+                <label>
                   Кластеры (каждый с новой строки)
                   <textarea name="clusters" rows={3} placeholder={"A — быстрые\nB — уверенные\nC — новичкам"} />
                 </label>
@@ -379,6 +386,10 @@ export default function RacesPage() {
                   <label>
                     Инструкции по оплате
                     <textarea name="payment_instructions" rows={3} defaultValue={selectedRaceDetail.payment_instructions ?? ""} />
+                  </label>
+                  <label>
+                    Описание
+                    <textarea name="description" rows={3} defaultValue={selectedRaceDetail.description ?? ""} />
                   </label>
                   <label>
                     Кластеры (каждый с новой строки)

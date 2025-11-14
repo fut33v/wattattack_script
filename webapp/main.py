@@ -1798,6 +1798,12 @@ async def api_create_race(request: Request, user=Depends(require_admin)):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "notes must be string")
         notes = notes.strip() or None
 
+    description = payload.get("description")
+    if description is not None:
+        if not isinstance(description, str):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "description must be string")
+        description = description.strip() or None
+
     clusters = _parse_clusters_payload(payload.get("clusters"))
 
     is_active_value = payload.get("is_active", True)
@@ -1822,6 +1828,7 @@ async def api_create_race(request: Request, user=Depends(require_admin)):
         payment_instructions=payment_instructions,
         clusters=clusters,
         notes=notes,
+        description=description,
         is_active=is_active,
         slug=slug_value,
     )
@@ -1866,6 +1873,11 @@ async def api_update_race(race_id: int, request: Request, user=Depends(require_a
         if notes is not None and not isinstance(notes, str):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "notes must be string")
         updates["notes"] = (notes or "").strip() or None
+    if "description" in payload:
+        description = payload.get("description")
+        if description is not None and not isinstance(description, str):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "description must be string")
+        updates["description"] = (description or "").strip() or None
     if "is_active" in payload:
         is_active_value = payload.get("is_active")
         if isinstance(is_active_value, bool):
@@ -2263,6 +2275,13 @@ def create_app() -> FastAPI:
         registrations = race_repository.list_registrations(race["id"])
         participants: list[dict] = []
         pending_count = 0
+        clusters_meta = race.get("clusters") or []
+        ordered_cluster_labels = []
+        for cluster in clusters_meta:
+            label = (cluster.get("label") or cluster.get("code") or "").strip()
+            if label:
+                ordered_cluster_labels.append(label)
+
         for entry in registrations:
             status_value = (entry.get("status") or "").lower()
             payload = {
@@ -2287,6 +2306,25 @@ def create_app() -> FastAPI:
             f"{int(price_value):,}".replace(",", " ") if isinstance(price_value, (int, float)) else None
         )
 
+        description_raw = (race.get("description") or "").strip()
+        if description_raw:
+            description_formatted = "<br>".join(description_raw.splitlines())
+        else:
+            description_formatted = None
+
+        grouped_participants: list[dict] = []
+        groups_map: dict[str, list] = {}
+        unassigned_label = "Кластер не назначен"
+        for item in participants:
+            label = (item.get("cluster") or "").strip() or unassigned_label
+            groups_map.setdefault(label, []).append(item)
+
+        for label in ordered_cluster_labels:
+            if label in groups_map:
+                grouped_participants.append({"label": label, "participants": groups_map.pop(label)})
+        for label in sorted(groups_map.keys()):
+            grouped_participants.append({"label": label, "participants": groups_map[label]})
+
         race_payload = {
             "title": race.get("title"),
             "date_label": _format_race_date_label(race.get("race_date")),
@@ -2294,6 +2332,7 @@ def create_app() -> FastAPI:
             "sbp_phone": race.get("sbp_phone"),
             "payment_instructions": race.get("payment_instructions"),
             "notes": race.get("notes"),
+            "description": description_formatted,
             "slug": race.get("slug"),
             "is_active": race.get("is_active"),
             "clusters": race.get("clusters") or [],
@@ -2305,6 +2344,7 @@ def create_app() -> FastAPI:
             {
                 "race": race_payload,
                 "participants": participants,
+                "participant_groups": grouped_participants,
                 "participants_count": len(participants),
                 "pending_count": pending_count,
                 "share_url": share_url,

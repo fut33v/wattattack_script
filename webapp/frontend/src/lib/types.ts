@@ -242,6 +242,7 @@ export interface RaceRow {
   sbp_phone: string;
   payment_instructions?: string | null;
   notes?: string | null;
+  description?: string | null;
   is_active: boolean;
   clusters: RaceCluster[];
   pending_count?: number | null;

@@ -94,22 +94,6 @@
         color: #111827;
       }
 
-      .share-box {
-        margin-top: 8px;
-        font-size: 14px;
-        color: #475569;
-      }
-
-      .share-box code {
-        display: inline-block;
-        padding: 4px 8px;
-        border-radius: 8px;
-        background: rgba(15, 23, 42, 0.08);
-        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-        font-size: 13px;
-        word-break: break-all;
-      }
-
       section {
         background: #fff;
         border-radius: 18px;
@@ -161,6 +145,16 @@
         font-size: 15px;
       }
 
+      .cluster-block {
+        margin-bottom: 24px;
+      }
+
+      .cluster-title {
+        margin: 0 0 10px;
+        font-size: 18px;
+        color: #1f2937;
+      }
+
       @media (max-width: 640px) {
         .meta-grid {
           grid-template-columns: 1fr;
@@ -176,10 +170,9 @@
         <header>
           <h1>{{ race.title }}</h1>
           <p>Дата: {{ race.date_label or "уточняется" }}</p>
-          <div class="share-box">
-            Публичная ссылка:
-            <code>{{ share_url }}</code>
-          </div>
+          {% if race.description %}
+            <p style="color: #475569; font-size: 15px;">{{ race.description | safe }}</p>
+          {% endif %}
         </header>
 
         <div class="meta-grid">
@@ -199,21 +192,26 @@
 
         <section>
           <h2>Подтверждённые участники</h2>
-          {% if participants %}
-            <ol class="participants-list">
-              {% for item in participants %}
-                <li class="participant-card">
-                  <div class="participant-name">{{ loop.index }}. {{ item.name }}</div>
-                  <div class="participant-cluster">
-                    {% if item.cluster %}
-                      Кластер: {{ item.cluster }}
-                    {% else %}
-                      Кластер уточняется
-                    {% endif %}
-                  </div>
-                </li>
-              {% endfor %}
-            </ol>
+          {% if participant_groups %}
+            {% for group in participant_groups %}
+              <div class="cluster-block">
+                <h3 class="cluster-title">{{ group.label }} · {{ group.participants|length }}</h3>
+                <ol class="participants-list">
+                  {% for item in group.participants %}
+                    <li class="participant-card">
+                      <div class="participant-name">{{ loop.index }}. {{ item.name }}</div>
+                      <div class="participant-cluster">
+                        {% if item.cluster %}
+                          Кластер: {{ item.cluster }}
+                        {% else %}
+                          Кластер уточняется
+                        {% endif %}
+                      </div>
+                    </li>
+                  {% endfor %}
+                </ol>
+              </div>
+            {% endfor %}
           {% else %}
             <div class="empty-state">Пока нет подтверждённых участников.</div>
           {% endif %}

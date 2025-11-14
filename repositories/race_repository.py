@@ -42,6 +42,7 @@ def ensure_tables() -> None:
         cur.execute("ALTER TABLE races ADD COLUMN IF NOT EXISTS clusters JSONB NOT NULL DEFAULT '[]'::jsonb")
         cur.execute("ALTER TABLE races ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE")
         cur.execute("ALTER TABLE races ADD COLUMN IF NOT EXISTS slug TEXT")
+        cur.execute("ALTER TABLE races ADD COLUMN IF NOT EXISTS description TEXT")
         cur.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS races_slug_idx ON races (slug) WHERE slug IS NOT NULL"
         )
@@ -207,6 +208,7 @@ def create_race(
     payment_instructions: Optional[str],
     clusters: Optional[Sequence[Any]] = None,
     notes: Optional[str] = None,
+    description: Optional[str] = None,
     is_active: bool = True,
     slug: Optional[str] = None,
 ) -> Dict:
@@ -217,8 +219,8 @@ def create_race(
         final_slug = _allocate_unique_slug(cur, base_slug)
         cur.execute(
             """
-            INSERT INTO races (title, race_date, price_rub, sbp_phone, payment_instructions, clusters, notes, is_active, slug)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO races (title, race_date, price_rub, sbp_phone, payment_instructions, clusters, notes, description, is_active, slug)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
@@ -229,6 +231,7 @@ def create_race(
                 payment_instructions,
                 Json(clusters_payload),
                 notes,
+                description,
                 is_active,
                 final_slug,
             ),
@@ -294,6 +297,9 @@ def update_race(race_id: int, **fields: Any) -> Optional[Dict]:
             values.append(Json(normalized))
         elif key == "slug":
             slug_override = _normalize_race_slug(value)
+        elif key == "description":
+            assignments.append("description = %s")
+            values.append(value)
         else:
             assignments.append(f"{key} = %s")
             values.append(value)
