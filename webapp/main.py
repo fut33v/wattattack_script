@@ -38,6 +38,7 @@ from repositories import (
     instructors_repository,
     layout_repository,
     message_repository,
+    race_repository,
     schedule_repository,
     trainers_repository,
 )
@@ -75,6 +76,42 @@ def _json_success(payload: dict) -> JSONResponse:
     return JSONResponse(payload)
 
 
+def _send_telegram_message(chat_id: int, text: str, *, parse_mode: str | None = None) -> bool:
+    settings = get_settings()
+    bot_token = settings.krutilkavn_bot_token
+    if not bot_token:
+        log.warning("KRUTILKAVN_BOT_TOKEN not configured; cannot send Telegram message")
+        return False
+
+    payload = {
+        "chat_id": str(chat_id),
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json=payload,
+            timeout=10,
+        )
+    except Exception:
+        log.exception("Failed to send Telegram message to %s", chat_id)
+        return False
+
+    if response.status_code != 200:
+        log.warning(
+            "Telegram API error for chat %s: %s %s",
+            chat_id,
+            response.status_code,
+            response.text,
+        )
+        return False
+    return True
+
+
 api = APIRouter(prefix="/api", tags=["api"])
 
 SCHEDULE_SESSION_KINDS = {"self_service", "instructor"}
@@ -87,6 +124,11 @@ RESERVATION_STATUS_ALLOWED = {
     "pending",
     "waitlist",
     "blocked",
+}
+RACE_REGISTRATION_STATUSES = {
+    race_repository.RACE_STATUS_PENDING,
+    race_repository.RACE_STATUS_APPROVED,
+    race_repository.RACE_STATUS_REJECTED,
 }
 
 WEEKDAY_SHORT_NAMES = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
@@ -134,6 +176,117 @@ def _parse_iso_time(field: str, value: object) -> time:
     raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}")
 
 
+def _parse_positive_int(field: str, value: object) -> int:
+    if isinstance(value, int):
+        if value <= 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{field} must be positive")
+        return value
+    if isinstance(value, float):
+        if value <= 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{field} must be positive")
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{field} is required")
+        try:
+            parsed = int(stripped)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}") from exc
+        if parsed <= 0:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{field} must be positive")
+        return parsed
+    raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}")
+
+
+def _parse_clusters_payload(value: object) -> list[dict[str, str] | str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        clusters: list[dict[str, str] | str] = []
+        for entry in value:
+            if isinstance(entry, str):
+                label = entry.strip()
+                if label:
+                    clusters.append(label)
+            elif isinstance(entry, dict):
+                label = str(entry.get("label") or entry.get("title") or "").strip()
+                if label:
+                    cluster: dict[str, str] = {"label": label}
+                    code = entry.get("code")
+                    if isinstance(code, str) and code.strip():
+                        cluster["code"] = code.strip()
+                    clusters.append(cluster)
+        return clusters
+    if isinstance(value, str):
+        tokens = [token.strip() for token in value.replace(",", "\n").splitlines()]
+        return [token for token in tokens if token]
+    raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid clusters payload")
+
+
+def _format_race_date_label(value: object) -> Optional[str]:
+    if isinstance(value, date):
+        return value.strftime("%d.%m.%Y")
+    if isinstance(value, str):
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+            try:
+                parsed = datetime.strptime(value, fmt).date()
+                return parsed.strftime("%d.%m.%Y")
+            except ValueError:
+                continue
+        return value.strip() or None
+    return None
+
+
+def _format_registration_status_message(status_value: str) -> Optional[str]:
+    status_value = (status_value or "").lower()
+    if status_value == race_repository.RACE_STATUS_APPROVED:
+        return "✅ Оплата подтверждена! Ждём вас на старте."
+    if status_value == race_repository.RACE_STATUS_REJECTED:
+        return "❌ Оплату не удалось подтвердить. Свяжитесь с администратором для уточнения."
+    if status_value == race_repository.RACE_STATUS_PENDING:
+        return "⌛ Оплата ожидает проверки. Мы сообщим дополнительно после подтверждения."
+    return None
+
+
+def _notify_registration_update(old_record: dict, new_record: dict, race: dict) -> None:
+    tg_user_id = new_record.get("tg_user_id")
+    if not tg_user_id:
+        return
+
+    old_status = (old_record.get("status") or "").lower()
+    new_status = (new_record.get("status") or "").lower()
+    status_changed = old_status != new_status
+
+    old_cluster = (old_record.get("cluster_label") or "").strip()
+    new_cluster = (new_record.get("cluster_label") or "").strip()
+    cluster_changed = old_cluster != new_cluster
+
+    if not status_changed and not cluster_changed:
+        return
+
+    header_parts = [f"🏁 {race.get('title') or 'Гонка'}"]
+    race_date_text = _format_race_date_label(race.get("race_date"))
+    if race_date_text:
+        header_parts.append(f"({race_date_text})")
+
+    lines = [" ".join(part for part in header_parts if part)]
+    if status_changed:
+        status_message = _format_registration_status_message(new_status)
+        if status_message:
+            lines.append(status_message)
+    if cluster_changed:
+        if new_cluster:
+            lines.append(f"📌 Вам назначен кластер {new_cluster}.")
+        else:
+            lines.append("📌 Кластер пока не назначен. Мы сообщим, как только обновим информацию.")
+
+    if len(lines) > 1:
+        success = _send_telegram_message(int(tg_user_id), "\n".join(lines))
+        if not success:
+            log.warning("Failed to notify user %s about race registration update", tg_user_id)
+
+
 def _serialize_slot(slot: dict) -> dict:
     serialized = dict(slot)
     slot_date = serialized.get("slot_date")
@@ -173,6 +326,55 @@ def _serialize_activity_id(activity_record: dict) -> dict:
     created_at = serialized.get("created_at")
     if hasattr(created_at, "isoformat"):
         serialized["created_at"] = created_at.isoformat()
+    return serialized
+
+
+def _serialize_race_registration(record: dict) -> dict:
+    serialized = dict(record)
+    for field in ("payment_submitted_at", "created_at", "updated_at"):
+        value = serialized.get(field)
+        if hasattr(value, "isoformat"):
+            serialized[field] = value.isoformat()
+    return serialized
+
+
+def _serialize_race(record: dict, *, include_registrations: bool = False) -> dict:
+    serialized = dict(record)
+    race_date = serialized.get("race_date")
+    if isinstance(race_date, date):
+        serialized["race_date"] = race_date.isoformat()
+    for field in ("created_at", "updated_at"):
+        value = serialized.get(field)
+        if hasattr(value, "isoformat"):
+            serialized[field] = value.isoformat()
+    slug_value = serialized.get("slug")
+    if slug_value is not None:
+        serialized["slug"] = str(slug_value).strip()
+
+    clusters = serialized.get("clusters") or []
+    if isinstance(clusters, list):
+        normalized_clusters = []
+        for entry in clusters:
+            if not isinstance(entry, dict):
+                continue
+            label = (entry.get("label") or "").strip()
+            code = (entry.get("code") or "").strip() or None
+            if label:
+                normalized_clusters.append({"label": label, "code": code})
+        serialized["clusters"] = normalized_clusters
+    for key in ("pending_count", "approved_count"):
+        value = serialized.get(key)
+        if value is not None:
+            try:
+                serialized[key] = int(value)
+            except (TypeError, ValueError):
+                pass
+
+    if include_registrations:
+        registrations = serialized.pop("registrations", None)
+        if registrations is None and serialized.get("id") is not None:
+            registrations = race_repository.list_registrations(serialized["id"])
+        serialized["registrations"] = [_serialize_race_registration(row) for row in registrations or []]
     return serialized
 
 
@@ -1564,6 +1766,211 @@ def api_remove_admin(
     return {"status": "ok"}
 
 
+@api.get("/races")
+def api_list_races(user=Depends(require_admin)):
+    rows = race_repository.list_races()
+    return _json_success({"items": [_serialize_race(row) for row in rows]})
+
+
+@api.post("/races")
+async def api_create_race(request: Request, user=Depends(require_admin)):
+    payload = await request.json()
+    title = payload.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "title is required")
+
+    race_date = _parse_iso_date("race_date", payload.get("race_date"))
+    price_rub = _parse_positive_int("price_rub", payload.get("price_rub"))
+
+    sbp_phone = payload.get("sbp_phone")
+    if not isinstance(sbp_phone, str) or not sbp_phone.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "sbp_phone is required")
+
+    payment_instructions = payload.get("payment_instructions")
+    if payment_instructions is not None:
+        if not isinstance(payment_instructions, str):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "payment_instructions must be string")
+        payment_instructions = payment_instructions.strip() or None
+
+    notes = payload.get("notes")
+    if notes is not None:
+        if not isinstance(notes, str):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "notes must be string")
+        notes = notes.strip() or None
+
+    clusters = _parse_clusters_payload(payload.get("clusters"))
+
+    is_active_value = payload.get("is_active", True)
+    if isinstance(is_active_value, bool):
+        is_active = is_active_value
+    elif is_active_value in (0, 1):
+        is_active = bool(is_active_value)
+    else:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "is_active must be boolean")
+
+    slug_value = payload.get("slug")
+    if slug_value is not None:
+        if not isinstance(slug_value, str):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "slug must be a string")
+        slug_value = slug_value.strip() or None
+
+    record = race_repository.create_race(
+        title=title.strip(),
+        race_date=race_date,
+        price_rub=price_rub,
+        sbp_phone=sbp_phone.strip(),
+        payment_instructions=payment_instructions,
+        clusters=clusters,
+        notes=notes,
+        is_active=is_active,
+        slug=slug_value,
+    )
+    return {"item": _serialize_race(record)}
+
+
+@api.get("/races/{race_id}")
+def api_get_race(race_id: int, user=Depends(require_admin)):
+    record = race_repository.get_race(race_id)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Race not found")
+    record["registrations"] = race_repository.list_registrations(race_id)
+    return {"item": _serialize_race(record, include_registrations=True)}
+
+
+@api.patch("/races/{race_id}")
+async def api_update_race(race_id: int, request: Request, user=Depends(require_admin)):
+    payload = await request.json()
+    updates: dict[str, object] = {}
+
+    if "title" in payload:
+        title = payload.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "title must be non-empty string")
+        updates["title"] = title.strip()
+    if "race_date" in payload:
+        updates["race_date"] = _parse_iso_date("race_date", payload.get("race_date"))
+    if "price_rub" in payload:
+        updates["price_rub"] = _parse_positive_int("price_rub", payload.get("price_rub"))
+    if "sbp_phone" in payload:
+        sbp_phone = payload.get("sbp_phone")
+        if not isinstance(sbp_phone, str) or not sbp_phone.strip():
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "sbp_phone must be non-empty string")
+        updates["sbp_phone"] = sbp_phone.strip()
+    if "payment_instructions" in payload:
+        payment_instructions = payload.get("payment_instructions")
+        if payment_instructions is not None and not isinstance(payment_instructions, str):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "payment_instructions must be string")
+        updates["payment_instructions"] = (payment_instructions or "").strip() or None
+    if "notes" in payload:
+        notes = payload.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "notes must be string")
+        updates["notes"] = (notes or "").strip() or None
+    if "is_active" in payload:
+        is_active_value = payload.get("is_active")
+        if isinstance(is_active_value, bool):
+            updates["is_active"] = is_active_value
+        elif is_active_value in (0, 1):
+            updates["is_active"] = bool(is_active_value)
+        else:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "is_active must be boolean")
+    if "clusters" in payload:
+        updates["clusters"] = _parse_clusters_payload(payload.get("clusters"))
+    if "slug" in payload:
+        slug_value = payload.get("slug")
+        if slug_value is not None and not isinstance(slug_value, str):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "slug must be a string")
+        updates["slug"] = (slug_value or "").strip() or None
+
+    if not updates:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nothing to update")
+
+    record = race_repository.update_race(race_id, **updates)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Race not found")
+    return {"item": _serialize_race(record)}
+
+
+@api.patch("/races/{race_id}/registrations/{registration_id}")
+async def api_update_race_registration(race_id: int, registration_id: int, request: Request, user=Depends(require_admin)):
+    payload = await request.json()
+    if not payload:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Empty payload")
+
+    race = race_repository.get_race(race_id)
+    if not race:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Race not found")
+
+    existing_record = race_repository.get_registration_by_id(registration_id)
+    if not existing_record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Registration not found")
+
+    updates: dict[str, object] = {}
+    if "status" in payload:
+        status_value = payload.get("status")
+        if status_value not in RACE_REGISTRATION_STATUSES:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid status")
+        updates["status"] = status_value
+
+    if "cluster_code" in payload:
+        cluster_code = payload.get("cluster_code")
+        cluster_label = None
+        if cluster_code in (None, "", "none"):
+            updates["cluster_code"] = None
+            updates["cluster_label"] = None
+        else:
+            cluster = next(
+                (entry for entry in race.get("clusters", []) if entry.get("code") == cluster_code),
+                None,
+            )
+            if not cluster:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Unknown cluster")
+            cluster_label = cluster.get("label")
+            updates["cluster_code"] = cluster.get("code")
+            updates["cluster_label"] = cluster_label
+
+    if "notes" in payload:
+        notes = payload.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "notes must be string")
+        updates["notes"] = (notes or "").strip() or None
+
+    if not updates:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nothing to update")
+
+    record = race_repository.update_registration(
+        registration_id,
+        status=updates.get("status"),
+        cluster_code=updates.get("cluster_code"),
+        cluster_label=updates.get("cluster_label"),
+        notes=updates.get("notes"),
+    )
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Registration not found")
+
+    detailed = race_repository.get_registration_by_id(registration_id) or record
+
+    try:
+        _notify_registration_update(existing_record, detailed, race)
+    except Exception:
+        log.exception("Failed to send Telegram notification for registration %s", registration_id)
+
+    return {"item": _serialize_race_registration(detailed)}
+
+
+@api.delete("/races/{race_id}/registrations/{registration_id}")
+def api_delete_race_registration(race_id: int, registration_id: int, user=Depends(require_admin)):
+    race = race_repository.get_race(race_id)
+    if not race:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Race not found")
+
+    deleted = race_repository.delete_registration(race_id, registration_id)
+    if not deleted:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Registration not found")
+
+    return {"status": "ok"}
+
+
 @api.get("/client-links")
 def api_client_links(user=Depends(require_admin)):
     rows = client_link_repository.list_links()
@@ -1844,6 +2251,70 @@ def create_app() -> FastAPI:
     @app.get("/schedule")
     def schedule_default():
         return RedirectResponse(url="/schedule/current_week", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    @app.get("/race/{slug}", response_class=HTMLResponse)
+    def public_race_page(slug: str, request: Request):
+        context = {"request": request}
+        race = race_repository.get_race_by_slug(slug)
+        if not race:
+            context["error"] = "Гонка не найдена или ещё не опубликована."
+            return templates.TemplateResponse("public_race.html", context)
+
+        registrations = race_repository.list_registrations(race["id"])
+        participants: list[dict] = []
+        pending_count = 0
+        for entry in registrations:
+            status_value = (entry.get("status") or "").lower()
+            payload = {
+                "name": entry.get("client_name")
+                or entry.get("tg_full_name")
+                or (f"@{entry.get('tg_username')}" if entry.get("tg_username") else f"ID {entry.get('client_id')}"),
+                "cluster": entry.get("cluster_label"),
+                "notes": entry.get("notes"),
+            }
+            submitted = entry.get("payment_submitted_at")
+            if hasattr(submitted, "isoformat"):
+                payload["submitted"] = submitted.isoformat()
+            elif submitted:
+                payload["submitted"] = str(submitted)
+            if status_value == race_repository.RACE_STATUS_APPROVED:
+                participants.append(payload)
+            elif status_value == race_repository.RACE_STATUS_PENDING:
+                pending_count += 1
+
+        price_value = race.get("price_rub")
+        price_label = (
+            f"{int(price_value):,}".replace(",", " ") if isinstance(price_value, (int, float)) else None
+        )
+
+        race_payload = {
+            "title": race.get("title"),
+            "date_label": _format_race_date_label(race.get("race_date")),
+            "price_label": price_label,
+            "sbp_phone": race.get("sbp_phone"),
+            "payment_instructions": race.get("payment_instructions"),
+            "notes": race.get("notes"),
+            "slug": race.get("slug"),
+            "is_active": race.get("is_active"),
+            "clusters": race.get("clusters") or [],
+        }
+
+        share_url = f"{request.url.scheme}://{request.url.netloc}/race/{race_payload['slug']}"
+
+        context.update(
+            {
+                "race": race_payload,
+                "participants": participants,
+                "participants_count": len(participants),
+                "pending_count": pending_count,
+                "share_url": share_url,
+            }
+        )
+        return templates.TemplateResponse("public_race.html", context)
+
+    @app.get("/race")
+    def race_default_redirect():
+        return RedirectResponse(url="/schedule", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
     @app.get("/auth/telegram")
     async def telegram_auth(request: Request, next: Optional[str] = None):

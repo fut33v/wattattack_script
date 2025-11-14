@@ -10,5 +10,6 @@ __all__ = [
     "instructors_repository",
     "schedule_repository",
     "message_repository",
+    "race_repository",
     "db_utils",
 ]

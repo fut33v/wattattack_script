@@ -19,7 +19,7 @@ from telegram.ext import (
     filters,
 )
 
-from repositories import bikes_repository, message_repository, schedule_repository, trainers_repository
+from repositories import bikes_repository, message_repository, race_repository, schedule_repository, trainers_repository
 from repositories.client_repository import create_client, get_client, search_clients, update_client_fields
 from repositories.client_link_repository import (
     get_link_by_client,
@@ -45,6 +45,7 @@ _PENDING_APPROVALS_KEY: Final[str] = "krutilkavnbot:pending_approvals"
 _LAST_SEARCH_KEY: Final[str] = "krutilkavnbot:last_name"
 _BOOKING_STATE_KEY: Final[str] = "krutilkavnbot:booking"
 _MY_BOOKINGS_CACHE_KEY: Final[str] = "krutilkavnbot:my_bookings"
+_RACE_CONTEXT_KEY: Final[str] = "krutilkavnbot:race_flow"
 _STATUS_LABELS: Final[Dict[str, str]] = {
     "booked": "Записан",
     "available": "Свободно",
@@ -73,6 +74,28 @@ MAX_SUGGESTIONS: Final[int] = 6
 ) = range(10)
 
 BOOK_SELECT_DAY, BOOK_SELECT_SLOT = range(100, 102)
+(
+    RACE_COLLECT_BIKE,
+    RACE_COLLECT_AXLE,
+    RACE_COLLECT_GEARS,
+    RACE_WAITING_PROOF,
+) = range(200, 204)
+
+_RACE_AXLE_CHOICES: Final[Dict[str, str]] = {
+    "thru": "На ось (thru axle)",
+    "qr": "На эксцентрик",
+    "unknown": "Не знаю",
+}
+_RACE_GEARS_CHOICES: Final[List[str]] = ["7", "8", "9", "10", "11", "12", "Не знаю"]
+
+
+def _gear_label_from_code(code: str) -> Optional[str]:
+    normalized_code = (code or "").strip().lower()
+    for option in _RACE_GEARS_CHOICES:
+        option_code = option.lower().replace(" ", "_")
+        if option_code == normalized_code:
+            return option
+    return None
 
 _FORM_STEP_HINTS: Final[Dict[int, str]] = {
     FORM_FIRST_NAME: "Сейчас ждём ваше имя (только текст).",
@@ -205,6 +228,14 @@ def _format_time_range(start_value: Any, end_value: Any) -> str:
     if not start or not end:
         return f"{start_value}-{end_value}"
     return f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
+
+
+def _format_price_rub(value: Any) -> str:
+    try:
+        amount = int(float(value))
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{amount:,}".replace(",", " ")
 
 
 def _format_slot_caption(slot: Dict[str, Any]) -> str:
@@ -858,6 +889,19 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("\n".join(summary_lines))
     except Exception:
         LOGGER.debug("Failed to edit confirmation message", exc_info=True)
+
+    try:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id if query.message else user.id,
+            text=(
+                "💳 Стоимость занятия — 700 ₽.\n\n"
+                "Оплата переводом по СБП на телефон\n"
+                "+7 911 602 5498 (ТБАНК). Евгений Б.\n\n"
+                "Пожалуйста, оплатите заранее и покажите подтверждение перед тренировкой."
+            ),
+        )
+    except Exception:
+        LOGGER.debug("Failed to send payment reminder", exc_info=True)
         if query.message is not None:
             try:
                 await query.message.reply_text("\n".join(summary_lines))
@@ -1596,6 +1640,177 @@ def _current_form_step(context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
 
 def _clear_form_step(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop(_FORM_STEP_KEY, None)
+
+
+def _set_race_context(context: ContextTypes.DEFAULT_TYPE, payload: Dict[str, Any]) -> None:
+    context.user_data[_RACE_CONTEXT_KEY] = payload
+
+
+def _get_race_context(context: ContextTypes.DEFAULT_TYPE) -> Optional[Dict[str, Any]]:
+    race_payload = context.user_data.get(_RACE_CONTEXT_KEY)
+    return race_payload if isinstance(race_payload, dict) else None
+
+
+def _clear_race_context(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(_RACE_CONTEXT_KEY, None)
+
+
+def _current_race_registration_id(context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
+    race_payload = _get_race_context(context) or {}
+    value = race_payload.get("registration_id")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_race_date_text(value: Any) -> str:
+    date_value = _parse_date(value)
+    if date_value:
+        return date_value.strftime("%d.%m.%Y")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "уточняется"
+
+
+async def _prompt_race_bike_choice(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ Привезу свой велосипед", callback_data="race:bike:own"),
+            ],
+            [
+                InlineKeyboardButton("🚲 Нужен студийный велосипед", callback_data="race:bike:rent"),
+            ],
+        ]
+    )
+    await context.bot.send_message(
+        chat_id,
+        "Расскажите, приедете ли вы со своим велосипедом?",
+        reply_markup=keyboard,
+    )
+
+
+async def _prompt_race_axle_choice(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    buttons = [
+        [InlineKeyboardButton(label, callback_data=f"race:axle:{code}")]
+        for code, label in _RACE_AXLE_CHOICES.items()
+    ]
+    keyboard = InlineKeyboardMarkup(buttons)
+    await context.bot.send_message(
+        chat_id,
+        "Какой тип крепления у вашего велосипеда?",
+        reply_markup=keyboard,
+    )
+
+
+async def _prompt_race_gears_choice(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    buttons: List[List[InlineKeyboardButton]] = []
+    row: List[InlineKeyboardButton] = []
+    for option in _RACE_GEARS_CHOICES:
+        code = option.lower().replace(" ", "_")
+        row.append(InlineKeyboardButton(option, callback_data=f"race:gears:{code}"))
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    keyboard = InlineKeyboardMarkup(buttons)
+    await context.bot.send_message(
+        chat_id,
+        "Сколько передач у велосипеда?",
+        reply_markup=keyboard,
+    )
+
+
+async def _send_race_payment_prompt(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    registration: Dict[str, Any],
+) -> None:
+    race_ctx = _get_race_context(context) or {}
+    race_title = race_ctx.get("race_title") or "гонка"
+    race_date = _format_race_date_text(race_ctx.get("race_date"))
+    price_text = _format_price_rub(race_ctx.get("price_rub"))
+    sbp_phone = (race_ctx.get("sbp_phone") or "").strip()
+    payment_text = (race_ctx.get("payment_text") or "").strip()
+
+    lines = [
+        "Отлично! Остался последний шаг.",
+        f"🏁 Гонка: {race_title}",
+        f"📅 Дата: {race_date}",
+        f"💰 Стоимость участия: {price_text} ₽",
+    ]
+    if sbp_phone:
+        lines.append(f"💳 Переведите оплату по СБП на номер: {sbp_phone}")
+    if payment_text:
+        lines.append("")
+        lines.append(payment_text)
+    lines.append("")
+    lines.append("После перевода пришлите сюда скриншот подтверждения, и мы передадим его администраторам.")
+    if registration.get("status") == race_repository.RACE_STATUS_PENDING and registration.get("payment_submitted_at"):
+        lines.append(
+            "Мы уже получили от вас скриншот и отправили его на проверку. "
+            "Если хотите заменить его, просто отправьте новый."
+        )
+
+    await context.bot.send_message(chat_id, "\n".join(lines))
+
+
+async def _advance_race_survey(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+) -> int:
+    registration_id = _current_race_registration_id(context)
+    if registration_id is None:
+        await context.bot.send_message(
+            chat_id,
+            "Не удалось продолжить регистрацию. Попробуйте команду /race ещё раз.",
+        )
+        return ConversationHandler.END
+
+    record = race_repository.get_registration_by_id(registration_id)
+    if not record:
+        await context.bot.send_message(
+            chat_id,
+            "Не удалось найти вашу заявку. Попробуйте начать регистрацию заново командой /race.",
+        )
+        return ConversationHandler.END
+
+    bring_own_bike = record.get("bring_own_bike")
+    if bring_own_bike is None:
+        await _prompt_race_bike_choice(context, chat_id)
+        return RACE_COLLECT_BIKE
+    if bring_own_bike and not (record.get("axle_type") or "").strip():
+        await _prompt_race_axle_choice(context, chat_id)
+        return RACE_COLLECT_AXLE
+    if bring_own_bike and not (record.get("gears_label") or "").strip():
+        await _prompt_race_gears_choice(context, chat_id)
+        return RACE_COLLECT_GEARS
+
+    await _send_race_payment_prompt(context, chat_id, record)
+    return RACE_WAITING_PROOF
+
+
+async def _race_bike_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    if message:
+        await message.reply_text("Пожалуйста, используйте кнопки ниже, чтобы выбрать вариант.")
+    return RACE_COLLECT_BIKE
+
+
+async def _race_axle_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    if message:
+        await message.reply_text("Выберите подходящий вариант типа оси на клавиатуре ниже.")
+    return RACE_COLLECT_AXLE
+
+
+async def _race_gears_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    if message:
+        await message.reply_text("Укажите количество передач, выбрав один из вариантов на клавиатуре.")
+    return RACE_COLLECT_GEARS
 
 
 async def _remind_form_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, step: int) -> int:
@@ -3109,6 +3324,32 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
         persistent=False,
     )
     application.add_handler(booking_conversation)
+    race_conversation = ConversationHandler(
+        entry_points=[CommandHandler("race", _race_command_handler)],
+        states={
+            RACE_COLLECT_BIKE: [
+                CallbackQueryHandler(_handle_race_bike_choice, pattern=r"^race:bike:(own|rent)$"),
+                MessageHandler(~filters.COMMAND, _race_bike_reminder),
+            ],
+            RACE_COLLECT_AXLE: [
+                CallbackQueryHandler(_handle_race_axle_choice, pattern=r"^race:axle:(thru|qr|unknown)$"),
+                MessageHandler(~filters.COMMAND, _race_axle_reminder),
+            ],
+            RACE_COLLECT_GEARS: [
+                CallbackQueryHandler(_handle_race_gears_choice, pattern=r"^race:gears:[a-z0-9_]+$"),
+                MessageHandler(~filters.COMMAND, _race_gears_reminder),
+            ],
+            RACE_WAITING_PROOF: [
+                MessageHandler((filters.PHOTO | filters.Document.IMAGE), _handle_race_payment_proof),
+                MessageHandler(~filters.COMMAND, _race_prompt_payment),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", _race_cancel_handler)],
+        name="race_registration",
+        persistent=False,
+        allow_reentry=True,
+    )
+    application.add_handler(race_conversation)
     application.add_handler(CommandHandler("mybookings", _my_bookings_handler))
     application.add_handler(CommandHandler("history", _history_handler))
     application.add_handler(CommandHandler("cancel", _cancel_booking_handler))
@@ -3128,6 +3369,7 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application.add_handler(CallbackQueryHandler(_handle_profile_gender_selection, pattern=r"^profile:set:gender:(male|female)$"))
     application.add_handler(CallbackQueryHandler(_handle_profile_pedals_selection, pattern=r"^profile:set:pedals:[^:]+$"))
     application.add_handler(CallbackQueryHandler(_handle_profile_relink_callback, pattern=r"^profile:relink$"))
+    application.add_handler(CallbackQueryHandler(_handle_race_payment_callback, pattern=r"^race_payment:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _fallback_text_handler))
     application.add_handler(CallbackQueryHandler(_handle_admin_decision, pattern=r"^(approve|reject):"))
     application.add_handler(CallbackQueryHandler(_handle_cancel_booking_callback, pattern=r"^cancel_booking:"))
@@ -3137,6 +3379,427 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
 
 
 __all__ = ["create_application", "DEFAULT_GREETING"]
+
+
+async def _race_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return ConversationHandler.END
+
+    _clear_race_context(context)
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await message.reply_text("Сначала привяжите свою анкету через /start, затем повторите попытку.")
+        return ConversationHandler.END
+
+    client_id = client.get("id")
+    if not isinstance(client_id, int):
+        await message.reply_text("Не удалось определить вашу анкету. Обратитесь к администратору.")
+        return ConversationHandler.END
+
+    try:
+        race = race_repository.get_active_race(only_future=True)
+    except Exception:
+        LOGGER.exception("Failed to load active race")
+        race = None
+
+    if not race:
+        await message.reply_text("Сейчас нет активной регистрации на гонку. Следите за новостями!")
+        return ConversationHandler.END
+
+    race_id = race.get("id")
+    if not isinstance(race_id, int):
+        await message.reply_text("Не удалось определить текущую гонку. Попробуйте позже.")
+        return ConversationHandler.END
+
+    try:
+        registration = race_repository.upsert_registration(
+            race_id=race_id,
+            client_id=client_id,
+            tg_user_id=user.id,
+            tg_username=user.username,
+            tg_full_name=getattr(user, "full_name", None),
+        )
+    except Exception:
+        LOGGER.exception("Failed to upsert race registration for user %s", user.id)
+        await message.reply_text("Не удалось начать регистрацию на гонку. Попробуйте чуть позже.")
+        return ConversationHandler.END
+
+    registration_id = registration.get("id")
+    if not isinstance(registration_id, int):
+        await message.reply_text("Не удалось зафиксировать вашу заявку. Попробуйте чуть позже.")
+        return ConversationHandler.END
+
+    status = (registration.get("status") or "").lower()
+    if status == race_repository.RACE_STATUS_APPROVED:
+        cluster_label = (registration.get("cluster_label") or "").strip()
+        cluster_text = f" Кластер: {cluster_label}." if cluster_label else ""
+        race_date = _parse_date(race.get("race_date"))
+        date_text = race_date.strftime("%d.%m.%Y") if race_date else race.get("race_date")
+        await message.reply_text(
+            f"🏁 Вы уже зарегистрированы на гонку {race.get('title')}.\n"
+            f"📅 Дата: {date_text}\n"
+            "✅ Оплата подтверждена."
+            f"{cluster_text}"
+        )
+        _clear_race_context(context)
+        return ConversationHandler.END
+
+    client_label = _format_client_display_name(client)
+    sbp_phone = (race.get("sbp_phone") or "").strip()
+    payment_text = (race.get("payment_instructions") or "").strip()
+    race_date = _parse_date(race.get("race_date"))
+    date_text = race_date.strftime("%d.%m.%Y") if race_date else (race.get("race_date") or "уточняется")
+    price_text = _format_price_rub(race.get("price_rub"))
+
+    lines = [
+        f"🏁 Регистрация на гонку «{race.get('title')}» открыта!",
+        f"📅 Дата: {date_text}",
+        f"💰 Стоимость участия: {price_text} ₽",
+    ]
+    if sbp_phone:
+        lines.append(f"💳 Оплата по СБП на номер: {sbp_phone}")
+    if race.get("clusters"):
+        lines.append("📌 Кластер вам назначит администратор после проверки оплаты.")
+    lines.append("")
+    lines.append("Ответьте на несколько вопросов, чтобы мы подготовились к вашему старту.")
+
+    await message.reply_text("\n".join(lines))
+
+    _set_race_context(
+        context,
+        {
+            "race_id": race_id,
+            "race_title": race.get("title"),
+            "race_date": race.get("race_date"),
+            "price_rub": race.get("price_rub"),
+            "sbp_phone": sbp_phone,
+            "payment_text": payment_text,
+            "client_id": client_id,
+            "client_name": client_label,
+            "registration_id": registration_id,
+        },
+    )
+    return await _advance_race_survey(context, message.chat_id)
+
+
+async def _handle_race_payment_proof(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return RACE_WAITING_PROOF
+
+    race_context = _get_race_context(context)
+    if not race_context:
+        await message.reply_text("Сессия регистрации истекла. Отправьте команду /race заново.")
+        return ConversationHandler.END
+
+    file_id: Optional[str] = None
+    file_unique_id: Optional[str] = None
+
+    if message.photo:
+        photo = message.photo[-1]
+        file_id = photo.file_id
+        file_unique_id = getattr(photo, "file_unique_id", None)
+    elif message.document and (message.document.mime_type or "").startswith("image/"):
+        document = message.document
+        file_id = document.file_id
+        file_unique_id = getattr(document, "file_unique_id", None)
+    else:
+        await message.reply_text("Пожалуйста, отправьте скриншот или фотографию платежа.")
+        return RACE_WAITING_PROOF
+
+    if not file_id:
+        await message.reply_text("Не удалось обработать файл. Попробуйте ещё раз.")
+        return RACE_WAITING_PROOF
+
+    registration_id_value = race_context.get("registration_id")
+    try:
+        registration_id_int = int(registration_id_value)
+    except (TypeError, ValueError):
+        await message.reply_text("Сессия регистрации истекла. Отправьте команду /race заново.")
+        _clear_race_context(context)
+        return ConversationHandler.END
+
+    try:
+        record = race_repository.save_payment_proof(
+            registration_id=registration_id_int,
+            file_id=file_id,
+            file_unique_id=file_unique_id,
+            message_id=message.message_id,
+        )
+    except Exception:
+        LOGGER.exception("Failed to save race payment proof for registration %s", race_context.get("registration_id"))
+        await message.reply_text("Не удалось сохранить скриншот. Попробуйте отправить ещё раз.")
+        return RACE_WAITING_PROOF
+
+    if not record:
+        await message.reply_text("Не удалось сохранить скриншот. Попробуйте отправить ещё раз.")
+        return RACE_WAITING_PROOF
+
+    caption = (
+        f"🏁 Оплата гонки «{race_context.get('race_title')}»\n"
+        f"Клиент: {race_context.get('client_name')} (ID {race_context.get('client_id')})\n"
+        f"Telegram: {_format_user_label(user)}\n"
+        f"Регистрация ID: {registration_id_int}"
+    )
+
+    admin_ids = get_admin_ids()
+    approval_keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Подтвердить оплату",
+                    callback_data=f"race_payment:approve:{registration_id_int}",
+                )
+            ]
+        ]
+    )
+    for admin_id in admin_ids:
+        try:
+            await context.bot.send_photo(
+                chat_id=admin_id,
+                photo=file_id,
+                caption=caption,
+                reply_markup=approval_keyboard,
+            )
+        except Exception:
+            LOGGER.exception("Failed to forward race payment proof to admin %s", admin_id)
+
+    await message.reply_text(
+        "Спасибо! Мы получили скриншот и передали его администраторам. "
+        "После проверки оплаты вам сообщат и назначат кластер."
+    )
+    _clear_race_context(context)
+    return ConversationHandler.END
+
+
+async def _race_prompt_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    if message:
+        await message.reply_text("Пришлите скриншот или фото перевода, чтобы завершить регистрацию.")
+    return RACE_WAITING_PROOF
+
+
+async def _race_cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    _clear_race_context(context)
+    message = update.effective_message
+    if message:
+        await message.reply_text("Регистрация гонки отменена. Вы можете начать заново командой /race.")
+    return ConversationHandler.END
+
+
+async def _handle_race_bike_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query is None or query.data is None:
+        return RACE_COLLECT_BIKE
+
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Неизвестный выбор.", show_alert=True)
+        return RACE_COLLECT_BIKE
+
+    choice = parts[2]
+    if choice not in {"own", "rent"}:
+        await query.answer("Неизвестный выбор.", show_alert=True)
+        return RACE_COLLECT_BIKE
+
+    registration_id = _current_race_registration_id(context)
+    if registration_id is None:
+        await query.edit_message_text("Сессия регистрации истекла. Отправьте /race заново.")
+        _clear_race_context(context)
+        return ConversationHandler.END
+
+    bring_value = choice == "own"
+    try:
+        race_repository.update_registration(
+            registration_id,
+            bring_own_bike=bring_value,
+            axle_type=None if bring_value else "Студийный велосипед",
+            gears_label=None if bring_value else "Студийный велосипед",
+        )
+    except Exception:
+        LOGGER.exception("Failed to store bike preference for race registration %s", registration_id)
+        await query.answer("Не удалось сохранить выбор. Попробуйте ещё раз.", show_alert=True)
+        return RACE_COLLECT_BIKE
+
+    text = "Записали, что вы приедете со своим велосипедом." if bring_value else "Записали, что нужен студийный велосипед."
+    try:
+        await query.edit_message_text(text)
+    except Exception:
+        LOGGER.debug("Failed to edit bike choice message", exc_info=True)
+
+    if query.message:
+        return await _advance_race_survey(context, query.message.chat_id)
+    return ConversationHandler.END
+
+
+async def _handle_race_axle_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query is None or query.data is None:
+        return RACE_COLLECT_AXLE
+
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Неизвестный выбор.", show_alert=True)
+        return RACE_COLLECT_AXLE
+
+    choice = parts[2]
+    label = _RACE_AXLE_CHOICES.get(choice)
+    if label is None:
+        await query.answer("Неизвестный выбор.", show_alert=True)
+        return RACE_COLLECT_AXLE
+
+    registration_id = _current_race_registration_id(context)
+    if registration_id is None:
+        await query.edit_message_text("Сессия регистрации истекла. Отправьте /race заново.")
+        _clear_race_context(context)
+        return ConversationHandler.END
+
+    try:
+        race_repository.update_registration(
+            registration_id,
+            axle_type=label,
+        )
+    except Exception:
+        LOGGER.exception("Failed to store axle type for race registration %s", registration_id)
+        await query.answer("Не удалось сохранить выбор. Попробуйте ещё раз.", show_alert=True)
+        return RACE_COLLECT_AXLE
+
+    try:
+        await query.edit_message_text(f"Тип крепления: {label}.")
+    except Exception:
+        LOGGER.debug("Failed to edit axle choice message", exc_info=True)
+
+    if query.message:
+        return await _advance_race_survey(context, query.message.chat_id)
+    return ConversationHandler.END
+
+
+async def _handle_race_gears_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query is None or query.data is None:
+        return RACE_COLLECT_GEARS
+
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 3:
+        await query.answer("Неизвестный выбор.", show_alert=True)
+        return RACE_COLLECT_GEARS
+
+    label = _gear_label_from_code(parts[2])
+    if label is None:
+        await query.answer("Неизвестный выбор.", show_alert=True)
+        return RACE_COLLECT_GEARS
+
+    registration_id = _current_race_registration_id(context)
+    if registration_id is None:
+        await query.edit_message_text("Сессия регистрации истекла. Отправьте /race заново.")
+        _clear_race_context(context)
+        return ConversationHandler.END
+
+    try:
+        race_repository.update_registration(
+            registration_id,
+            gears_label=label,
+        )
+    except Exception:
+        LOGGER.exception("Failed to store gears info for race registration %s", registration_id)
+        await query.answer("Не удалось сохранить выбор. Попробуйте ещё раз.", show_alert=True)
+        return RACE_COLLECT_GEARS
+
+    try:
+        await query.edit_message_text(f"Количество передач: {label}.")
+    except Exception:
+        LOGGER.debug("Failed to edit gears choice message", exc_info=True)
+
+    if query.message:
+        return await _advance_race_survey(context, query.message.chat_id)
+    return ConversationHandler.END
+
+
+async def _handle_race_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None or not query.data:
+        return
+
+    await query.answer()
+    user = query.from_user
+    if not _is_admin_user(user):
+        await query.answer("Только администраторы могут подтверждать оплату.", show_alert=True)
+        return
+
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[0] != "race_payment" or parts[1] != "approve":
+        await query.answer("Неизвестное действие.", show_alert=True)
+        return
+
+    try:
+        registration_id = int(parts[2])
+    except ValueError:
+        await query.answer("Некорректный идентификатор заявки.", show_alert=True)
+        return
+
+    record = race_repository.get_registration_by_id(registration_id)
+    if not record:
+        await query.answer("Заявка не найдена.", show_alert=True)
+        return
+
+    current_status = (record.get("status") or "").lower()
+    if current_status == race_repository.RACE_STATUS_APPROVED:
+        await query.answer("Оплата уже подтверждена.", show_alert=True)
+        return
+
+    try:
+        race_repository.update_registration(
+            registration_id,
+            status=race_repository.RACE_STATUS_APPROVED,
+        )
+    except Exception:
+        LOGGER.exception("Failed to approve race registration %s", registration_id)
+        await query.answer("Не удалось подтвердить оплату. Попробуйте позже.", show_alert=True)
+        return
+
+    race_title = None
+    try:
+        race = race_repository.get_race(record.get("race_id"))
+        race_title = race.get("title") if race else None
+    except Exception:
+        race = None
+
+    caption = query.message.caption or query.message.text or ""
+    suffix = f"\n\n✅ Оплату подтвердил {_format_user_label(user)}"
+    try:
+        if query.message.photo:
+            await query.edit_message_caption(caption + suffix, reply_markup=None)
+        else:
+            await query.edit_message_text(caption + suffix, reply_markup=None)
+    except Exception:
+        LOGGER.debug("Failed to edit race payment approval message for registration %s", registration_id, exc_info=True)
+
+    tg_user_id = record.get("tg_user_id")
+    client_name = record.get("client_name") or record.get("tg_full_name") or record.get("tg_username")
+    user_text_parts = [
+        "✅ Оплата за гонку подтверждена!",
+    ]
+    if race_title:
+        user_text_parts.append(f"Гонка: {race_title}")
+    if client_name:
+        user_text_parts.append(f"Анкета: {client_name}")
+    user_text_parts.append("Мы сообщим дополнительно, когда администратор назначит кластер.")
+    if tg_user_id:
+        try:
+            await context.bot.send_message(tg_user_id, "\n".join(user_text_parts))
+        except Exception:
+            LOGGER.exception("Failed to notify user %s about approved race registration %s", tg_user_id, registration_id)
+
+    await query.answer("Оплата подтверждена.", show_alert=False)
+
+
 async def _my_bookings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     user = update.effective_user

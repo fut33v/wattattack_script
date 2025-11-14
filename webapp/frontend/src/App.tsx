@@ -22,6 +22,7 @@ import NotificationSettingsPage from "./pages/NotificationSettingsPage";
 import MessagingPage from "./pages/MessagingPage";
 import MessagesPage from "./pages/MessagesPage";
 import ActivitiesPage from "./pages/ActivitiesPage";
+import RacesPage from "./pages/RacesPage";
 
 import "./styles/layout.css";
 import "./styles/messaging.css";
@@ -69,6 +70,7 @@ export default function App() {
           <Route path="/schedule/manage" element={<SchedulePage />} />
           <Route path="/schedule/notifications" element={<NotificationsPage />} />
           <Route path="/activities" element={<ActivitiesPage />} />
+          <Route path="/races" element={<RacesPage />} />
           <Route path="/schedule/settings" element={<NotificationSettingsPage />} />
           <Route path="/messaging" element={<MessagingPage />} />
           <Route path="/messages" element={<MessagesPage />} />

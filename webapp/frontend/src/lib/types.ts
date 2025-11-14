@@ -227,3 +227,53 @@ export interface ActivityIdListResponse {
 export interface AccountListResponse {
   accounts: string[];
 }
+
+export interface RaceCluster {
+  code?: string | null;
+  label: string;
+}
+
+export interface RaceRow {
+  id: number;
+  title: string;
+  race_date: string;
+  price_rub: number;
+  slug: string;
+  sbp_phone: string;
+  payment_instructions?: string | null;
+  notes?: string | null;
+  is_active: boolean;
+  clusters: RaceCluster[];
+  pending_count?: number | null;
+  approved_count?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface RaceRegistration {
+  id: number;
+  race_id: number;
+  client_id: number;
+  client_name?: string | null;
+  status: string;
+  cluster_code?: string | null;
+  cluster_label?: string | null;
+  payment_submitted_at?: string | null;
+  tg_user_id: number;
+  tg_username?: string | null;
+  tg_full_name?: string | null;
+  notes?: string | null;
+  bring_own_bike?: boolean | null;
+  axle_type?: string | null;
+  gears_label?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface RaceListResponse {
+  items: RaceRow[];
+}
+
+export interface RaceDetailResponse {
+  item: RaceRow & { registrations: RaceRegistration[] };
+}
