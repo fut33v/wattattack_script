@@ -73,6 +73,7 @@ def ensure_tables() -> None:
                 bring_own_bike BOOLEAN,
                 axle_type TEXT,
                 gears_label TEXT,
+                race_mode TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
@@ -93,6 +94,7 @@ def ensure_tables() -> None:
         cur.execute("ALTER TABLE race_registrations ADD COLUMN IF NOT EXISTS bring_own_bike BOOLEAN")
         cur.execute("ALTER TABLE race_registrations ADD COLUMN IF NOT EXISTS axle_type TEXT")
         cur.execute("ALTER TABLE race_registrations ADD COLUMN IF NOT EXISTS gears_label TEXT")
+        cur.execute("ALTER TABLE race_registrations ADD COLUMN IF NOT EXISTS race_mode TEXT")
         conn.commit()
 
 
@@ -450,6 +452,7 @@ def update_registration(
     bring_own_bike: Optional[bool] = None,
     axle_type: Optional[str] = None,
     gears_label: Optional[str] = None,
+    race_mode: Optional[str] = None,
 ) -> Optional[Dict]:
     ensure_tables()
     updates: List[str] = []
@@ -474,6 +477,9 @@ def update_registration(
     if gears_label is not None:
         updates.append("gears_label = %s")
         values.append(gears_label)
+    if race_mode is not None:
+        updates.append("race_mode = %s")
+        values.append(race_mode)
     if not updates:
         return None
     updates.append("updated_at = NOW()")

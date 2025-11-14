@@ -233,7 +233,10 @@ export default function RacesPage() {
     setSelectedRaceId(raceId);
   }
 
-  function handleRegistrationSave(registration: RaceRegistration, payload: { status?: string; cluster_code?: string | null; notes?: string | null }) {
+  function handleRegistrationSave(
+    registration: RaceRegistration,
+    payload: { status?: string; cluster_code?: string | null; notes?: string | null; race_mode?: string | null }
+  ) {
     if (typeof selectedRaceId !== "number") return;
     registrationMutation.mutate({
       raceId: selectedRaceId,
@@ -451,7 +454,10 @@ interface RegistrationRowProps {
   registration: RaceRegistration;
   clusters: RaceCluster[];
   isSaving: boolean;
-  onSave: (registration: RaceRegistration, payload: { status: string; cluster_code: string | null; notes: string | null }) => void;
+  onSave: (
+    registration: RaceRegistration,
+    payload: { status: string; cluster_code: string | null; notes: string | null; race_mode: string | null }
+  ) => void;
   onDelete: (registration: RaceRegistration) => void;
   isDeleting: boolean;
 }
@@ -460,36 +466,52 @@ function RegistrationRow({ registration, clusters, isSaving, onSave, onDelete, i
   const [status, setStatus] = useState(registration.status);
   const [clusterCode, setClusterCode] = useState(registration.cluster_code ?? "");
   const [notes, setNotes] = useState(registration.notes ?? "");
+  const [mode, setMode] = useState(registration.race_mode ?? "");
 
   useEffect(() => {
     setStatus(registration.status);
     setClusterCode(registration.cluster_code ?? "");
     setNotes(registration.notes ?? "");
-  }, [registration.id, registration.status, registration.cluster_code, registration.notes]);
+    setMode(registration.race_mode ?? "");
+  }, [registration.id, registration.status, registration.cluster_code, registration.notes, registration.race_mode]);
 
   function handleSave() {
     onSave(registration, {
       status,
       cluster_code: clusterCode || null,
-      notes: notes.trim() || null
+      notes: notes.trim() || null,
+      race_mode: mode || null
     });
   }
 
+  const modeLabel =
+    mode === "online"
+      ? "Формат: Онлайн (у себя дома)"
+      : mode === "offline"
+        ? "Формат: Оффлайн (в Крутилке)"
+        : "Формат: не выбран";
+
   const bikePreference =
-    registration.bring_own_bike === true
-      ? "Со своим велосипедом"
-      : registration.bring_own_bike === false
-        ? "Нужен студийный велосипед (тип и передачи не требуются)"
-        : "Предпочтение не указано";
+    mode === "online"
+      ? "Онлайн участие — велосипед не требуется"
+      : registration.bring_own_bike === true
+        ? "Со своим велосипедом"
+        : registration.bring_own_bike === false
+          ? "Нужен студийный велосипед (тип и передачи не требуются)"
+          : "Предпочтение не указано";
 
   const axleLabel =
-    registration.bring_own_bike === false
-      ? "Студийный велосипед"
-      : registration.axle_type || "Тип оси не указана";
+    mode === "online"
+      ? "Онлайн — тип крепления не нужен"
+      : registration.bring_own_bike === false
+        ? "Студийный велосипед"
+        : registration.axle_type || "Тип оси не указана";
   const gearsLabel =
-    registration.bring_own_bike === false
-      ? "Студийный велосипед"
-      : registration.gears_label || "Передачи не указаны";
+    mode === "online"
+      ? "Онлайн — передачи не требуются"
+      : registration.bring_own_bike === false
+        ? "Студийный велосипед"
+        : registration.gears_label || "Передачи не указаны";
 
   return (
     <div className="race-registration-row">
@@ -499,12 +521,21 @@ function RegistrationRow({ registration, clusters, isSaving, onSave, onDelete, i
           Пользователь: @{registration.tg_username ?? "—"} · ID {registration.tg_user_id}
         </div>
         <div className="race-registration-meta">Отправлено: {formatDateTime(registration.payment_submitted_at)}</div>
+        <div className="race-registration-meta">{modeLabel}</div>
         <div className="race-registration-meta">{bikePreference}</div>
         <div className="race-registration-meta">
           {axleLabel} · {gearsLabel}
         </div>
       </div>
       <div className="race-registration-controls">
+        <label>
+          Формат участия
+          <select value={mode} onChange={(event) => setMode(event.target.value)}>
+            <option value="">Не выбран</option>
+            <option value="offline">Оффлайн (в Крутилке)</option>
+            <option value="online">Онлайн (у себя дома)</option>
+          </select>
+        </label>
         <label>
           Статус
           <select value={status} onChange={(event) => setStatus(event.target.value)}>

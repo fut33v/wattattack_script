@@ -130,6 +130,7 @@ RACE_REGISTRATION_STATUSES = {
     race_repository.RACE_STATUS_APPROVED,
     race_repository.RACE_STATUS_REJECTED,
 }
+RACE_REGISTRATION_MODES = {"offline", "online"}
 
 WEEKDAY_SHORT_NAMES = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 WEEKDAY_FULL_NAMES = (
@@ -1873,6 +1874,14 @@ async def api_update_race(race_id: int, request: Request, user=Depends(require_a
         if notes is not None and not isinstance(notes, str):
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "notes must be string")
         updates["notes"] = (notes or "").strip() or None
+    if "race_mode" in payload:
+        race_mode_value = payload.get("race_mode")
+        if race_mode_value is None:
+            updates["race_mode"] = None
+        elif isinstance(race_mode_value, str) and race_mode_value in RACE_REGISTRATION_MODES:
+            updates["race_mode"] = race_mode_value
+        else:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid race_mode")
     if "description" in payload:
         description = payload.get("description")
         if description is not None and not isinstance(description, str):
@@ -1956,6 +1965,7 @@ async def api_update_race_registration(race_id: int, registration_id: int, reque
         cluster_code=updates.get("cluster_code"),
         cluster_label=updates.get("cluster_label"),
         notes=updates.get("notes"),
+        race_mode=updates.get("race_mode"),
     )
     if not record:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registration not found")
@@ -2290,6 +2300,7 @@ def create_app() -> FastAPI:
                 or (f"@{entry.get('tg_username')}" if entry.get("tg_username") else f"ID {entry.get('client_id')}"),
                 "cluster": entry.get("cluster_label"),
                 "notes": entry.get("notes"),
+                "is_pending": False,
             }
             submitted = entry.get("payment_submitted_at")
             if hasattr(submitted, "isoformat"):
@@ -2299,7 +2310,9 @@ def create_app() -> FastAPI:
             if status_value == race_repository.RACE_STATUS_APPROVED:
                 participants.append(payload)
             elif status_value == race_repository.RACE_STATUS_PENDING:
+                payload["is_pending"] = True
                 pending_count += 1
+                participants.append(payload)
 
         price_value = race.get("price_rub")
         price_label = (

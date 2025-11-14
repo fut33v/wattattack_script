@@ -138,6 +138,19 @@
         color: #475569;
       }
 
+      .pending-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        background: #fee2e2;
+        color: #b91c1c;
+        border: 1px solid #fecaca;
+      }
+
       .empty-state {
         text-align: center;
         padding: 32px 16px;
@@ -207,6 +220,9 @@
                           Кластер уточняется
                         {% endif %}
                       </div>
+                      {% if item.is_pending %}
+                        <span class="pending-badge">БЕЗ ОПЛАТЫ!</span>
+                      {% endif %}
                     </li>
                   {% endfor %}
                 </ol>

@@ -267,6 +267,7 @@ export interface RaceRegistration {
   bring_own_bike?: boolean | null;
   axle_type?: string | null;
   gears_label?: string | null;
+  race_mode?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }

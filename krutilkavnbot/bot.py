@@ -75,11 +75,12 @@ MAX_SUGGESTIONS: Final[int] = 6
 
 BOOK_SELECT_DAY, BOOK_SELECT_SLOT = range(100, 102)
 (
+    RACE_SELECT_MODE,
     RACE_COLLECT_BIKE,
     RACE_COLLECT_AXLE,
     RACE_COLLECT_GEARS,
     RACE_WAITING_PROOF,
-) = range(200, 204)
+) = range(200, 205)
 
 _RACE_AXLE_CHOICES: Final[Dict[str, str]] = {
     "thru": "На ось (thru axle)",
@@ -87,6 +88,10 @@ _RACE_AXLE_CHOICES: Final[Dict[str, str]] = {
     "unknown": "Не знаю",
 }
 _RACE_GEARS_CHOICES: Final[List[str]] = ["7", "8", "9", "10", "11", "12", "Не знаю"]
+_RACE_MODE_CHOICES: Final[Dict[str, str]] = {
+    "offline": "🏟 Оффлайн (в Крутилке)",
+    "online": "💻 Онлайн (у себя дома)",
+}
 
 
 def _gear_label_from_code(code: str) -> Optional[str]:
@@ -1673,6 +1678,24 @@ def _format_race_date_text(value: Any) -> str:
     return "уточняется"
 
 
+async def _prompt_race_mode_choice(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    buttons = [
+        [
+            InlineKeyboardButton(
+                label,
+                callback_data=f"race:mode:{code}",
+            )
+        ]
+        for code, label in _RACE_MODE_CHOICES.items()
+    ]
+    keyboard = InlineKeyboardMarkup(buttons)
+    await context.bot.send_message(
+        chat_id,
+        "Как будете участвовать?\n🏟 В Крутилке вживую или 💻 онлайн у себя дома?",
+        reply_markup=keyboard,
+    )
+
+
 async def _prompt_race_bike_choice(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
     keyboard = InlineKeyboardMarkup(
         [
@@ -1734,6 +1757,8 @@ async def _send_race_payment_prompt(
     price_text = _format_price_rub(race_ctx.get("price_rub"))
     sbp_phone = (race_ctx.get("sbp_phone") or "").strip()
     payment_text = (race_ctx.get("payment_text") or "").strip()
+    race_mode = (registration.get("race_mode") or "").strip().lower()
+    mode_label = _RACE_MODE_CHOICES.get(race_mode)
 
     lines = [
         "Отлично! Остался последний шаг.",
@@ -1741,6 +1766,8 @@ async def _send_race_payment_prompt(
         f"📅 Дата: {race_date}",
         f"💰 Стоимость участия: {price_text} ₽",
     ]
+    if mode_label:
+        lines.append(f"🛰 Формат: {mode_label}")
     if sbp_phone:
         lines.append(f"💳 Переведите оплату по СБП на номер: {sbp_phone}")
     if payment_text:
@@ -1777,6 +1804,15 @@ async def _advance_race_survey(
         )
         return ConversationHandler.END
 
+    race_mode = (record.get("race_mode") or "").strip().lower()
+    if race_mode not in _RACE_MODE_CHOICES:
+        await _prompt_race_mode_choice(context, chat_id)
+        return RACE_SELECT_MODE
+
+    if race_mode == "online":
+        await _send_race_payment_prompt(context, chat_id, record)
+        return RACE_WAITING_PROOF
+
     bring_own_bike = record.get("bring_own_bike")
     if bring_own_bike is None:
         await _prompt_race_bike_choice(context, chat_id)
@@ -1811,6 +1847,13 @@ async def _race_gears_reminder(update: Update, context: ContextTypes.DEFAULT_TYP
     if message:
         await message.reply_text("Укажите количество передач, выбрав один из вариантов на клавиатуре.")
     return RACE_COLLECT_GEARS
+
+
+async def _race_mode_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    message = update.effective_message
+    if message:
+        await message.reply_text("Выберите формат участия кнопками ниже.")
+    return RACE_SELECT_MODE
 
 
 async def _remind_form_progress(update: Update, context: ContextTypes.DEFAULT_TYPE, step: int) -> int:
@@ -3327,6 +3370,10 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     race_conversation = ConversationHandler(
         entry_points=[CommandHandler("race", _race_command_handler)],
         states={
+            RACE_SELECT_MODE: [
+                CallbackQueryHandler(_handle_race_mode_choice, pattern=r"^race:mode:(offline|online)$"),
+                MessageHandler(~filters.COMMAND, _race_mode_reminder),
+            ],
             RACE_COLLECT_BIKE: [
                 CallbackQueryHandler(_handle_race_bike_choice, pattern=r"^race:bike:(own|rent)$"),
                 MessageHandler(~filters.COMMAND, _race_bike_reminder),
@@ -3588,6 +3635,55 @@ async def _race_cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     message = update.effective_message
     if message:
         await message.reply_text("Регистрация гонки отменена. Вы можете начать заново командой /race.")
+    return ConversationHandler.END
+
+
+async def _handle_race_mode_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if query is None or query.data is None:
+        return RACE_SELECT_MODE
+
+    await query.answer()
+    parts = query.data.split(":")
+    if len(parts) != 3 or parts[0] != "race" or parts[1] != "mode":
+        await query.answer("Неизвестный выбор.", show_alert=True)
+        return RACE_SELECT_MODE
+
+    mode_code = parts[2]
+    if mode_code not in _RACE_MODE_CHOICES:
+        await query.answer("Неизвестный выбор.", show_alert=True)
+        return RACE_SELECT_MODE
+
+    registration_id = _current_race_registration_id(context)
+    if registration_id is None:
+        await query.edit_message_text("Сессия регистрации истекла. Отправьте /race заново.")
+        _clear_race_context(context)
+        return ConversationHandler.END
+
+    update_kwargs: Dict[str, Any] = {"race_mode": mode_code}
+    if mode_code == "online":
+        update_kwargs.update(
+            bring_own_bike=None,
+            axle_type=None,
+            gears_label=None,
+        )
+    try:
+        race_repository.update_registration(
+            registration_id,
+            **update_kwargs,
+        )
+    except Exception:
+        LOGGER.exception("Failed to store race mode for registration %s", registration_id)
+        await query.answer("Не удалось сохранить выбор. Попробуйте ещё раз.", show_alert=True)
+        return RACE_SELECT_MODE
+
+    try:
+        await query.edit_message_text(f"Формат участия: {_RACE_MODE_CHOICES[mode_code]}")
+    except Exception:
+        LOGGER.debug("Failed to edit race mode message", exc_info=True)
+
+    if query.message:
+        return await _advance_race_survey(context, query.message.chat_id)
     return ConversationHandler.END
 
 
