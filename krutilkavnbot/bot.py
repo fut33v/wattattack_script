@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable, Dict, Final, List, Optional, Tuple
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update, User
+from telegram import Bot, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update, User
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -28,8 +28,6 @@ from repositories.client_link_repository import (
     update_strava_tokens,
 )
 from repositories.admin_repository import get_admin_ids, is_admin
-
-import os
 
 import os
 
@@ -59,6 +57,7 @@ _STATUS_LABELS: Final[Dict[str, str]] = {
 
 DEFAULT_GREETING: Final[str] = "Здравствуйте!"
 MAX_SUGGESTIONS: Final[int] = 6
+ADMIN_BOT_TOKEN_ENV: Final[str] = "TELEGRAM_BOT_TOKEN"
 
 (
     ASK_LAST_NAME,
@@ -93,6 +92,9 @@ _RACE_MODE_CHOICES: Final[Dict[str, str]] = {
     "online": "💻 Онлайн (у себя дома)",
 }
 
+_ADMIN_NOTIFICATION_BOT: Optional[Bot] = None
+_ADMIN_NOTIFICATION_WARNED: bool = False
+
 
 def _gear_label_from_code(code: str) -> Optional[str]:
     normalized_code = (code or "").strip().lower()
@@ -101,6 +103,44 @@ def _gear_label_from_code(code: str) -> Optional[str]:
         if option_code == normalized_code:
             return option
     return None
+
+
+def _get_admin_notification_bot() -> Optional[Bot]:
+    global _ADMIN_NOTIFICATION_BOT, _ADMIN_NOTIFICATION_WARNED
+    token = os.environ.get(ADMIN_BOT_TOKEN_ENV)
+    if not token:
+        if not _ADMIN_NOTIFICATION_WARNED:
+            LOGGER.warning(
+                "TELEGRAM_BOT_TOKEN is not configured in krutilkavnbot; admin alerts will be sent from the client bot"
+            )
+            _ADMIN_NOTIFICATION_WARNED = True
+        return None
+    if _ADMIN_NOTIFICATION_BOT is None:
+        _ADMIN_NOTIFICATION_BOT = Bot(token=token)
+    return _ADMIN_NOTIFICATION_BOT
+
+
+async def _send_admin_notification(
+    chat_id: int,
+    text: str,
+    *,
+    context: ContextTypes.DEFAULT_TYPE | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    admin_bot = _get_admin_notification_bot()
+    if admin_bot is not None:
+        try:
+            await admin_bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+            return True
+        except Exception:
+            LOGGER.exception("Failed to send admin notification via adminbot", exc_info=True)
+    if context is not None:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+            return True
+        except Exception:
+            LOGGER.exception("Failed to send admin notification via krutilkavnbot fallback", exc_info=True)
+    return False
 
 _FORM_STEP_HINTS: Final[Dict[int, str]] = {
     FORM_FIRST_NAME: "Сейчас ждём ваше имя (только текст).",
@@ -902,7 +942,8 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
                 "💳 Стоимость занятия — 700 ₽.\n\n"
                 "Оплата переводом по СБП на телефон\n"
                 "+7 911 602 5498 (ТБАНК). Евгений Б.\n\n"
-                "Пожалуйста, оплатите заранее и покажите подтверждение перед тренировкой."
+                "Пожалуйста, оплатите заранее и покажите подтверждение перед тренировкой.\n\n"
+                "Если планы изменились — отправьте /cancel, чтобы освободить слот."
             ),
         )
     except Exception:
@@ -983,10 +1024,9 @@ async def _notify_admins_of_booking(
 
     # Send notification to all admins
     for admin_id in admin_ids:
-        try:
-            await context.bot.send_message(chat_id=admin_id, text=message)
-        except Exception as e:
-            LOGGER.warning(f"Failed to send booking notification to admin {admin_id}: {e}")
+        sent = await _send_admin_notification(admin_id, message, context=context)
+        if not sent:
+            LOGGER.warning("Failed to send booking notification to admin %s", admin_id)
 
 
 async def _send_confirmation_message(
@@ -1275,10 +1315,24 @@ async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.
         reservation_info.setdefault("session_kind", slot_details.get("session_kind"))
         reservation_info.setdefault("instructor_name", slot_details.get("instructor_name"))
 
+    try:
+        await _notify_admins_of_cancellation(context, client, reservation_info)
+    except Exception:
+        LOGGER.exception("Failed to notify admins about cancellation")
+
     # Format the cancellation message for the user
     slot_summary = _format_cancellation_summary(reservation_info)
 
-    await message.reply_text("\n\n".join(lines))
+    confirmation_lines = [
+        "✅ Запись отменена.",
+        f"Освобождён слот: {slot_summary}",
+        "Спасибо, что предупредили. Если захотите записаться снова — используйте /book."
+    ]
+    confirmation_text = "\n\n".join(confirmation_lines)
+    if query.message:
+        await query.edit_message_text(confirmation_text)
+    else:
+        await context.bot.send_message(chat_id=user.id, text=confirmation_text)
 
 
 async def _handle_strava_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1548,10 +1602,9 @@ async def _notify_admins_of_cancellation(
 
     # Send notification to all admins
     for admin_id in admin_ids:
-        try:
-            await context.bot.send_message(chat_id=admin_id, text=message)
-        except Exception as e:
-            LOGGER.warning(f"Failed to send cancellation notification to admin {admin_id}: {e}")
+        sent = await _send_admin_notification(admin_id, message, context=context)
+        if not sent:
+            LOGGER.warning("Failed to send cancellation notification to admin %s", admin_id)
 
 
 async def _notify_admins_of_new_message(
@@ -1588,15 +1641,15 @@ async def _notify_admins_of_new_message(
         f"✉️ Новое сообщение от пользователя!\n\n"
         f"Пользователь: {user_display}\n"
         f"ID: {user.id}\n\n"
-        f"Сообщение:\n{message_text}"
+        f"Сообщение:\n{message_text}\n\n"
+        f"Ответьте пользователю напрямую в личных сообщениях — бот пока не поддерживает переписку с клиентами."
     )
 
     # Send notification to all admins
     for admin_id in admin_ids:
-        try:
-            await context.bot.send_message(chat_id=admin_id, text=notification)
-        except Exception as e:
-            LOGGER.warning(f"Failed to send message notification to admin {admin_id}: {e}")
+        sent = await _send_admin_notification(admin_id, notification, context=context)
+        if not sent:
+            LOGGER.warning("Failed to send message notification to admin %s", admin_id)
 
 
 def _find_clients_by_last_name(last_name: str) -> List[Dict[str, Any]]:
@@ -1898,7 +1951,7 @@ async def _remind_form_progress(update: Update, context: ContextTypes.DEFAULT_TY
 def _describe_expected_input(
     context: ContextTypes.DEFAULT_TYPE,
     user: Optional[User] = None,
-) -> str:
+) -> Optional[str]:
     edit_state = _profile_edit_state(context)
     if edit_state:
         field = edit_state["field"]
@@ -1938,7 +1991,7 @@ def _describe_expected_input(
         if link:
             if context.user_data.get(_RELINK_MODE_KEY):
                 return "Отправьте фамилию клиента, чтобы привязать другую анкету."
-            return "Вы уже привязаны к анкете. Используйте /start, чтобы открыть меню изменений."
+            return None
 
     last_search = (context.user_data.get(_LAST_SEARCH_KEY) or "").strip()
     if last_search:
@@ -2337,10 +2390,12 @@ async def _unknown_command_handler(update: Update, context: ContextTypes.DEFAULT
     if message is None:
         return
     expectation = _describe_expected_input(context, user)
-    lines = [
-        expectation,
-        "Команды:\n/start — привязать или создать анкету.\n/book — запись на ближайшие слоты.\n/mybookings — будущие посещения.\n/history — история визитов.",
-    ]
+    lines: List[str] = []
+    if expectation:
+        lines.append(expectation)
+    lines.append(
+        "Команды:\n/start — привязать или создать анкету.\n/book — запись на ближайшие слоты.\n/mybookings — будущие посещения.\n/history — история визитов."
+    )
     await message.reply_text("\n\n".join(lines))
 
 
@@ -2372,7 +2427,9 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             LOGGER.exception("Failed to store user message")
 
     expectation = _describe_expected_input(context, user)
-    lines = [expectation]
+    lines: List[str] = []
+    if expectation:
+        lines.append(expectation)
 
     if user is not None:
         link, _ = _fetch_linked_client(user.id)
@@ -2382,7 +2439,13 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             )
 
     lines.append(
-        "Доступные команды:\n/start — привязать или создать анкету.\n/book — забронировать свободный слот.\n/mybookings — показать будущие записи.\n/history — показать историю."
+        "Команды:\n"
+        "/book — забронировать слот.\n"
+        "/cancel — отменить ближайшую бронь.\n"
+        "/race — регистрация на гонку.\n"
+        "/mybookings — показать будущие записи.\n"
+        "/history — показать историю.\n"
+        "/start — открыть меню анкеты."
     )
     await message.reply_text("\n\n".join(lines))
 
