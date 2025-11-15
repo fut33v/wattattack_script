@@ -2302,11 +2302,48 @@ async def admins_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(message)
 
 
+async def _perform_addadmin(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    identifier: str,
+    display_name: Optional[str] = None,
+    target_user=None,
+) -> None:
+    if target_user is not None:
+        tg_id = target_user.id
+        username = target_user.username
+        display_name = display_name or target_user.full_name
+    else:
+        tg_id, username = parse_admin_identifier(identifier)
+
+    if tg_id is None and not username:
+        await message.reply_text("⚠️ Не удалось распознать ID или username. Попробуйте ещё раз.")
+        return
+
+    try:
+        created, record = await asyncio.to_thread(
+            db_add_admin,
+            tg_id=tg_id,
+            username=username,
+            display_name=display_name,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to add admin")
+        await message.reply_text(f"❌ Ошибка добавления администратора: {exc}")
+        return
+
+    status = "Добавлен" if created else "Обновлён"
+    summary = format_admin_record(record)
+    await message.reply_text(f"✅ {status} администратор: {summary}")
+
+
 async def addadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
     if not ensure_admin_message(update):
         return
+    context.user_data.pop("pending_addadmin", None)
 
     identifier: Optional[str] = None
     display_name: Optional[str] = None
@@ -2323,33 +2360,21 @@ async def addadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         display_name = display_name or target_user.full_name
 
     if not identifier:
+        context.user_data["pending_addadmin"] = {
+            "chat_id": update.message.chat_id,
+        }
         await update.message.reply_text(
             "ℹ️ Укажите ID или @username (можно ответить на сообщение пользователя)."
         )
         return
 
-    tg_id, username = parse_admin_identifier(identifier)
-
-    if target_user is not None:
-        tg_id = target_user.id
-        username = target_user.username
-        display_name = display_name or target_user.full_name
-
-    try:
-        created, record = await asyncio.to_thread(
-            db_add_admin,
-            tg_id=tg_id,
-            username=username,
-            display_name=display_name,
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to add admin")
-        await update.message.reply_text(f"❌ Ошибка добавления администратора: {exc}")
-        return
-
-    status = "Добавлен" if created else "Обновлён"
-    summary = format_admin_record(record)
-    await update.message.reply_text(f"✅ {status} администратор: {summary}")
+    await _perform_addadmin(
+        update.message,
+        context,
+        identifier=identifier,
+        display_name=display_name,
+        target_user=target_user,
+    )
 
 
 async def removeadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6712,6 +6737,15 @@ async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.message.text.startswith("/"):
         return
     if not ensure_admin_message(update):
+        return
+    pending_addadmin = context.user_data.get("pending_addadmin")
+    if pending_addadmin and pending_addadmin.get("chat_id") == update.message.chat_id:
+        context.user_data.pop("pending_addadmin", None)
+        identifier = update.message.text.strip()
+        if not identifier:
+            await update.message.reply_text("⚠️ Укажите ID или @username.")
+            return
+        await _perform_addadmin(update.message, context, identifier=identifier)
         return
     combinate_pending = context.user_data.get(PENDING_COMBINATE_KEY)
     if combinate_pending and combinate_pending.get("chat_id") == update.message.chat_id:
