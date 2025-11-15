@@ -862,6 +862,11 @@ export default function SchedulePage() {
 
   return (
     <Panel title="Расписание" subtitle="Управляйте недельными слотами и станками">
+      <div className="schedule-public-link-banner">
+        <a href="/schedule" target="_blank" rel="noopener noreferrer" className="btn ghost">
+          Публичное расписание
+        </a>
+      </div>
       <div className="schedule-layout">
         <aside className="schedule-sidebar">
           <div className="schedule-sidebar-title">Недели</div>

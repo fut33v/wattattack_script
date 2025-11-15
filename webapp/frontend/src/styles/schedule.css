@@ -191,6 +191,16 @@
   align-items: center;
 }
 
+.schedule-public-link-banner {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 16px;
+}
+
+.schedule-public-link-banner .btn {
+  white-space: nowrap;
+}
+
 .schedule-slots {
   display: flex;
   flex-direction: column;

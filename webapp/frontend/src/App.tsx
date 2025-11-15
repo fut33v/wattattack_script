@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { Routes, Route, Navigate } from "react-router-dom";
 
 import { useConfig, useSession } from "./lib/hooks";
 import { ApiError } from "./lib/api";
@@ -15,7 +15,6 @@ import TrainersPage from "./pages/TrainersPage";
 import ClientLinksPage from "./pages/ClientLinksPage";
 import AdminsPage from "./pages/AdminsPage";
 import SchedulePage from "./pages/SchedulePage";
-import ScheduleOverviewPage from "./pages/ScheduleOverviewPage";
 import InstructorsPage from "./pages/InstructorsPage";
 import NotificationsPage from "./pages/NotificationsPage";
 import NotificationSettingsPage from "./pages/NotificationSettingsPage";
@@ -54,19 +53,16 @@ export default function App() {
   }
 
   const session = sessionQuery.data;
-  const location = useLocation();
-  const hideSidebar = location.pathname === "/schedule";
 
   return (
     <AppContextProvider value={{ session, config }}>
-      <AppShell session={session} hideSidebar={hideSidebar}>
+      <AppShell session={session}>
         <Routes>
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/clients" element={<ClientsPage />} />
           <Route path="/clients/new" element={<ClientCreatePage />} />
           <Route path="/clients/:id" element={<ClientEditPage />} />
-          <Route path="/schedule" element={<ScheduleOverviewPage />} />
           <Route path="/schedule/manage" element={<SchedulePage />} />
           <Route path="/schedule/notifications" element={<NotificationsPage />} />
           <Route path="/activities" element={<ActivitiesPage />} />

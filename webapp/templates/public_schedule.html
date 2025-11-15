@@ -226,6 +226,15 @@
         color: #4338ca;
       }
 
+      .slot-meta-label {
+        margin-top: 2px;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #9ca3af;
+      }
+
       .slot-stats {
         display: flex;
         gap: 12px;
@@ -253,6 +262,11 @@
         padding: 8px 12px;
         font-size: 13px;
         font-weight: 600;
+        display: block;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 100%;
       }
 
       .reservation.free {
@@ -368,6 +382,9 @@
                           </div>
                           {% set descriptor = slot.instructor_name or slot.label %}
                           <div class="slot-descriptor">{{ descriptor }}</div>
+                          {% if slot.meta_label %}
+                            <div class="slot-meta-label">{{ slot.meta_label }}</div>
+                          {% endif %}
                           <div class="slot-stats">
                             <span>Занято {{ slot.stats.occupied }}</span>
                             <span>Свободно {{ slot.stats.free }}</span>
@@ -379,7 +396,7 @@
                             <div class="reservation empty">Нет записей</div>
                           {% else %}
                             {% for row in reservation_rows %}
-                              <div class="reservation {{ row.kind or '' }}">
+                              <div class="reservation {{ row.kind or '' }}" title="{{ row.full_label or row.label }}">
                                 {{ row.label }}
                               </div>
                             {% endfor %}

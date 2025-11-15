@@ -10,29 +10,46 @@ interface AppShellProps {
   hideSidebar?: boolean;
 }
 
-const NAV_LINKS = [
+interface NavLinkConfig {
+  to: string;
+  label: string;
+  adminOnly: boolean;
+}
+
+const PRIMARY_NAV_LINKS: readonly NavLinkConfig[] = [
   { to: "/dashboard", label: "Панель", adminOnly: false },
   { to: "/clients", label: "Клиенты", adminOnly: false },
-  { to: "/schedule", label: "Расписание", adminOnly: false },
   { to: "/schedule/manage", label: "Редактор", adminOnly: true },
-  { to: "/schedule/notifications", label: "Уведомления", adminOnly: true },
-  { to: "/activities", label: "Активности", adminOnly: true },
   { to: "/races", label: "Гонки", adminOnly: true },
   { to: "/schedule/settings", label: "Настройки", adminOnly: true },
-  { to: "/messaging", label: "Рассылка", adminOnly: true },
-  { to: "/messages", label: "Сообщения", adminOnly: true },
   { to: "/instructors", label: "Инструкторы", adminOnly: true },
-  { to: "/bikes", label: "Велосипеды", adminOnly: false },
-  { to: "/trainers", label: "Тренажеры", adminOnly: false },
-  { to: "/links", label: "Связки", adminOnly: true },
   { to: "/admins", label: "Админы", adminOnly: true }
+] as const;
+
+const MESSAGE_NAV_LINKS: readonly NavLinkConfig[] = [
+  { to: "/messaging", label: "Рассылка", adminOnly: true },
+  { to: "/messages", label: "Сообщения", adminOnly: true }
+] as const;
+
+const SERVICE_NAV_LINKS: readonly NavLinkConfig[] = [
+  { to: "/schedule/notifications", label: "Уведомления", adminOnly: true },
+  { to: "/activities", label: "Активности", adminOnly: true },
+  { to: "/links", label: "Связки", adminOnly: true }
+] as const;
+
+const TECH_NAV_LINKS: readonly NavLinkConfig[] = [
+  { to: "/bikes", label: "Велосипеды", adminOnly: false },
+  { to: "/trainers", label: "Тренажеры", adminOnly: false }
 ] as const;
 
 export default function AppShell({ session, children, hideSidebar = false }: AppShellProps) {
   const location = useLocation();
   const isAdmin = session.isAdmin;
 
-  const filteredLinks = NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
+  const filteredPrimaryLinks = PRIMARY_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
+  const filteredMessageLinks = MESSAGE_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
+  const filteredServiceLinks = SERVICE_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
+  const filteredTechLinks = TECH_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
 
   async function handleLogout() {
     await fetch("/api/logout", { method: "GET", credentials: "include" });
@@ -54,7 +71,7 @@ export default function AppShell({ session, children, hideSidebar = false }: App
             </div>
           </div>
           <nav className="nav">
-            {filteredLinks.map((link) => (
+            {filteredPrimaryLinks.map((link) => (
               <NavLink
                 key={link.to}
                 to={link.to}
@@ -67,6 +84,60 @@ export default function AppShell({ session, children, hideSidebar = false }: App
                 {link.label}
               </NavLink>
             ))}
+            {filteredMessageLinks.length > 0 && (
+              <div className="nav-section">
+                <div className="nav-section-title">Сообщения</div>
+                {filteredMessageLinks.map((link) => (
+                  <NavLink
+                    key={link.to}
+                    to={link.to}
+                    className={({ isActive }) =>
+                      classNames("nav-link", {
+                        active: isActive || location.pathname === link.to
+                      })
+                    }
+                  >
+                    {link.label}
+                  </NavLink>
+                ))}
+              </div>
+            )}
+            {filteredTechLinks.length > 0 && (
+              <div className="nav-section">
+                <div className="nav-section-title">Технический</div>
+                {filteredTechLinks.map((link) => (
+                  <NavLink
+                    key={link.to}
+                    to={link.to}
+                    className={({ isActive }) =>
+                      classNames("nav-link", {
+                        active: isActive || location.pathname === link.to
+                      })
+                    }
+                  >
+                    {link.label}
+                  </NavLink>
+                ))}
+              </div>
+            )}
+            {filteredServiceLinks.length > 0 && (
+              <div className="nav-section">
+                <div className="nav-section-title">Сервисный</div>
+                {filteredServiceLinks.map((link) => (
+                  <NavLink
+                    key={link.to}
+                    to={link.to}
+                    className={({ isActive }) =>
+                      classNames("nav-link", {
+                        active: isActive || location.pathname === link.to
+                      })
+                    }
+                  >
+                    {link.label}
+                  </NavLink>
+                ))}
+              </div>
+            )}
           </nav>
           <div className="sidebar-footer">
             <div className="user-card">

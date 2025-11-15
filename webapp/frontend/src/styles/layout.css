@@ -71,6 +71,24 @@
   box-shadow: 0 12px 28px rgba(79, 155, 255, 0.35);
 }
 
+.nav-section {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.nav-section-title {
+  margin-bottom: 0.2rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(200, 210, 240, 0.5);
+}
+
 .sidebar-footer {
   margin-top: auto;
   display: flex;

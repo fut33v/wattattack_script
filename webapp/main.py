@@ -115,6 +115,10 @@ def _send_telegram_message(chat_id: int, text: str, *, parse_mode: str | None = 
 api = APIRouter(prefix="/api", tags=["api"])
 
 SCHEDULE_SESSION_KINDS = {"self_service", "instructor"}
+SCHEDULE_SESSION_KIND_LABELS = {
+    "self_service": "Самокрутка",
+    "instructor": "Инструктор",
+}
 RESERVATION_STATUS_ALLOWED = {
     "available",
     "booked",
@@ -146,13 +150,18 @@ WEEKDAY_FULL_NAMES = (
 def _reservation_display_entry(reservation: dict) -> dict:
     status = str(reservation.get("status") or "").lower()
     client_name = (reservation.get("client_name") or "").strip()
-    if status == "available" or not reservation.get("client_name") and status in {"cancelled"}:
+    if status == "available" or (not client_name and status in {"cancelled"}):
         return {"label": "Свободно", "kind": "free"}
 
     if client_name:
-        parts = client_name.split()
-        label = parts[-1] if parts else client_name
-        return {"label": label, "kind": "booked"}
+        parts = [part for part in client_name.split() if part]
+        if len(parts) >= 2:
+            first_name = parts[0]
+            last_name = parts[-1]
+            label = f"{last_name} {first_name}"
+        else:
+            label = client_name
+        return {"label": label, "full_label": client_name, "kind": "booked"}
 
     return {"label": "Занято", "kind": "busy"}
 
@@ -518,6 +527,7 @@ def _build_day_columns(slots: list[dict], week_start_date: str | date, instructo
             totals["free"] += free
 
             reservation_rows = [_reservation_display_entry(res) for res in reservations]
+            session_kind = (raw_slot.get("session_kind") or "").strip() or raw_slot.get("session_kind")
 
             instructor_name = raw_slot.get("instructorName")
             if not instructor_name:
@@ -525,21 +535,24 @@ def _build_day_columns(slots: list[dict], week_start_date: str | date, instructo
                 if instructor_id is not None:
                     instructor_name = instructor_map.get(instructor_id)
 
-            label = (raw_slot.get("label") or "").strip()
-            if not label:
-                label = "С инструктором" if raw_slot.get("session_kind") == "instructor" else "Самокрутка"
+            raw_label = (raw_slot.get("label") or "").strip()
+            display_label = raw_label
+            if not display_label:
+                display_label = "С инструктором" if session_kind == "instructor" else "Самокрутка"
+            meta_label = raw_label or SCHEDULE_SESSION_KIND_LABELS.get(session_kind, "Слот")
 
             slot_entries.append(
                 {
                     "id": raw_slot.get("id"),
                     "start_time": raw_slot.get("start_time"),
                     "end_time": raw_slot.get("end_time"),
-                    "label": label,
+                    "label": display_label,
                     "instructor_name": instructor_name,
                     "reservations": reservations,
                     "reservation_rows": reservation_rows,
                     "stats": {"occupied": occupied, "free": free, "total": total},
-                    "session_kind": raw_slot.get("session_kind"),
+                    "session_kind": session_kind or raw_slot.get("session_kind"),
+                    "meta_label": meta_label,
                 }
             )
 
