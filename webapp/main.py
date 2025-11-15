@@ -1845,6 +1845,55 @@ def api_get_race(race_id: int, user=Depends(require_admin)):
     return {"item": _serialize_race(record, include_registrations=True)}
 
 
+@api.post("/races/{race_id}/registrations")
+async def api_create_race_registration(race_id: int, request: Request, user=Depends(require_admin)):
+    race = race_repository.get_race(race_id)
+    if not race:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Race not found")
+
+    payload = await request.json()
+    client_id_raw = payload.get("client_id") or payload.get("clientId")
+    if client_id_raw is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "client_id is required")
+    try:
+        client_id_int = int(client_id_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid client_id") from exc
+
+    client = client_repository.get_client(client_id_int)
+    if not client:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+
+    link = client_link_repository.get_link_by_client(client_id_int)
+    if not link or not link.get("tg_user_id"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Для клиента нет связанного Telegram пользователя")
+
+    race_mode_value = payload.get("race_mode") or payload.get("raceMode")
+    race_mode: Optional[str]
+    if race_mode_value is None or race_mode_value == "":
+        race_mode = None
+    elif isinstance(race_mode_value, str) and race_mode_value in RACE_REGISTRATION_MODES:
+        race_mode = race_mode_value
+    else:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid race_mode")
+
+    try:
+        record = race_repository.upsert_registration(
+            race_id=race_id,
+            client_id=client_id_int,
+            tg_user_id=int(link["tg_user_id"]),
+            tg_username=link.get("tg_username"),
+            tg_full_name=link.get("tg_full_name"),
+        )
+        if race_mode:
+            record = race_repository.update_registration(record["id"], race_mode=race_mode) or record
+    except Exception as exc:  # pylint: disable=broad-except
+        log.exception("Failed to create race registration", exc_info=True)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to create registration") from exc
+
+    return {"item": _serialize_race_registration(record)}
+
+
 @api.patch("/races/{race_id}")
 async def api_update_race(race_id: int, request: Request, user=Depends(require_admin)):
     payload = await request.json()

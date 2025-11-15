@@ -8,7 +8,8 @@ import type {
   RaceDetailResponse,
   RaceListResponse,
   RaceRegistration,
-  RaceRow
+  RaceRow,
+  ClientRow
 } from "../lib/types";
 
 const STATUS_OPTIONS = [
@@ -50,6 +51,14 @@ function buildClustersPayload(value: FormDataEntryValue | null): string[] {
 function formatPrice(value?: number | null) {
   if (!value && value !== 0) return "";
   return new Intl.NumberFormat("ru-RU").format(value);
+}
+
+function formatClientLabel(client: ClientRow) {
+  const first = (client.first_name ?? "").trim();
+  const last = (client.last_name ?? "").trim();
+  const full = (client.full_name ?? "").trim();
+  const display = full || [first, last].filter(Boolean).join(" ").trim() || `ID ${client.id}`;
+  return `${display} (ID ${client.id})`;
 }
 
 type RacePayload = {
@@ -103,6 +112,8 @@ export default function RacesPage() {
     queryFn: () => apiFetch<RaceListResponse>("/api/races")
   });
   const races = racesQuery.data?.items ?? [];
+  const [clientSearch, setClientSearch] = useState<string>("");
+  const [selectedClientId, setSelectedClientId] = useState<number | null>(null);
 
   useEffect(() => {
     if (selectedRaceId === "new") {
@@ -125,6 +136,20 @@ export default function RacesPage() {
     queryFn: () => apiFetch<RaceDetailResponse>(`/api/races/${selectedRaceId}`),
     enabled: typeof selectedRaceId === "number"
   });
+
+  const clientsQuery = useQuery<{ items: ClientRow[] }>({
+    queryKey: ["clients", "search", clientSearch],
+    queryFn: () => apiFetch<{ items: ClientRow[] }>(`/api/clients?page=1&search=${encodeURIComponent(clientSearch || "")}`),
+    enabled: typeof selectedRaceId === "number"
+  });
+
+  const clientOptions = useMemo(() => {
+    const items = clientsQuery.data?.items ?? [];
+    return items.map((client) => ({
+      value: client.id,
+      label: formatClientLabel(client)
+    }));
+  }, [clientsQuery.data]);
 
   const selectedRace = useMemo<RaceRow | null>(() => {
     if (typeof selectedRaceId !== "number") return null;
@@ -213,6 +238,18 @@ export default function RacesPage() {
     }
   });
 
+  const createRegistrationMutation = useMutation({
+    mutationFn: ({ raceId, payload }: { raceId: number; payload: { client_id: number; race_mode?: string | null } }) =>
+      apiFetch<{ item: RaceRegistration }>(`/api/races/${raceId}/registrations`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      }),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["races", variables.raceId] });
+      queryClient.invalidateQueries({ queryKey: ["races"] });
+    }
+  });
+
   function handleCreateSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const payload = readRacePayload(event.currentTarget);
@@ -251,6 +288,33 @@ export default function RacesPage() {
       return;
     }
     deleteRegistrationMutation.mutate({ raceId: selectedRaceId, registrationId: registration.id });
+  }
+
+  function handleAddParticipantSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (typeof selectedRaceId !== "number") return;
+    const formData = new FormData(event.currentTarget);
+    const mode = String(formData.get("race_mode") ?? "").trim();
+    const clientId = selectedClientId || Number(formData.get("client_id"));
+    if (!clientId || Number.isNaN(clientId)) {
+      return;
+    }
+    createRegistrationMutation.mutate(
+      {
+        raceId: selectedRaceId,
+        payload: {
+          client_id: clientId,
+          race_mode: mode || undefined
+        }
+      },
+      {
+        onSuccess: () => {
+          (event.target as HTMLFormElement).reset();
+          setSelectedClientId(null);
+          setClientSearch("");
+        }
+      }
+    );
   }
 
   const registrations = selectedRaceDetail?.registrations ?? [];
@@ -421,6 +485,44 @@ export default function RacesPage() {
                 )}
                 <div className="race-registrations">
                   <h4>Заявки ({registrations.length})</h4>
+                  <form className="inline-form" onSubmit={handleAddParticipantSubmit}>
+                    <label>
+                      Найти клиента
+                      <input
+                        type="search"
+                        name="client_query"
+                        placeholder="Имя или фамилия"
+                        value={clientSearch}
+                        onChange={(event) => setClientSearch(event.target.value)}
+                      />
+                    </label>
+                    <label>
+                      Клиент
+                      <select
+                        name="client_id"
+                        value={selectedClientId ?? ""}
+                        onChange={(event) => setSelectedClientId(event.target.value ? Number(event.target.value) : null)}
+                        required
+                      >
+                        <option value="">Выберите клиента</option>
+                        {clientOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Формат
+                      <select name="race_mode" defaultValue="offline">
+                        <option value="offline">Оффлайн</option>
+                        <option value="online">Онлайн</option>
+                      </select>
+                    </label>
+                    <button type="submit" className="button" disabled={createRegistrationMutation.isPending}>
+                      {createRegistrationMutation.isPending ? "Добавляем…" : "Добавить участника"}
+                    </button>
+                  </form>
                   {registrations.length === 0 ? (
                     <div className="empty-state">Заявок пока нет.</div>
                   ) : (
