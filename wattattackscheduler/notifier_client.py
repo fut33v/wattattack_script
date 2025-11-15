@@ -547,7 +547,7 @@ def format_workout_reminder(client: Dict[str, Any], reservations: List[Dict[str,
             f"🕘 Время: {start_str}-{end_str}\n"
             f"🏋️ Станок: {stand_info}\n"
             f"🧑‍🏫 Тип: {session_info}\n\n"
-            f"До встречи в «Крутилке» через {reminder_hours} часов! 🚴‍♀️"
+            "До встречи в «Крутилке»! 🚴‍♀️"
         )
     else:
         # Multiple reservations
@@ -582,7 +582,7 @@ def format_workout_reminder(client: Dict[str, Any], reservations: List[Dict[str,
 
             message += f"• {date_str} в {time_str} ({session_info})\n"
         
-        message += f"\nДо встречи в «Крутилке» через {reminder_hours} часов! 🚴‍♀️"
+        message += "\nДо встречи в «Крутилке»! 🚴‍♀️"
 
     return message
 
