@@ -136,7 +136,12 @@ def _map_rows(reader: csv.DictReader) -> List[dict]:
     for raw in reader:
         mapped: dict = {}
         for src, target in CSV_HEADERS.items():
-            mapped[target] = raw.get(src, "")
+            value = raw.get(src, "")
+            if value:
+                mapped[target] = value
+            elif target not in mapped:
+                # Only set an empty default once so later aliases with data can override
+                mapped[target] = ""
         rows.append(mapped)
     return rows
 
