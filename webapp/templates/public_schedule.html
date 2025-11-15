@@ -125,7 +125,7 @@
 
       .schedule-grid-wrapper {
         width: 100%;
-        overflow-x: auto;
+        overflow: visible;
         padding-bottom: 8px;
       }
 
@@ -149,6 +149,10 @@
       .schedule-day header {
         padding: 16px;
         border-bottom: 1px solid #f0f0f5;
+        position: sticky;
+        top: 0;
+        background: #fff;
+        z-index: 2;
       }
 
       .schedule-day-title {
