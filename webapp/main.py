@@ -2301,6 +2301,7 @@ def create_app() -> FastAPI:
                 "cluster": entry.get("cluster_label"),
                 "notes": entry.get("notes"),
                 "is_pending": False,
+                "race_mode": entry.get("race_mode"),
             }
             submitted = entry.get("payment_submitted_at")
             if hasattr(submitted, "isoformat"):
@@ -2325,18 +2326,28 @@ def create_app() -> FastAPI:
         else:
             description_formatted = None
 
-        grouped_participants: list[dict] = []
-        groups_map: dict[str, list] = {}
+        grouped_participants_offline: list[dict] = []
+        grouped_participants_online: list[dict] = []
+        groups_map_offline: dict[str, list] = {}
+        groups_map_online: dict[str, list] = {}
         unassigned_label = "Кластер не назначен"
         for item in participants:
+            mode_key = (item.get("race_mode") or "").strip().lower()
+            target_map = groups_map_offline if mode_key != "online" else groups_map_online
             label = (item.get("cluster") or "").strip() or unassigned_label
-            groups_map.setdefault(label, []).append(item)
+            target_map.setdefault(label, []).append(item)
 
         for label in ordered_cluster_labels:
-            if label in groups_map:
-                grouped_participants.append({"label": label, "participants": groups_map.pop(label)})
-        for label in sorted(groups_map.keys()):
-            grouped_participants.append({"label": label, "participants": groups_map[label]})
+            if label in groups_map_offline:
+                grouped_participants_offline.append({"label": label, "participants": groups_map_offline.pop(label)})
+        for label in sorted(groups_map_offline.keys()):
+            grouped_participants_offline.append({"label": label, "participants": groups_map_offline[label]})
+
+        for label in ordered_cluster_labels:
+            if label in groups_map_online:
+                grouped_participants_online.append({"label": label, "participants": groups_map_online.pop(label)})
+        for label in sorted(groups_map_online.keys()):
+            grouped_participants_online.append({"label": label, "participants": groups_map_online[label]})
 
         race_payload = {
             "title": race.get("title"),
@@ -2357,7 +2368,8 @@ def create_app() -> FastAPI:
             {
                 "race": race_payload,
                 "participants": participants,
-                "participant_groups": grouped_participants,
+                "participant_groups_offline": grouped_participants_offline,
+                "participant_groups_online": grouped_participants_online,
                 "participants_count": len(participants),
                 "pending_count": pending_count,
                 "share_url": share_url,

@@ -204,9 +204,9 @@
         </div>
 
         <section>
-          <h2>Подтверждённые участники</h2>
-          {% if participant_groups %}
-            {% for group in participant_groups %}
+          <h2>Оффлайн · в Крутилке</h2>
+          {% if participant_groups_offline %}
+            {% for group in participant_groups_offline %}
               <div class="cluster-block">
                 <h3 class="cluster-title">{{ group.label }} · {{ group.participants|length }}</h3>
                 <ol class="participants-list">
@@ -230,6 +230,27 @@
             {% endfor %}
           {% else %}
             <div class="empty-state">Пока нет подтверждённых участников.</div>
+          {% endif %}
+
+          <h2 style="margin-top: 32px;">Онлайн · у себя дома</h2>
+          {% if participant_groups_online %}
+            {% for group in participant_groups_online %}
+              <div class="cluster-block">
+                <h3 class="cluster-title">{{ group.label }} · {{ group.participants|length }}</h3>
+                <ol class="participants-list">
+                  {% for item in group.participants %}
+                    <li class="participant-card">
+                      <div class="participant-name">{{ loop.index }}. {{ item.name }}</div>
+                      {% if item.is_pending %}
+                        <span class="pending-badge">БЕЗ ОПЛАТЫ!</span>
+                      {% endif %}
+                    </li>
+                  {% endfor %}
+                </ol>
+              </div>
+            {% endfor %}
+          {% else %}
+            <div class="empty-state">Онлайн участников нет.</div>
           {% endif %}
 
           {% if pending_count > 0 %}
