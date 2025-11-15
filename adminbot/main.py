@@ -2338,6 +2338,39 @@ async def _perform_addadmin(
     await message.reply_text(f"✅ {status} администратор: {summary}")
 
 
+async def _perform_removeadmin(
+    message: Message,
+    identifier: str,
+    *,
+    target_user=None,
+) -> None:
+    if target_user is not None:
+        tg_id = target_user.id
+        username = target_user.username
+    else:
+        tg_id, username = parse_admin_identifier(identifier)
+
+    if tg_id is None and (not username):
+        await message.reply_text("⚠️ Некорректный идентификатор администратора.")
+        return
+
+    try:
+        removed = await asyncio.to_thread(
+            db_remove_admin,
+            tg_id=tg_id,
+            username=username,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to remove admin")
+        await message.reply_text(f"❌ Ошибка удаления администратора: {exc}")
+        return
+
+    if removed:
+        await message.reply_text("🗑️ Администратор удалён.")
+    else:
+        await message.reply_text("🔍 Администратор не найден.")
+
+
 async def addadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
@@ -2382,6 +2415,7 @@ async def removeadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if not ensure_admin_message(update):
         return
+    context.user_data.pop("pending_removeadmin", None)
 
     identifier: Optional[str] = None
     target_user = None
@@ -2394,35 +2428,13 @@ async def removeadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         identifier = str(target_user.id)
 
     if not identifier:
+        context.user_data["pending_removeadmin"] = {"chat_id": update.message.chat_id}
         await update.message.reply_text(
             "ℹ️ Укажите ID или @username (можно ответить на сообщение администратора)."
         )
         return
 
-    tg_id, username = parse_admin_identifier(identifier)
-    if target_user is not None:
-        tg_id = target_user.id
-        username = target_user.username
-
-    if tg_id is None and (username is None or not username):
-        await update.message.reply_text("⚠️ Некорректный идентификатор администратора.")
-        return
-
-    try:
-        removed = await asyncio.to_thread(
-            db_remove_admin,
-            tg_id=tg_id,
-            username=username,
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to remove admin")
-        await update.message.reply_text(f"❌ Ошибка удаления администратора: {exc}")
-        return
-
-    if removed:
-        await update.message.reply_text("🗑️ Администратор удалён.")
-    else:
-        await update.message.reply_text("🔍 Администратор не найден.")
+    await _perform_removeadmin(update.message, identifier, target_user=target_user)
 
 
 def build_uploadclients_keyboard(state: Dict[str, Any]) -> InlineKeyboardMarkup:
@@ -6738,15 +6750,22 @@ async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if not ensure_admin_message(update):
         return
-    pending_addadmin = context.user_data.get("pending_addadmin")
-    if pending_addadmin and pending_addadmin.get("chat_id") == update.message.chat_id:
-        context.user_data.pop("pending_addadmin", None)
-        identifier = update.message.text.strip()
-        if not identifier:
-            await update.message.reply_text("⚠️ Укажите ID или @username.")
+    identifier_text = update.message.text.strip()
+    for pending_key, action in (
+        ("pending_addadmin", "add"),
+        ("pending_removeadmin", "remove"),
+    ):
+        pending = context.user_data.get(pending_key)
+        if pending and pending.get("chat_id") == update.message.chat_id:
+            context.user_data.pop(pending_key, None)
+            if not identifier_text:
+                await update.message.reply_text("⚠️ Укажите ID или @username.")
+                return
+            if action == "add":
+                await _perform_addadmin(update.message, context, identifier=identifier_text)
+            else:
+                await _perform_removeadmin(update.message, identifier_text)
             return
-        await _perform_addadmin(update.message, context, identifier=identifier)
-        return
     combinate_pending = context.user_data.get(PENDING_COMBINATE_KEY)
     if combinate_pending and combinate_pending.get("chat_id") == update.message.chat_id:
         success = await _process_combinate_text(update.message, context, update.message.text)
