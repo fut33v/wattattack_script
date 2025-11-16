@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import psycopg2
 import requests
+from straver_client import StraverClient
 from fastapi import (
     APIRouter,
     Depends,
@@ -2058,7 +2059,27 @@ def api_delete_race_registration(race_id: int, registration_id: int, user=Depend
 @api.get("/client-links")
 def api_client_links(user=Depends(require_admin)):
     rows = client_link_repository.list_links()
-    return _json_success({"items": jsonable_encoder(rows)})
+
+    straver_statuses = {}
+    try:
+        straver = StraverClient()
+        if straver.is_configured():
+            tg_ids = [row["tg_user_id"] for row in rows if row.get("tg_user_id")]
+            straver_statuses = straver.connection_status(tg_ids)
+    except Exception:
+        log.exception("Failed to fetch Straver statuses")
+
+    enriched = []
+    for row in rows:
+        status = straver_statuses.get(int(row["tg_user_id"])) if row.get("tg_user_id") else None
+        merged = dict(row)
+        merged["strava_connected"] = bool(status and status.get("connected"))
+        merged["strava_athlete_name"] = status.get("athlete_name") if status else None
+        if status and status.get("athlete_id") and not merged.get("strava_athlete_id"):
+            merged["strava_athlete_id"] = status.get("athlete_id")
+        enriched.append(merged)
+
+    return _json_success({"items": jsonable_encoder(enriched)})
 
 
 @api.patch("/client-links/{client_id}")
@@ -2210,10 +2231,10 @@ def api_delete_activity_id(
 def strava_authorize(state: str = None, user=Depends(require_admin)):
     """Generate Strava authorization URL for a client."""
     try:
-        from strava_client import StravaClient
-        client = StravaClient()
-        auth_url = client.get_authorization_url(state=state or "")
-        # Redirect to Strava authorization page
+        straver = StraverClient()
+        if not straver.is_configured():
+            raise RuntimeError("STRAVER_BASE_URL/STRAVER_INTERNAL_SECRET are not configured")
+        auth_url = straver.build_authorize_url(state=state or "")
         return RedirectResponse(url=auth_url)
     except Exception as exc:
         log.exception("Failed to generate Strava authorization URL")
@@ -2474,61 +2495,21 @@ def create_app() -> FastAPI:
 
     @app.get("/strava/callback")
     async def strava_oauth_callback(request: Request, code: str = None, error: str = None, state: str = None):
-        """Handle Strava OAuth callback and exchange code for tokens."""
-        if error:
-            return RedirectResponse(url=f"https://t.me/{os.environ.get('TELEGRAM_LOGIN_BOT_USERNAME')}?text=Strava+authorization+failed:+{error}")
-        
-        if not code:
-            raise HTTPException(status_code=400, detail="Missing authorization code")
-        
+        """Forward Strava OAuth callback to the Straver service."""
         try:
-            # Exchange code for tokens
-            from strava_client import StravaClient
-            client = StravaClient()
-            token_data = client.exchange_code_for_token(code)
-            
-            # Get user ID from state (if provided)
-            user_id = None
-            if state:
-                try:
-                    user_id = int(state)
-                except (ValueError, TypeError):
-                    pass
-            
-            # If we have user ID, update their Strava tokens in the database
-            if user_id:
-                from repositories.client_link_repository import update_strava_tokens
-                # Pass the expires_at as string, the repository will handle conversion
-                updated_link = update_strava_tokens(
-                    tg_user_id=user_id,
-                    strava_access_token=token_data["access_token"],
-                    strava_refresh_token=token_data["refresh_token"],
-                    strava_token_expires_at=str(token_data["expires_at"]),
-                    strava_athlete_id=token_data["athlete"]["id"]
-                )
-                
-                if updated_link:
-                    # Send success message to user via Telegram
-                    import requests
-                    bot_token = os.environ.get("KRUTILKAVN_BOT_TOKEN")
-                    if bot_token:
-                        athlete_name = f"{token_data['athlete'].get('firstname', '')} {token_data['athlete'].get('lastname', '')}".strip()
-                        message_text = f"✅ Strava успешно подключена!\n\nАккаунт: {athlete_name or 'Без имени'}\nТеперь ваши тренировки будут автоматически загружаться в Strava."
-                        requests.post(
-                            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                            json={
-                                "chat_id": user_id,
-                                "text": message_text
-                            }
-                        )
-            
-            # Redirect user back to Telegram bot with success message
-            return RedirectResponse(url=f"https://t.me/{os.environ.get('TELEGRAM_LOGIN_BOT_USERNAME')}?text=Strava+authorization+successful!+Your+workouts+will+now+be+uploaded+to+Strava.")
-            
-        except Exception as e:
-            # Log error and redirect with error message
-            log.error(f"Strava OAuth callback error: {e}")
-            return RedirectResponse(url=f"https://t.me/{os.environ.get('TELEGRAM_LOGIN_BOT_USERNAME')}?text=Strava+authorization+failed:+{str(e)}")
+            straver = StraverClient()
+            if not straver.base_url:
+                raise RuntimeError("STRAVER_BASE_URL is not configured")
+            forward_url = f"{straver.base_url}/strava/callback"
+            if request.url.query:
+                forward_url = f"{forward_url}?{request.url.query}"
+            return RedirectResponse(url=forward_url)
+        except Exception as exc:
+            log.exception("Failed to forward Strava callback")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Strava callback is now handled by Straver: {exc}",
+            ) from exc
 
     @app.get("/api/health")
     def api_health():

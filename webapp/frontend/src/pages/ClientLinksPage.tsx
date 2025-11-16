@@ -109,8 +109,10 @@ export default function ClientLinksPage() {
               title: "Strava",
               render: (item) => (
                 <div>
-                  {item.strava_access_token ? (
-                    <span className="status-badge status-badge--success">Подключена</span>
+                  {item.strava_connected || item.strava_access_token ? (
+                    <span className="status-badge status-badge--success">
+                      Подключена{item.strava_athlete_name ? ` (${item.strava_athlete_name})` : ""}
+                    </span>
                   ) : (
                     <span className="status-badge status-badge--warning">Не подключена</span>
                   )}

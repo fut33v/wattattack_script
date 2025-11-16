@@ -102,6 +102,8 @@ export interface ClientLinkRow {
   strava_refresh_token?: string | null;
   strava_token_expires_at?: string | null;
   strava_athlete_id?: number | null;
+  strava_athlete_name?: string | null;
+  strava_connected?: boolean;
   created_at?: string | null;
   updated_at?: string | null;
 }

@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  straver-db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${STRAVER_DB_NAME:-straver}
+      POSTGRES_USER: ${STRAVER_DB_USER:-straver}
+      POSTGRES_PASSWORD: ${STRAVER_DB_PASSWORD:-straver}
+    volumes:
+      - straver_db_data:/var/lib/postgresql/data
+    ports:
+      - "${STRAVER_DB_PORT:-55433}:5432"
+    restart: unless-stopped
+
+  straver-api:
+    build: .
+    environment:
+      STRAVER_DATABASE_URL: ${STRAVER_DATABASE_URL:-postgresql://${STRAVER_DB_USER:-straver}:${STRAVER_DB_PASSWORD:-straver}@straver-db:5432/${STRAVER_DB_NAME:-straver}}
+      STRAVER_INTERNAL_SECRET: ${STRAVER_INTERNAL_SECRET:-changeme}
+      STRAVA_CLIENT_ID: ${STRAVA_CLIENT_ID}
+      STRAVA_CLIENT_SECRET: ${STRAVA_CLIENT_SECRET}
+      STRAVA_REDIRECT_URI: ${STRAVA_REDIRECT_URI:-http://localhost:8098/strava/callback}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_LOGIN_BOT_USERNAME: ${TELEGRAM_LOGIN_BOT_USERNAME:-}
+    depends_on:
+      - straver-db
+    ports:
+      - "${STRAVER_API_PORT:-8098}:8000"
+    restart: unless-stopped
+
+volumes:
+  straver_db_data:

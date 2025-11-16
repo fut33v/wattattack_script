@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, time, timedelta
+import requests
 from typing import Any, Awaitable, Callable, Dict, Final, List, Optional, Tuple
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -28,6 +29,7 @@ from repositories.client_link_repository import (
     update_strava_tokens,
 )
 from repositories.admin_repository import get_admin_ids, is_admin
+from straver_client import StraverClient
 
 import os
 
@@ -1335,6 +1337,20 @@ async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.
         await context.bot.send_message(chat_id=user.id, text=confirmation_text)
 
 
+def _straver_status(tg_user_id: int) -> bool:
+    """Check Straver for the user's Strava connection state."""
+    try:
+        client = StraverClient()
+        if not client.is_configured():
+            return False
+        status = client.connection_status([tg_user_id])
+        entry = status.get(tg_user_id)
+        return bool(entry and entry.get("connected"))
+    except Exception:
+        LOGGER.exception("Failed to fetch Straver status for user %s", tg_user_id)
+        return False
+
+
 async def _handle_strava_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Strava OAuth callback."""
     query = update.callback_query
@@ -1352,9 +1368,10 @@ async def _handle_strava_callback(update: Update, context: ContextTypes.DEFAULT_
 
     # Generate Strava authorization URL
     try:
-        from strava_client import StravaClient
-        client = StravaClient()
-        auth_url = client.get_authorization_url(state=str(user.id))
+        straver = StraverClient()
+        if not straver.is_configured():
+            raise RuntimeError("Straver is not configured")
+        auth_url = straver.build_authorize_url(state=str(user.id))
         
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Авторизоваться в Strava", url=auth_url)],
@@ -1367,7 +1384,7 @@ async def _handle_strava_callback(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=keyboard
         )
     except Exception as e:
-        LOGGER.error("Failed to generate Strava auth URL: %s", e)
+        LOGGER.error("Failed to generate Straver auth URL: %s", e)
         await query.edit_message_text("Произошла ошибка при создании ссылки для авторизации Strava. Попробуйте позже.")
 
 
@@ -1417,34 +1434,27 @@ async def _handle_strava_webhook(update: Update, context: ContextTypes.DEFAULT_T
         LOGGER.error("Failed to parse Strava callback data: %s", e)
         await message.reply_text("Произошла ошибка при обработке данных авторизации Strava.")
         return
+    
+    straver = StraverClient()
+    if not straver.is_configured():
+        await message.reply_text("Сервис Straver не настроен. Попробуйте позже или свяжитесь с администраторами.")
+        return
 
-    # Exchange code for tokens
     try:
-        from strava_client import StravaClient
-        client = StravaClient()
-        token_data = client.exchange_code_for_token(code)
-        
-        # Update the client link with Strava tokens
-        updated_link = update_strava_tokens(
-            tg_user_id=user.id,
-            strava_access_token=token_data["access_token"],
-            strava_refresh_token=token_data["refresh_token"],
-            strava_token_expires_at=str(token_data["expires_at"]),
-            strava_athlete_id=token_data["athlete"]["id"]
+        response = requests.get(
+            f"{straver.base_url}/strava/callback",
+            params={"code": code, "state": str(state_user_id)},
+            timeout=20,
+            allow_redirects=False,
         )
-        
-        if updated_link:
-            athlete_name = (token_data["athlete"].get("firstname", "") + " " + token_data["athlete"].get("lastname", "")).strip()
-            await message.reply_text(
-                f"✅ Strava успешно подключена!\n\n"
-                f"Аккаунт: {athlete_name or 'Без имени'}\n"
-                f"Теперь ваши тренировки будут автоматически загружаться в Strava."
-            )
-        else:
-            await message.reply_text("Ошибка при сохранении данных Strava. Попробуйте снова.")
-            
+        if response.status_code >= 400:
+            await message.reply_text("Произошла ошибка при подключении Strava. Попробуйте снова.")
+            return
+        await message.reply_text(
+            "✅ Стартовала привязка Strava через Straver. Если соединение успешно, вы получите подтверждение."
+        )
     except Exception as e:
-        LOGGER.error("Failed to exchange Strava code for token: %s", e)
+        LOGGER.error("Failed to hand off Strava callback to Straver: %s", e)
         await message.reply_text("Произошла ошибка при подключении Strava. Попробуйте снова.")
 
 
@@ -1461,7 +1471,7 @@ async def _show_profile_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     # Check if Strava is already connected
-    strava_connected = bool(link.get("strava_access_token"))
+    strava_connected = _straver_status(user.id) or bool(link.get("strava_access_token"))
 
     keyboard_buttons = []
     
@@ -1496,6 +1506,9 @@ async def _handle_strava_disconnect(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
     
     try:
+        straver = StraverClient()
+        if straver.is_configured():
+            straver.disconnect(user.id)
         # Remove Strava tokens from the client link
         updated_link = update_strava_tokens(
             tg_user_id=user.id,
@@ -1528,7 +1541,7 @@ async def _strava_command_handler(update: Update, context: ContextTypes.DEFAULT_
         return
 
     # Check if Strava is already connected
-    strava_connected = bool(link.get("strava_access_token"))
+    strava_connected = _straver_status(user.id) or bool(link.get("strava_access_token"))
 
     keyboard_buttons = []
     

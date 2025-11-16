@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import requests
+from straver_client import StraverClient
 
 from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
 from repositories.admin_repository import (
@@ -45,6 +46,9 @@ DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
 MAX_TRACKED_IDS = int(os.environ.get("WATTATTACK_TRACKED_LIMIT", "200"))
 DEFAULT_ADMIN_SEED = os.environ.get("TELEGRAM_ADMIN_IDS", "")
 DEFAULT_REMINDER_HOURS = int(os.environ.get("WORKOUT_REMINDER_HOURS", "4"))
+STRAVER_BASE_URL = os.environ.get("STRAVER_BASE_URL")
+STRAVER_INTERNAL_SECRET = os.environ.get("STRAVER_INTERNAL_SECRET")
+STRAVER_HTTP_TIMEOUT = float(os.environ.get("STRAVER_HTTP_TIMEOUT", os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30")))
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -726,6 +730,30 @@ def send_to_matching_clients(
         return
     
     LOGGER.info("Found %d exact client matches for athlete: %s", len(exact_matches), athlete_name)
+
+    # Prepare Straver client and prefetch statuses to avoid per-user calls
+    straver_client = StraverClient(
+        base_url=STRAVER_BASE_URL,
+        secret=STRAVER_INTERNAL_SECRET,
+        timeout=STRAVER_HTTP_TIMEOUT,
+    )
+    links_cache: Dict[int, Dict[str, Any]] = {}
+    user_ids_for_status: List[int] = []
+    for client in exact_matches:
+        client_id = client.get("id")
+        if not client_id:
+            continue
+        link = get_link_by_client(client_id)
+        links_cache[client_id] = link
+        if link and link.get("tg_user_id"):
+            user_ids_for_status.append(link["tg_user_id"])
+
+    straver_statuses: Dict[int, Dict[str, Any]] = {}
+    if straver_client.is_configured() and user_ids_for_status:
+        try:
+            straver_statuses = straver_client.connection_status(user_ids_for_status)
+        except Exception:
+            LOGGER.exception("Failed to fetch Straver statuses for matching clients")
     
     # For each matching client, check if they're linked to a Telegram user and send the message/file
     sent_count = 0
@@ -742,7 +770,7 @@ def send_to_matching_clients(
         LOGGER.debug("Processing client %s for athlete %s", client_id, athlete_name)
         
         # Get the Telegram link for this client
-        link = get_link_by_client(client_id)
+        link = links_cache.get(client_id) or get_link_by_client(client_id)
         LOGGER.debug("Retrieved link for client %s: %s", client_id, link)
         
         if not link:
@@ -798,56 +826,41 @@ def send_to_matching_clients(
             LOGGER.debug("  - temp_file parameter: %s", temp_file)
             LOGGER.debug("  - temp_file exists: %s", temp_file.exists() if temp_file else False)
             LOGGER.debug("  - link data: %s", link)
-            
-            if temp_file and temp_file.exists():
+
+            straver_status = straver_statuses.get(int(tg_user_id)) if straver_statuses else {}
+            if temp_file and temp_file.exists() and straver_client.is_configured():
                 LOGGER.debug("✓ Temp file exists for Strava upload for client %s", client_id)
-                # Check if the client has Strava integration enabled
-                strava_access_token = link.get("strava_access_token")
-                strava_token_expires_at = link.get("strava_token_expires_at")
-                
-                LOGGER.debug("Strava tokens for client %s: access_token=%s, expires_at=%s", client_id, bool(strava_access_token), strava_token_expires_at)
-                
-                if strava_access_token and strava_token_expires_at:
-                    LOGGER.debug("✓ Client %s has Strava integration enabled", client_id)
-                    LOGGER.debug("Attempting Strava token refresh for client %s", client_id)
-                    # Refresh token if needed
-                    from strava_client import refresh_strava_token_if_needed
-                    updated_link = refresh_strava_token_if_needed(link)
+                if straver_status.get("connected"):
+                    LOGGER.info("Attempting Strava upload via Straver for client %s (Telegram user %s)", client_id, tg_user_id)
                     
-                    # Use the updated token if available, otherwise use the existing one
-                    if updated_link and updated_link.get("strava_access_token"):
-                        strava_access_token = updated_link["strava_access_token"]
-                        LOGGER.debug("Using refreshed Strava token for client %s", client_id)
-                    else:
-                        LOGGER.debug("Using existing Strava token for client %s", client_id)
-                    
-                    LOGGER.info("Attempting Strava upload for client %s (Telegram user %s)", client_id, tg_user_id)
-                    
-                    # Upload the FIT file to Strava
-                    from strava_client import StravaClient
-                    strava_client = StravaClient(strava_access_token)
-                    
-                    # Use "КРУТИЛКА!" as the activity name
                     activity_name = "КРУТИЛКА!"
-                    # Use the Strava-specific description without HTML tags
                     activity_description = format_strava_activity_description(activity, account_name, profile)
-                    
-                    LOGGER.debug("Uploading activity to Strava for client %s: name=%s, description=%s, file=%s", 
-                               client_id, activity_name, activity_description, temp_file)
-                    
-                    upload_response = strava_client.upload_activity(
-                        str(temp_file),
+                    LOGGER.debug(
+                        "Uploading activity to Straver for client %s: name=%s, description=%s, file=%s",
+                        client_id,
+                        activity_name,
+                        activity_description,
+                        temp_file,
+                    )
+                    upload_response = straver_client.upload_activity(
+                        tg_user_id=int(tg_user_id),
+                        file_path=temp_file,
                         name=activity_name,
-                        description=activity_description
+                        description=activity_description,
                     )
                     
-                    LOGGER.info("SUCCESS: Uploaded activity to Strava for client %s (Telegram user %s): %s", client_id, tg_user_id, upload_response)
+                    LOGGER.info(
+                        "SUCCESS: Uploaded activity via Straver for client %s (Telegram user %s): %s",
+                        client_id,
+                        tg_user_id,
+                        upload_response,
+                    )
                     strava_uploaded_count += 1
                     LOGGER.debug("Strava upload counter incremented to: %d", strava_uploaded_count)
                 else:
-                    LOGGER.debug("✗ Strava integration not enabled for client %s: access_token=%s, expires_at=%s", client_id, bool(strava_access_token), strava_token_expires_at)
+                    LOGGER.debug("✗ Strava integration not enabled on Straver for client %s", client_id)
             else:
-                LOGGER.debug("✗ No temp file for Strava upload for client %s", client_id)
+                LOGGER.debug("✗ Skipping Straver upload for client %s: temp_file_exists=%s, straver_configured=%s", client_id, bool(temp_file and temp_file.exists()), straver_client.is_configured())
             LOGGER.debug("=== STRAVA UPLOAD SECTION END ===")
         except Exception as exc:
             LOGGER.exception("FAILED: Strava upload failed for client %s (Telegram user %s): %s", client_id, tg_user_id, exc)
