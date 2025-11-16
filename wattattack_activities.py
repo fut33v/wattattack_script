@@ -8,6 +8,7 @@ import json
 import logging
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from getpass import getpass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Tuple
@@ -89,7 +90,7 @@ class WattAttackClient:
         limit: int,
         timeout: float | None = None,
         page_size: int | None = None,
-        max_pages: int = 5,
+        max_pages: int | None = None,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """
         Return recent activities attempting to walk through paginated API responses.
@@ -97,6 +98,9 @@ class WattAttackClient:
         The first element of the returned tuple is the activities list (deduplicated).
         The second element contains non-activity fields from the initial payload
         (totals, aggregations, etc.) preserved for backwards compatibility.
+        If the API returns activities oldest-first, additional pages are fetched
+        and the combined feed is sorted by timestamp so the newest ``limit`` items
+        are returned consistently.
         """
 
         if limit <= 0:
@@ -119,10 +123,13 @@ class WattAttackClient:
             if isinstance(item, dict) and item.get("id") is not None
         }
 
+        feed_order = _infer_feed_order(activities)
+        needs_full_walk = feed_order == "asc"
+        if feed_order:
+            metadata["_feed_order"] = feed_order
+
         effective_page_size = page_size or max(limit, len(collected), 50)
         target = max(limit, effective_page_size)
-        if len(collected) >= target:
-            return collected[:target], metadata
 
         strategies = _build_pagination_strategies()
         for strategy in strategies:
@@ -131,8 +138,13 @@ class WattAttackClient:
             attempts = 0
             initial_count = len(collected)
             progress = False
+            page_budget = (
+                max_pages
+                if max_pages is not None
+                else (50 if needs_full_walk else 10)
+            )
 
-            while len(collected) < target and attempts < max_pages:
+            while (len(collected) < target or needs_full_walk) and attempts < page_budget:
                 params = strategy.build(page, effective_page_size)
                 if params is None:
                     break
@@ -181,7 +193,7 @@ class WattAttackClient:
                     progress = True
 
                 attempts += 1
-                if len(collected) >= target:
+                if not needs_full_walk and len(collected) >= target:
                     break
 
                 if new_items == 0 and page > start_index:
@@ -201,7 +213,9 @@ class WattAttackClient:
                 )
                 break
 
-        return collected[:target], metadata
+        collected_sorted = sorted(collected, key=_activity_timestamp, reverse=True)
+        metadata["_collected_count"] = len(collected_sorted)
+        return collected_sorted[:limit], metadata
 
     def fetch_profile(self, *, timeout: float | None = None) -> Dict[str, Any]:
         """Return the athlete profile details for the current session."""
@@ -485,6 +499,61 @@ def resolve_output_path(raw: Path) -> Tuple[Path | None, bool]:
     if str(raw) == "-":
         return None, False
     return raw, not raw.exists()
+
+
+def _coerce_timestamp(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        try:
+            return datetime.fromisoformat(cleaned.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _activity_timestamp(activity: Dict[str, Any]) -> float:
+    keys = (
+        "startTime",
+        "start_time",
+        "startDate",
+        "start_date",
+        "startTimestamp",
+        "createdAt",
+        "created_at",
+        "updatedAt",
+        "updated_at",
+    )
+    for key in keys:
+        ts = _coerce_timestamp(activity.get(key))
+        if ts is not None:
+            return ts
+
+    ts = _coerce_timestamp(activity.get("id"))
+    if ts is not None:
+        return ts
+
+    return float("-inf")
+
+
+def _infer_feed_order(activities: List[Dict[str, Any]]) -> str | None:
+    if len(activities) < 2:
+        return None
+
+    first = _activity_timestamp(activities[0])
+    last = _activity_timestamp(activities[-1])
+    if first == float("-inf") or last == float("-inf"):
+        return None
+
+    return "desc" if first >= last else "asc"
 
 
 def safe_filename_fragment(value: Any) -> str:
