@@ -7,3 +7,8 @@ data
 webapp/frontend/node_modules/
 webapp/frontend/dist/
 .pycache
+
+# Local tooling outputs (e.g., MCP/Context7 helpers)
+node_modules/
+package-lock.json
+package.json
