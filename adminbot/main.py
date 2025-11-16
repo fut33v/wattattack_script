@@ -2767,7 +2767,10 @@ async def setclient_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     raw_account_id = context.args[0]
-    account_id = resolve_account_identifier(raw_account_id)
+    if raw_account_id.upper() == "ALL":
+        account_id = "ALL"
+    else:
+        account_id = resolve_account_identifier(raw_account_id)
     if account_id is None:
         account_list = format_account_list()
         await update.message.reply_text(
@@ -4204,6 +4207,14 @@ def build_client_assign_keyboard(client_id: int) -> InlineKeyboardMarkup:
                 )
             ]
         )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Все аккаунты",
+                callback_data=f"setclient|ALL|{client_id}",
+            )
+        ]
+    )
     rows.append(
         [
             InlineKeyboardButton(
@@ -6517,7 +6528,9 @@ async def show_client_page(
     message: Optional[Message] = None,
     query=None,
 ) -> None:
-    if account_id not in ACCOUNT_REGISTRY:
+    is_all_accounts = account_id.upper() == "ALL"
+
+    if not is_all_accounts and account_id not in ACCOUNT_REGISTRY:
         text = "⚠️ Аккаунт не найден."
         if query:
             await query.edit_message_text(text)
@@ -6593,8 +6606,12 @@ async def show_client_page(
     if nav_row:
         keyboard_rows.append(nav_row)
 
+    if is_all_accounts:
+        target_label = "ко всем аккаунтам"
+    else:
+        target_label = f"к {ACCOUNT_REGISTRY[account_id].name}"
     text = (
-        f"👥 Выберите клиента для применения данных к {ACCOUNT_REGISTRY[account_id].name}:\n"
+        f"👥 Выберите клиента для применения данных {target_label}:\n"
         f"📄 Страница {page + 1} из {max_page + 1} (всего {total})"
     )
 
@@ -6625,6 +6642,10 @@ async def show_account_selection(
         keyboard_rows.append(
             [InlineKeyboardButton(text="Все аккаунты", callback_data="account_show|ALL")]
         )
+    if kind == "setclient":
+        keyboard_rows.append(
+            [InlineKeyboardButton(text="Все аккаунты", callback_data="setclient_page|ALL|0")]
+        )
     if kind == "workout":
         keyboard_rows.append(
             [InlineKeyboardButton(text="Все аккаунты", callback_data="workout_select|ALL")]
@@ -6642,6 +6663,10 @@ async def show_account_selection(
 
 
 async def assign_client_to_account(query, context, account_id: str, client_id: int) -> None:
+    if account_id.upper() == "ALL":
+        await assign_client_to_all_accounts(query, context, client_id)
+        return
+
     if account_id not in ACCOUNT_REGISTRY:
         await query.edit_message_text("⚠️ Аккаунт не найден.")
         return
@@ -6672,6 +6697,64 @@ async def assign_client_to_account(query, context, account_id: str, client_id: i
         f"✅ Данные клиента применены к {ACCOUNT_REGISTRY[account_id].name}:\n{summary}",
         parse_mode=ParseMode.HTML,
     )
+
+
+async def assign_client_to_all_accounts(query, context, client_id: int) -> None:
+    if not ACCOUNT_REGISTRY:
+        await query.edit_message_text("⚠️ Аккаунты не настроены.")
+        return
+
+    try:
+        client_record = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to fetch client %s", client_id)
+        await query.edit_message_text(f"❌ Ошибка чтения клиента: {exc}")
+        return
+
+    if not client_record:
+        await query.edit_message_text("🔍 Клиент не найден.")
+        return
+
+    successes: List[str] = []
+    failures: Dict[str, str] = {}
+
+    for account_id in sorted(ACCOUNT_REGISTRY):
+        try:
+            await asyncio.to_thread(apply_client_profile, account_id, client_record)
+            successes.append(account_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to apply client %s to %s", client_id, account_id)
+            failures[account_id] = str(exc)
+
+    cache = context.user_data.get("account_cache")
+    if isinstance(cache, dict):
+        if not failures:
+            cache.clear()
+        else:
+            for account_id in successes:
+                cache.pop(account_id, None)
+
+    summary = format_client_summary(client_record)
+    lines: List[str] = []
+    if successes:
+        lines.append(f"✅ Данные клиента применены к {len(successes)} аккаунт(ам):")
+        lines.extend(f"• {ACCOUNT_REGISTRY[account_id].name}" for account_id in successes)
+    else:
+        lines.append("⚠️ Не удалось применить данные ни к одному аккаунту.")
+
+    if failures:
+        lines.append("")
+        lines.append("❌ Ошибки применения:")
+        lines.extend(
+            f"• {ACCOUNT_REGISTRY[account_id].name}: {error}"
+            for account_id, error in failures.items()
+        )
+
+    if summary:
+        lines.append("")
+        lines.append(summary)
+
+    await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def show_account_via_callback(query, account_id: str) -> None:
