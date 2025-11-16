@@ -9,8 +9,6 @@ services:
       POSTGRES_PASSWORD: ${STRAVER_DB_PASSWORD:-straver}
     volumes:
       - straver_db_data:/var/lib/postgresql/data
-    ports:
-      - "${STRAVER_DB_PORT:-55433}:5432"
     restart: unless-stopped
 
   straver-api:
