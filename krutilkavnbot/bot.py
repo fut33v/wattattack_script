@@ -30,6 +30,7 @@ from repositories.client_link_repository import (
 )
 from repositories.admin_repository import get_admin_ids, is_admin
 from straver_client import StraverClient
+from krutilkavnbot import intervals
 
 import os
 
@@ -1525,7 +1526,6 @@ async def _handle_strava_disconnect(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         LOGGER.error("Failed to disconnect Strava: %s", e)
         await query.edit_message_text("Произошла ошибка при отключении Strava.")
-
 
 async def _strava_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /strava command to manage Strava integration."""
@@ -3477,6 +3477,10 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application.add_handler(CommandHandler("history", _history_handler))
     application.add_handler(CommandHandler("cancel", _cancel_booking_handler))
     application.add_handler(CommandHandler("help", _help_handler))
+    application.add_handler(CommandHandler("intervals", intervals.intervals_command_handler))
+    application.add_handler(CallbackQueryHandler(intervals.intervals_callback_handler, pattern=r"^intervals_(cancel|disconnect|skip_athlete|download_menu)$"))
+    application.add_handler(CallbackQueryHandler(intervals.handle_intervals_zwo, pattern=r"^intervals_zwo\\|"))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), intervals.intervals_message_handler))
     application.add_handler(CommandHandler("strava", _strava_command_handler))  # Add Strava command handler
     
     # Strava integration handlers

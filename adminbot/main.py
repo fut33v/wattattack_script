@@ -89,6 +89,7 @@ from wattattack_workouts import (
     parse_zwo_workout,
     zwo_to_chart_data,
 )
+from adminbot import intervals as intervals_admin
 from adminbot.accounts import (
     AccountConfig,
     format_account_list as format_account_list_from_registry,
@@ -3498,6 +3499,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer("Некорректный идентификатор.", show_alert=True)
             return
         await show_client_booking_days(query, context, client_id)
+    elif action == "intervals_start" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+            return
+        await intervals_admin.start_intervals_edit(update, context, client_id)
+    elif action == "intervals_cancel" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+            return
+        await intervals_admin.cancel_intervals(update, context, client_id)
     elif action == "client_schedule_back" and len(parts) >= 2:
         try:
             client_id = int(parts[1])
@@ -4138,6 +4153,12 @@ def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="👥 Посадить на аккаунт",
                     callback_data=f"client_assign_prepare|{client_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔑 Intervals.icu ключ",
+                    callback_data=f"intervals_start|{client_id}",
                 )
             ],
             [
@@ -6833,6 +6854,12 @@ async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     if not ensure_admin_message(update):
         return
+
+    # Intervals.icu pending input (API key + athlete_id)
+    handled_intervals = await intervals_admin.handle_intervals_text(update, context)
+    if handled_intervals:
+        return
+
     identifier_text = update.message.text.strip()
     for pending_key, action in (
         ("pending_addadmin", "add"),

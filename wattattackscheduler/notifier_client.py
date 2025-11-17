@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import requests
 from straver_client import StraverClient
+from wattattackscheduler import intervals_sync
 
 from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
 from repositories.admin_repository import (
@@ -31,6 +32,7 @@ from repositories.schedule_repository import (
     get_seen_activity_ids_for_account,
 )
 from repositories.client_link_repository import get_link_by_client
+from repositories.intervals_link_repository import get_link as get_intervals_link
 from repositories.client_repository import get_client, search_clients
 
 LOGGER = logging.getLogger(__name__)
@@ -758,6 +760,7 @@ def send_to_matching_clients(
     # For each matching client, check if they're linked to a Telegram user and send the message/file
     sent_count = 0
     strava_uploaded_count = 0
+    intervals_uploaded_count = 0
     LOGGER.debug("Processing %d exact matches for athlete %s", len(exact_matches), athlete_name)
     for client in exact_matches:
         client_id = client.get("id")
@@ -828,13 +831,12 @@ def send_to_matching_clients(
             LOGGER.debug("  - link data: %s", link)
 
             straver_status = straver_statuses.get(int(tg_user_id)) if straver_statuses else {}
+            activity_name = "КРУТИЛКА!"
+            activity_description = format_strava_activity_description(activity, account_name, profile)
             if temp_file and temp_file.exists() and straver_client.is_configured():
                 LOGGER.debug("✓ Temp file exists for Strava upload for client %s", client_id)
                 if straver_status.get("connected"):
                     LOGGER.info("Attempting Strava upload via Straver for client %s (Telegram user %s)", client_id, tg_user_id)
-                    
-                    activity_name = "КРУТИЛКА!"
-                    activity_description = format_strava_activity_description(activity, account_name, profile)
                     LOGGER.debug(
                         "Uploading activity to Straver for client %s: name=%s, description=%s, file=%s",
                         client_id,
@@ -861,6 +863,21 @@ def send_to_matching_clients(
                     LOGGER.debug("✗ Strava integration not enabled on Straver for client %s", client_id)
             else:
                 LOGGER.debug("✗ Skipping Straver upload for client %s: temp_file_exists=%s, straver_configured=%s", client_id, bool(temp_file and temp_file.exists()), straver_client.is_configured())
+
+            # Intervals.icu upload
+            try:
+                if temp_file and temp_file.exists():
+                    if intervals_sync.upload_activity(
+                        tg_user_id=int(tg_user_id),
+                        temp_file=temp_file,
+                        description=activity_description,
+                        activity_id=activity.get("id"),
+                        timeout=STRAVER_HTTP_TIMEOUT,
+                        activity_name=activity_name,
+                    ):
+                        intervals_uploaded_count += 1
+            except Exception as exc:
+                LOGGER.exception("FAILED: Intervals.icu upload failed for client %s (Telegram user %s): %s", client_id, tg_user_id, exc)
             LOGGER.debug("=== STRAVA UPLOAD SECTION END ===")
         except Exception as exc:
             LOGGER.exception("FAILED: Strava upload failed for client %s (Telegram user %s): %s", client_id, tg_user_id, exc)
@@ -868,6 +885,7 @@ def send_to_matching_clients(
     LOGGER.info("=== FINAL RESULTS ===")
     LOGGER.info("Sent activity information to %d matching clients", sent_count)
     LOGGER.info("Uploaded activities to Strava for %d clients", strava_uploaded_count)
+    LOGGER.info("Uploaded activities to Intervals.icu for %d clients", intervals_uploaded_count)
     LOGGER.info("=== END OF CLIENT PROCESSING ===")
 
 

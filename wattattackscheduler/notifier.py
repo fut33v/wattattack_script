@@ -34,6 +34,8 @@ from repositories.client_repository import get_client, search_clients
 
 # Import the send_to_matching_clients function from notifier_client
 from wattattackscheduler.notifier_client import send_to_matching_clients
+from wattattackscheduler import intervals_plan
+from wattattackscheduler import intervals_upload
 
 LOGGER = logging.getLogger(__name__)
 
@@ -746,6 +748,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             send_workout_reminders(timeout=args.timeout, reminder_hours=args.reminder_hours)
         except Exception:
             LOGGER.exception("Failed to send workout reminders")
+
+        # Send Intervals.icu plan for the next 7 days to linked users via client bot
+        krutilkavn_token = os.environ.get(KRUTILKAVN_BOT_TOKEN_ENV)
+        try:
+            intervals_plan.notify_week_plan(
+                bot_token=krutilkavn_token or "",
+                timeout=args.timeout,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to send Intervals.icu weekly plan notifications")
+
+        # Upload Intervals.icu planned workouts to WattAttack accounts
+        try:
+            intervals_upload.sync_intervals_workouts(
+                accounts=accounts,
+                bot_token=args.token,
+                timeout=args.timeout,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to sync Intervals.icu workouts to WattAttack")
 
     return 0
 
