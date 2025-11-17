@@ -61,7 +61,7 @@ def notify_week_plan(*, bot_token: str, timeout: float) -> None:
         LOGGER.debug("KRUTILKAVN_BOT_TOKEN is not set; skipping Intervals plan notifications")
         return
     # Import lazily to avoid circular import with notifier
-    from wattattackscheduler.notifier import telegram_send_message
+    from scheduler.notifier import telegram_send_message
 
     links = list_links()
     if not links:

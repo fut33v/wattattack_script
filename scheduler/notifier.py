@@ -33,9 +33,9 @@ from repositories.client_link_repository import get_link_by_client
 from repositories.client_repository import get_client, search_clients
 
 # Import the send_to_matching_clients function from notifier_client
-from wattattackscheduler.notifier_client import send_to_matching_clients
-from wattattackscheduler import intervals_plan
-from wattattackscheduler import intervals_upload
+from scheduler.notifier_client import send_to_matching_clients
+from scheduler import intervals_plan
+from scheduler import intervals_upload
 
 LOGGER = logging.getLogger(__name__)
 

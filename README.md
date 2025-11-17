@@ -23,7 +23,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
   - `/start`, `/help` – показать список аккаунтов и подсказки.
   - `/recent <n>` – fetch recent workouts for a selected account.
   - `/latest` – download latest workout FIT for each account.
-- **wattattackscheduler/** – Scheduler loop and notifier CLI that watch WattAttack for new activities and send FIT files with metadata to admins.
+- **scheduler/** – Scheduler loop and notifier CLI that watch WattAttack for new activities and send FIT files with metadata to admins.
 - **wattattack_activities.py** – API wrapper for WattAttack endpoints (`/auth/login`, `/activities`, `/athlete/update`, `/user/update`, `/auth/check`, `/workouts/user-create`).
 - **wattattack_workouts.py** – ZWO workout parser, sanitizer, chart/metrics calculator, and payload builder for library uploads.
 - **scripts/load_clients.py** – CLI loader to import clients from CSV into PostgreSQL (with optional `--truncate`).

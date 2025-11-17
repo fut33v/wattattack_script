@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import requests
 from straver_client import StraverClient
-from wattattackscheduler import intervals_sync
+from scheduler import intervals_sync
 
 from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
 from repositories.admin_repository import (

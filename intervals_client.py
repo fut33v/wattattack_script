@@ -6,7 +6,6 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-import base64
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -58,7 +57,7 @@ class IntervalsClient:
             files = {"file": (file_path.name, fp, "application/octet-stream")}
             response = self.session.post(
                 self._url(f"/api/v1/athlete/{self.athlete_id}/activities"),
-                params=params,
+                data=params,
                 files=files,
                 timeout=self.timeout,
             )

@@ -141,6 +141,7 @@ def sync_intervals_workouts(
             date_str = (ev.get("start_date_local") or "")[:10] or None
             name = ev.get("name") or "Без названия"
             per_account_status: Dict[str, bool] = {}
+            event_had_new_records = False
 
             # Download ZWO once per event
             zwo_bytes = None
@@ -197,6 +198,7 @@ def sync_intervals_workouts(
                     status=status,
                     info=info,
                 )
+                event_had_new_records = True
                 per_account_status[account_id] = success
                 LOGGER.info(
                     "Intervals upload %s for user %s to account %s: %s",
@@ -207,6 +209,9 @@ def sync_intervals_workouts(
                 )
 
             if bot_token and accounts:
+                # Avoid spamming the user if nothing new happened for this event
+                if not event_had_new_records:
+                    continue
                 total_accounts = len(accounts)
                 ok_count = sum(1 for v in per_account_status.values() if v)
                 if ok_count == total_accounts:

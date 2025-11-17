@@ -52,7 +52,7 @@ services:
       [
         "python",
         "-m",
-        "wattattackscheduler",
+        "scheduler",
         "--interval",
         "${WATTATTACK_INTERVAL_SECONDS:-300}",
         "--notifier-args",

@@ -20,7 +20,7 @@ STOP_REQUESTED = False
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Periodically run wattattackscheduler.notifier without cron.",
+        description="Periodically run scheduler.notifier without cron.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
