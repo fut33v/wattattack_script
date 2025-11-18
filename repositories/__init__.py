@@ -13,4 +13,5 @@ __all__ = [
     "race_repository",
     "link_requests_repository",
     "db_utils",
+    "vk_client_link_repository",
 ]

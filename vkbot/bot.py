@@ -12,7 +12,7 @@ from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 from vk_api.utils import get_random_id
 
 from repositories import client_repository, schedule_repository
-from repositories.client_link_repository import get_link_by_user, link_user_to_client
+from repositories.vk_client_link_repository import get_link_by_vk_user, link_vk_user_to_client
 from .formatting import (
     format_client_name,
     format_day_display,
@@ -40,6 +40,20 @@ HOW_TO_GET_ATTACHMENT = "video-232708853_456239017"
 _LOCAL_TZ = ZoneInfo("Europe/Moscow")
 _BOOKING_CUTOFF = timedelta(minutes=90)
 _STATE: Dict[int, Dict[str, Any]] = {}
+_NEW_CLIENT_STEPS: List[Dict[str, str]] = [
+    {"key": "weight", "prompt": "Введите ваш вес в кг (например, 72.5)."},
+    {"key": "height", "prompt": "Введите ваш рост в см (например, 178)."},
+    {"key": "ftp", "prompt": "Введите FTP в ваттах или нажмите «Пропустить»."},
+    {"key": "pedals", "prompt": "Выберите тип педалей или нажмите «Пропустить»."},
+    {"key": "goal", "prompt": "Опишите цель тренировок (можно коротко)."},
+]
+_PEDAL_OPTIONS: List[tuple[str, str]] = [
+    ("топталки (под кроссовки)", "топталки"),
+    ("контакты шоссе Look", "контакты look"),
+    ("контакты шоссе Shimano", "контакты shimano road"),
+    ("контакты MTB SPD", "контакты spd"),
+    ("Пропустить", "пропустить"),
+]
 
 
 def run_bot(
@@ -198,6 +212,9 @@ def _handle_stateful_message(peer_id: int, user_id: Optional[int], text: str, vk
 
     state = _get_state(peer_id)
     mode = state.get("mode")
+    if mode == "new_client":
+        _handle_new_client_input(peer_id, text, vk)
+        return True
 
     day_choice = match_day_text(text, day_map=state.get("day_map"), mode=mode)
     if day_choice:
@@ -273,7 +290,7 @@ def _slot_start_datetime(slot: Dict[str, Any]) -> Optional[datetime]:
 
 
 def _get_linked_client(peer_id: int) -> tuple[Optional[Dict], Optional[Dict]]:
-    link = get_link_by_user(peer_id)
+    link = get_link_by_vk_user(peer_id)
     client: Optional[Dict] = None
     if link and isinstance(link.get("client_id"), int):
         try:
@@ -284,37 +301,13 @@ def _get_linked_client(peer_id: int) -> tuple[Optional[Dict], Optional[Dict]]:
 
 
 def _prompt_link(peer_id: int, vk) -> None:
-    state = _get_state(peer_id)
-    state["mode"] = "link_search"
-    vk_user = _fetch_vk_user(peer_id, vk)
-    last_name = (vk_user.get("last_name") or "").strip()
-    first_name = (vk_user.get("first_name") or "").strip()
-    pref_term = last_name or None
-
-    if pref_term:
-        candidates = _search_clients(pref_term)
-        if len(candidates) == 1:
-            _link_client(peer_id, candidates[0], vk)
-            return
-        if candidates:
-            _present_candidates(peer_id, candidates, vk, prompt="Нашёл по вашей фамилии:")
-            return
-
-    # Fallback: ask manually
-    if first_name:
-        _send_text(
-            vk,
-            peer_id,
-            f"{first_name}, нужна привязка анкеты. Напишите фамилию (или часть).",
-        )
-    else:
-        _send_text(vk, peer_id, "Нужна привязка анкеты. Напишите фамилию (или часть).")
+    _auto_link_or_onboard(peer_id, vk)
 
 
 def _handle_link_search(peer_id: int, term: str, vk) -> None:
-    candidates = _search_clients(term)
+    candidates = _search_clients(term, require_full_match=False)
     if not candidates:
-        _send_text(vk, peer_id, "Не нашёл анкеты. Попробуйте другую фамилию.")
+        _start_new_client_onboarding(peer_id, vk)
         return
     if len(candidates) == 1:
         _link_client(peer_id, candidates[0], vk)
@@ -350,17 +343,22 @@ def _handle_link_pick(peer_id: int, text: str, vk) -> None:
 
 
 def _link_client(peer_id: int, client: Dict[str, Any], vk) -> None:
+    state = _get_state(peer_id)
+    state.pop("mode", None)
+    state.pop("candidates", None)
     client_id = client.get("id")
     if not isinstance(client_id, int):
         _send_text(vk, peer_id, "Не удалось привязать эту анкету.")
         return
 
     try:
-        link_user_to_client(
-            tg_user_id=peer_id,
+        vk_user = _fetch_vk_user(peer_id, vk)
+        full_name = " ".join(part for part in [(vk_user.get("first_name") or "").strip(), (vk_user.get("last_name") or "").strip()] if part) or None
+        link_vk_user_to_client(
+            vk_user_id=peer_id,
             client_id=client_id,
-            tg_username=None,
-            tg_full_name=None,
+            vk_username=vk_user.get("screen_name"),
+            vk_full_name=full_name,
         )
     except Exception:
         log.exception("Failed to link peer %s to client %s", peer_id, client_id)
@@ -368,7 +366,7 @@ def _link_client(peer_id: int, client: Dict[str, Any], vk) -> None:
         return
 
     _clear_state(peer_id)
-    _send_text(vk, peer_id, f"Привязали: {format_client_name(client)}. Теперь можно бронировать.")
+    _send_text(vk, peer_id, f"Привязали: {format_client_name(client)}. Теперь можно бронировать.", keyboard=build_inline_keyboard())
 
 
 def _present_candidates(peer_id: int, candidates: List[Dict[str, Any]], vk, *, prompt: str = "Нашёл анкеты:") -> None:
@@ -391,14 +389,31 @@ def _present_candidates(peer_id: int, candidates: List[Dict[str, Any]], vk, *, p
     state["mode"] = "link_pick"
     state["candidates"] = candidates
     _send_text(vk, peer_id, "\n".join(lines), keyboard=keyboard.get_keyboard())
+    state["mode"] = "link_pick"
 
 
-def _search_clients(term: str) -> List[Dict[str, Any]]:
+def _search_clients(term: str, *, require_full_match: bool = False, first_name: Optional[str] = None) -> List[Dict[str, Any]]:
     try:
-        return client_repository.search_clients(term, limit=5)
+        candidates = client_repository.search_clients(term, limit=5)
     except Exception:
         log.exception("Failed to search clients by term %s", term)
         return []
+
+    if not require_full_match:
+        return candidates
+
+    term_clean = term.strip().lower()
+    first_clean = (first_name or "").strip().lower()
+    filtered = []
+    for c in candidates:
+        last_name = (c.get("last_name") or "").strip().lower()
+        first = (c.get("first_name") or "").strip().lower()
+        if last_name != term_clean:
+            continue
+        if first_clean and first and first != first_clean:
+            continue
+        filtered.append(c)
+    return filtered
 
 
 def _fetch_vk_user(peer_id: int, vk) -> Dict[str, Any]:
@@ -409,6 +424,30 @@ def _fetch_vk_user(peer_id: int, vk) -> Dict[str, Any]:
     except Exception:
         log.debug("Failed to fetch VK user %s", peer_id, exc_info=True)
     return {}
+
+
+def _auto_link_or_onboard(peer_id: int, vk) -> None:
+    vk_user = _fetch_vk_user(peer_id, vk)
+    last_name = (vk_user.get("last_name") or "").strip()
+    first_name = (vk_user.get("first_name") or "").strip()
+
+    if last_name:
+        candidates = _search_clients(last_name, require_full_match=True, first_name=first_name)
+        if len(candidates) == 1:
+            _link_client(peer_id, candidates[0], vk)
+            return
+        if len(candidates) > 1:
+            _present_candidates(peer_id, candidates, vk, prompt="Нашёл несколько совпадений:")
+            return
+
+    # No match — create new client using VK name
+    if not first_name and not last_name:
+        _send_text(vk, peer_id, "Не удалось прочитать имя и фамилию в профиле VK. Напишите фамилию.")
+        state = _get_state(peer_id)
+        state["mode"] = "link_search"
+        return
+
+    _start_new_client_onboarding(peer_id, vk)
 
 
 def _link_client_by_id(peer_id: int, client_id: int, vk) -> None:
@@ -424,6 +463,136 @@ def _link_client_by_id(peer_id: int, client_id: int, vk) -> None:
         return
 
     _link_client(peer_id, client, vk)
+
+
+def _start_new_client_onboarding(peer_id: int, vk) -> None:
+    vk_user = _fetch_vk_user(peer_id, vk)
+    first_name = (vk_user.get("first_name") or "").strip() or None
+    last_name = (vk_user.get("last_name") or "").strip() or None
+    if not first_name and not last_name:
+        _send_text(vk, peer_id, "Не удалось прочитать имя и фамилию в профиле VK. Укажите сначала фамилию.")
+        state = _get_state(peer_id)
+        state["mode"] = "link_search"
+        return
+
+    state = _get_state(peer_id)
+    state["mode"] = "new_client"
+    state["new_client_data"] = {"first_name": first_name, "last_name": last_name}
+    state["new_client_step"] = 0
+    _send_text(vk, peer_id, "Создаём новую анкету. Идём по шагам.")
+    _send_onboarding_prompt(peer_id, vk, step_index=0)
+
+
+def _handle_new_client_input(peer_id: int, text: str, vk) -> None:
+    state = _get_state(peer_id)
+    step_index = state.get("new_client_step", 0)
+    data = state.get("new_client_data") or {}
+
+    def _advance() -> None:
+        state["new_client_step"] = step_index + 1
+        if step_index + 1 < len(_NEW_CLIENT_STEPS):
+            _send_onboarding_prompt(peer_id, vk, step_index=step_index + 1)
+        else:
+            _finalize_new_client(peer_id, vk)
+
+    if step_index >= len(_NEW_CLIENT_STEPS):
+        _finalize_new_client(peer_id, vk)
+        return
+
+    key = _NEW_CLIENT_STEPS[step_index]["key"]
+    text_clean = (text or "").strip()
+
+    if key in {"weight", "height", "ftp"}:
+        if text_clean.lower() in {"пропустить", "skip", ""}:
+            data[key] = None
+            _advance()
+            return
+        try:
+            value = float(text_clean.replace(",", "."))
+            if value <= 0:
+                raise ValueError
+            data[key] = value
+            _advance()
+        except Exception:
+            _send_text(vk, peer_id, "Введите положительное число или «Пропустить».")
+        return
+
+    if key == "pedals":
+        choice = _normalize_pedals_choice(text_clean)
+        if choice == "SKIP":
+            data[key] = None
+            _advance()
+            return
+        if choice is None:
+            _send_onboarding_prompt(peer_id, vk, step_index=step_index)
+            return
+        data[key] = choice
+        _advance()
+        return
+
+    if key == "goal":
+        data[key] = text_clean or None
+        _advance()
+        return
+
+    _advance()
+
+
+def _finalize_new_client(peer_id: int, vk) -> None:
+    state = _get_state(peer_id)
+    data = state.get("new_client_data") or {}
+    first_name = data.get("first_name")
+    last_name = data.get("last_name")
+    try:
+        client = client_repository.create_client(
+            first_name=first_name,
+            last_name=last_name,
+            weight=data.get("weight"),
+            height=data.get("height"),
+            ftp=data.get("ftp"),
+            pedals=data.get("pedals"),
+            goal=data.get("goal"),
+        )
+    except Exception:
+        log.exception("Failed to create client for peer %s", peer_id)
+        _send_text(vk, peer_id, "Не удалось создать анкету. Попробуйте позже.")
+        state.pop("mode", None)
+        return
+
+    _link_client(peer_id, client, vk)
+
+
+def _send_onboarding_prompt(peer_id: int, vk, *, step_index: int) -> None:
+    if step_index >= len(_NEW_CLIENT_STEPS):
+        return
+    prompt = _NEW_CLIENT_STEPS[step_index]["prompt"]
+    key = _NEW_CLIENT_STEPS[step_index]["key"]
+
+    keyboard = None
+    if key == "ftp":
+        kb = VkKeyboard(inline=False, one_time=True)
+        kb.add_button("Пропустить", color=VkKeyboardColor.SECONDARY, payload={"action": "skip"})
+        keyboard = kb.get_keyboard()
+    elif key == "pedals":
+        kb = VkKeyboard(inline=False, one_time=True)
+        for idx, (label, _) in enumerate(_PEDAL_OPTIONS):
+            kb.add_button(label, color=VkKeyboardColor.PRIMARY, payload={"action": "pedals"})
+            if idx % 2 == 1:
+                kb.add_line()
+        keyboard = kb.get_keyboard()
+
+    _send_text(vk, peer_id, prompt, keyboard=keyboard)
+
+
+def _normalize_pedals_choice(text: str) -> Optional[str]:
+    cleaned = (text or "").strip().lower()
+    if cleaned in {"пропустить", "skip", ""}:
+        return "SKIP"
+    for label, value in _PEDAL_OPTIONS:
+        if cleaned in label.lower() or cleaned == value.lower():
+            return value
+    return cleaned or None
+
 
 
 def _filter_slots() -> List[Dict[str, Any]]:

@@ -112,6 +112,19 @@ export interface ClientLinkListResponse {
   items: ClientLinkRow[];
 }
 
+export interface VkClientLinkRow {
+  client_id: number;
+  vk_user_id: number;
+  vk_username?: string | null;
+  vk_full_name?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface VkClientLinkListResponse {
+  items: VkClientLinkRow[];
+}
+
 export interface ScheduleWeekRow {
   id: number;
   week_start_date: string;

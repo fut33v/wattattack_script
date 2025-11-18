@@ -55,6 +55,7 @@ from .dependencies import (
     require_admin,
     require_user,
 )
+from .routes.vk_client_links import router as vk_client_links_router
 
 
 BASE_DIR = Path(__file__).parent
@@ -114,6 +115,7 @@ def _send_telegram_message(chat_id: int, text: str, *, parse_mode: str | None = 
 
 
 api = APIRouter(prefix="/api", tags=["api"])
+api.include_router(vk_client_links_router, dependencies=[Depends(require_admin)])
 
 SCHEDULE_SESSION_KINDS = {"self_service", "instructor"}
 SCHEDULE_SESSION_KIND_LABELS = {
