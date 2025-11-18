@@ -2082,9 +2082,7 @@ def api_client_links(user=Depends(require_admin)):
     return _json_success({"items": jsonable_encoder(enriched)})
 
 
-@api.patch("/client-links/{client_id}")
-async def api_update_client_link(client_id: int, request: Request, user=Depends(require_admin)):
-    payload = await request.json()
+def _parse_client_link_payload(payload: dict) -> tuple[int, str | None, str | None]:
     tg_user_id = payload.get("tg_user_id")
     if tg_user_id is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "tg_user_id required")
@@ -2093,20 +2091,74 @@ async def api_update_client_link(client_id: int, request: Request, user=Depends(
         tg_user_id_int = int(tg_user_id)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid tg_user_id") from exc
+    if tg_user_id_int <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "tg_user_id must be positive")
 
     tg_username = payload.get("tg_username")
-    tg_full_name = payload.get("tg_full_name")
+    if tg_username is not None and not isinstance(tg_username, str):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "tg_username must be a string")
     if isinstance(tg_username, str):
         tg_username = tg_username.strip() or None
+
+    tg_full_name = payload.get("tg_full_name")
+    if tg_full_name is not None and not isinstance(tg_full_name, str):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "tg_full_name must be a string")
     if isinstance(tg_full_name, str):
         tg_full_name = tg_full_name.strip() or None
 
-    record = client_link_repository.link_user_to_client(
-        tg_user_id=tg_user_id_int,
-        client_id=client_id,
-        tg_username=tg_username,
-        tg_full_name=tg_full_name,
-    )
+    return tg_user_id_int, tg_username, tg_full_name
+
+
+@api.post("/client-links")
+async def api_create_client_link(request: Request, user=Depends(require_admin)):
+    payload = await request.json()
+    client_id_raw = payload.get("client_id")
+    if client_id_raw is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "client_id required")
+    try:
+        client_id = int(client_id_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid client_id") from exc
+    if client_id <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "client_id must be positive")
+
+    client = client_repository.get_client(client_id)
+    if not client:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+
+    tg_user_id_int, tg_username, tg_full_name = _parse_client_link_payload(payload)
+    try:
+        record = client_link_repository.link_user_to_client(
+            tg_user_id=tg_user_id_int,
+            client_id=client_id,
+            tg_username=tg_username,
+            tg_full_name=tg_full_name,
+        )
+    except Exception:
+        log.exception("Failed to create client link for client %s", client_id)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to create link")
+
+    return {"item": jsonable_encoder(record)}
+
+
+@api.patch("/client-links/{client_id}")
+async def api_update_client_link(client_id: int, request: Request, user=Depends(require_admin)):
+    payload = await request.json()
+    if not client_repository.get_client(client_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+
+    tg_user_id_int, tg_username, tg_full_name = _parse_client_link_payload(payload)
+    try:
+        record = client_link_repository.link_user_to_client(
+            tg_user_id=tg_user_id_int,
+            client_id=client_id,
+            tg_username=tg_username,
+            tg_full_name=tg_full_name,
+        )
+    except Exception:
+        log.exception("Failed to update client link for client %s", client_id)
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to update link")
+
     return {"item": jsonable_encoder(record)}
 
 

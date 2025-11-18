@@ -11,17 +11,17 @@ export default function ClientLinksPage() {
   const { session } = useAppContext();
   const queryClient = useQueryClient();
 
-  if (!session.isAdmin) {
-    return (
-      <Panel title="Связки" subtitle="Только администраторы могут управлять связками">
-        <div className="empty-state">Недостаточно прав.</div>
-      </Panel>
-    );
-  }
-
   const listQuery = useQuery<ClientLinkListResponse>({
     queryKey: ["client-links"],
     queryFn: () => apiFetch<ClientLinkListResponse>("/api/client-links")
+  });
+
+  const createMutation = useMutation({
+    mutationFn: (payload: Record<string, unknown>) =>
+      apiFetch("/api/client-links", {
+        method: "POST",
+        body: JSON.stringify(payload)
+      })
   });
 
   const updateMutation = useMutation({
@@ -45,6 +45,51 @@ export default function ClientLinksPage() {
     }
   });
 
+  const createErrorMessage =
+    createMutation.isError && createMutation.error instanceof Error
+      ? createMutation.error.message
+      : null;
+
+  if (!session.isAdmin) {
+    return (
+      <Panel title="Связки" subtitle="Только администраторы могут управлять связками">
+        <div className="empty-state">Недостаточно прав.</div>
+      </Panel>
+    );
+  }
+
+  function handleCreate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    createMutation.reset();
+
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const clientIdValue = formData.get("client_id");
+    const tgUserIdValue = formData.get("tg_user_id");
+    if (!clientIdValue || !tgUserIdValue) return;
+
+    const clientId = Number(clientIdValue);
+    const tgUserId = Number(tgUserIdValue);
+    if (Number.isNaN(clientId) || Number.isNaN(tgUserId)) return;
+
+    const payload: Record<string, unknown> = {
+      client_id: clientId,
+      tg_user_id: tgUserId
+    };
+
+    const tgUsername = (formData.get("tg_username") as string | null)?.trim();
+    const tgFullName = (formData.get("tg_full_name") as string | null)?.trim();
+    if (tgUsername) payload.tg_username = tgUsername;
+    if (tgFullName) payload.tg_full_name = tgFullName;
+
+    createMutation.mutate(payload, {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ["client-links"] });
+        form.reset();
+      }
+    });
+  }
+
   function handleSubmit(event: FormEvent<HTMLFormElement>, row: ClientLinkRow) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -67,7 +112,22 @@ export default function ClientLinksPage() {
   }
 
   return (
-    <Panel title="Связки" subtitle="Привязка клиентов к Telegram-аккаунтам">
+    <Panel
+      title="Связки"
+      subtitle="Привязка клиентов к Telegram-аккаунтам"
+      headerExtra={
+        <form className="admin-form" onSubmit={handleCreate}>
+          <input type="number" name="client_id" placeholder="ID клиента" required />
+          <input type="number" name="tg_user_id" placeholder="Telegram ID" required />
+          <input type="text" name="tg_username" placeholder="username (опционально)" />
+          <input type="text" name="tg_full_name" placeholder="Имя (опционально)" />
+          <button type="submit" className="button">
+            {createMutation.isPending ? "Создаем…" : "Создать"}
+          </button>
+        </form>
+      }
+    >
+      {createErrorMessage && <div className="form-error">Не удалось создать связку: {createErrorMessage}</div>}
       {listQuery.isLoading ? (
         <div className="empty-state">Загружаем связки…</div>
       ) : (
