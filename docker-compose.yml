@@ -43,6 +43,14 @@ services:
     command: ["python", "-m", "krutilkavnbot.main"]
     env_file: .env
     restart: unless-stopped
+  
+  vkbot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    command: ["python", "-m", "vkbot"]
+    env_file: .env
+    restart: unless-stopped
 
   scheduler:
     build:
