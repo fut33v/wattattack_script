@@ -14,7 +14,7 @@ import re
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -35,6 +35,8 @@ from repositories.client_repository import (
     search_clients,
     update_client_fields,
 )
+from repositories.client_link_repository import link_user_to_client
+from repositories.link_requests_repository import get_link_request, delete_link_request
 from repositories.admin_repository import (
     ensure_admin_table,
     seed_admins_from_env,
@@ -102,6 +104,7 @@ from adminbot.accounts import (
 LOGGER = logging.getLogger(__name__)
 
 BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
+CLIENT_BOT_TOKEN_ENV = "KRUTILKAVN_BOT_TOKEN"
 ACCOUNTS_ENV = "WATTATTACK_ACCOUNTS_FILE"
 DEFAULT_ACCOUNTS_PATH = Path("accounts.json")
 DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
@@ -128,6 +131,122 @@ WEEKDAY_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 BOOKING_DAY_LIMIT = max(1, int(os.environ.get("ADMINBOT_BOOKING_DAY_LIMIT", "7")))
 BOOKING_REASSIGN_LIMIT = max(3, int(os.environ.get("ADMINBOT_REASSIGN_OPTIONS", "12")))
 CLIENT_BOOKINGS_LIMIT = max(5, int(os.environ.get("ADMINBOT_CLIENT_BOOKINGS_LIMIT", "10")))
+_CLIENT_BOT = None
+_CLIENT_BOT_WARNED = False
+
+
+def _get_client_bot() -> Bot | None:
+    global _CLIENT_BOT, _CLIENT_BOT_WARNED
+    if _CLIENT_BOT is not None:
+        return _CLIENT_BOT
+    token = os.environ.get(CLIENT_BOT_TOKEN_ENV)
+    if not token:
+        if not _CLIENT_BOT_WARNED:
+            LOGGER.warning("KRUTILKAVN_BOT_TOKEN is not set; users will not be notified about link approvals")
+            _CLIENT_BOT_WARNED = True
+        return None
+    try:
+        _CLIENT_BOT = Bot(token=token)
+        return _CLIENT_BOT
+    except Exception:
+        LOGGER.exception("Failed to init client bot for link notifications", exc_info=True)
+        return None
+
+
+def _format_link_client_label(client: Dict[str, Any]) -> str:
+    last_name = (client.get("last_name") or "").strip()
+    first_name = (client.get("first_name") or "").strip()
+    full_name = (client.get("full_name") or "").strip()
+    if last_name and first_name:
+        display = f"{last_name} {first_name}".strip()
+    elif full_name:
+        display = full_name
+    else:
+        display = last_name or first_name or "Без имени"
+    return f"{display} (ID {client.get('id')})"
+
+
+async def _handle_link_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    admin_user = update.effective_user
+    if query is None or admin_user is None:
+        return
+
+    data = query.data or ""
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "link":
+        return
+    action = parts[1]
+    request_id = parts[2]
+
+    if not db_is_admin(tg_id=admin_user.id, username=admin_user.username):
+        await query.answer("Недостаточно прав.", show_alert=True)
+        return
+
+    request = get_link_request(request_id)
+    if not request:
+        await query.answer("Запрос не найден или уже обработан.", show_alert=True)
+        try:
+            await query.edit_message_text("Запрос не найден или уже обработан.")
+        except Exception:
+            pass
+        return
+
+    client = get_client(request["client_id"])
+    if not client:
+        await query.answer("Анкета не найдена.", show_alert=True)
+        delete_link_request(request_id)
+        try:
+            await query.edit_message_text("Анкета не найдена. Запрос закрыт.")
+        except Exception:
+            pass
+        return
+
+    client_label = _format_link_client_label(client)
+    tg_user_id = request["tg_user_id"]
+    user_chat_id = request.get("user_chat_id") or tg_user_id
+
+    if action == "approve":
+        try:
+            link_user_to_client(
+                tg_user_id=tg_user_id,
+                client_id=client["id"],
+                tg_username=request.get("tg_username"),
+                tg_full_name=request.get("tg_full_name"),
+            )
+        except Exception:
+            LOGGER.exception("Failed to link user %s to client %s on approve", tg_user_id, client["id"])
+            await query.answer("Не удалось привязать клиента. Попробуйте позже.", show_alert=True)
+            return
+        admin_text = f"✅ Привязка подтверждена.\nКлиент: {client_label}\nПользователь: id {tg_user_id}"
+        user_text = (
+            f"Администратор подтвердил привязку к клиенту {client_label}. "
+            "Теперь вы можете пользоваться сервисом."
+        )
+    else:
+        admin_text = f"❌ Привязка отклонена.\nКлиент: {client_label}\nПользователь: id {tg_user_id}"
+        user_text = (
+            f"Администратор отклонил запрос на привязку к клиенту {client_label}. "
+            "Связь осталась без изменений."
+        )
+
+    delete_link_request(request_id)
+
+    try:
+        await query.edit_message_text(admin_text)
+    except Exception:
+        LOGGER.debug("Failed to edit approval message %s", request_id, exc_info=True)
+
+    client_bot = _get_client_bot()
+    if client_bot:
+        try:
+            await client_bot.send_message(chat_id=user_chat_id, text=user_text)
+        except Exception:
+            LOGGER.exception("Failed to notify user %s about link decision %s", tg_user_id, request_id)
+    else:
+        LOGGER.info("Skipping user notification for %s: client bot not configured", tg_user_id)
+
+    await query.answer("Готово.")
 
 (
     NEWCLIENT_FIRST_NAME,
@@ -7187,6 +7306,7 @@ def build_application(token: str) -> Application:
     application.add_handler(
         MessageHandler(document_filter, document_upload_handler)
     )
+    application.add_handler(CallbackQueryHandler(_handle_link_request_callback, pattern=r"^link:(approve|reject):[0-9a-fA-F]+$"))
     application.add_handler(CallbackQueryHandler(noop_handler, pattern="^noop$"))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_error_handler(on_error)

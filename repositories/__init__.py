@@ -11,5 +11,6 @@ __all__ = [
     "schedule_repository",
     "message_repository",
     "race_repository",
+    "link_requests_repository",
     "db_utils",
 ]

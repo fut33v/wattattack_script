@@ -28,6 +28,10 @@ from repositories.client_link_repository import (
     link_user_to_client,
     update_strava_tokens,
 )
+from repositories.link_requests_repository import (
+    create_link_request,
+    delete_link_request,
+)
 from repositories.admin_repository import get_admin_ids, is_admin
 from straver_client import StraverClient
 from krutilkavnbot import intervals
@@ -61,6 +65,7 @@ _STATUS_LABELS: Final[Dict[str, str]] = {
 DEFAULT_GREETING: Final[str] = "Здравствуйте!"
 MAX_SUGGESTIONS: Final[int] = 6
 ADMIN_BOT_TOKEN_ENV: Final[str] = "TELEGRAM_BOT_TOKEN"
+LINK_REQUEST_ID_LEN: Final[int] = 12
 
 (
     ASK_LAST_NAME,
@@ -2293,7 +2298,7 @@ async def _request_admin_approval(
             )
         return False
 
-    request_id = uuid4().hex
+    request_id = uuid4().hex[:LINK_REQUEST_ID_LEN]
     tg_username = user.username if user.username else None
     tg_full_name = " ".join(filter(None, [user.first_name, user.last_name])).strip() or None
 
@@ -2309,13 +2314,25 @@ async def _request_admin_approval(
     }
     _store_pending_request(context, request)
 
+    try:
+        create_link_request(
+            request_id=request_id,
+            client_id=client["id"],
+            tg_user_id=user.id,
+            tg_username=tg_username,
+            tg_full_name=tg_full_name,
+            user_chat_id=user_chat_id,
+        )
+    except Exception:
+        LOGGER.exception("Failed to persist link request %s", request_id)
+
     await respond_initial(
         f"Запрос на привязку клиента {_format_client_label(client)} отправлен администратору. "
         "Ожидайте подтверждения.",
     )
 
-    await _notify_admins(context, request, admin_ids)
-    if not request["admin_messages"]:
+    delivered = await _notify_admins(context, request, admin_ids)
+    if not delivered:
         _pop_pending_request(context, request_id)
         failure_text = (
             "Не удалось отправить запрос администраторам. Попробуйте позже или свяжитесь с поддержкой."
@@ -3206,7 +3223,7 @@ async def _notify_admins(
     context: ContextTypes.DEFAULT_TYPE,
     request: Dict[str, Any],
     admin_ids: List[int],
-) -> None:
+) -> bool:
     client = request["client"]
     user_id = request["user_id"]
     user_username = request.get("user_username")
@@ -3243,27 +3260,32 @@ async def _notify_admins(
             existing_parts.append(f"id {existing_user_id}")
         lines.append("Предыдущая связь: " + ", ".join(existing_parts))
 
+    callback_suffix = f":{request['request_id']}"
     keyboard = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Подтвердить", callback_data=f"approve:{request['request_id']}"),
-                InlineKeyboardButton("Отменить", callback_data=f"reject:{request['request_id']}"),
+                InlineKeyboardButton("Подтвердить", callback_data=f"link:approve{callback_suffix}"),
+                InlineKeyboardButton("Отменить", callback_data=f"link:reject{callback_suffix}"),
             ]
         ]
     )
 
+    # Send interactive message from adminbot (no notifications from client bot).
+    delivered = False
     for admin_id in admin_ids:
         try:
-            message = await context.bot.send_message(
+            sent = await _send_admin_notification(
                 admin_id,
                 "\n".join(lines),
                 reply_markup=keyboard,
             )
-            request["admin_messages"].append(
-                {"chat_id": message.chat_id, "message_id": message.message_id}
-            )
+            if not sent:
+                LOGGER.warning("Admin notification not delivered for request %s to %s", request["request_id"], admin_id)
+            else:
+                delivered = True
         except Exception:
-            LOGGER.exception("Failed to send approval request %s to admin %s", request["request_id"], admin_id)
+            LOGGER.debug("Failed to send adminbot notification for approval request %s", request["request_id"], exc_info=True)
+    return delivered
 
 
 async def _handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3276,16 +3298,28 @@ async def _handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_T
     data = query.data or ""
     if ":" not in data:
         return
-    action, request_id = data.split(":", 1)
+    parts = data.split(":")
+    action = parts[0]
+    request_id = parts[1] if len(parts) > 1 else ""
+    client_id_from_cb = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+    user_id_from_cb = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else None
 
     request = _get_pending_request(context, request_id)
     if request is None:
+        # Fallback: reconstruct minimal request from callback data to keep buttons working after restarts.
+        client_data = get_client(client_id_from_cb) if client_id_from_cb else None
+        request = {
+            "request_id": request_id or data,
+            "client": client_data or {"id": client_id_from_cb},
+            "user_id": user_id_from_cb,
+            "user_username": None,
+            "user_full_name": None,
+            "user_chat_id": user_id_from_cb,
+            "existing": None,
+            "admin_messages": [],
+        }
         await query.answer("Запрос уже обработан.", show_alert=True)
-        try:
-            await query.edit_message_text("Запрос уже обработан.")
-        except Exception:
-            pass
-        return
+        # Continue to try processing so admin actions still complete even if state was lost.
 
     if not _is_admin_user(admin_user):
         await query.answer("Недостаточно прав.", show_alert=True)
@@ -3295,12 +3329,22 @@ async def _handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_T
     client_label = _format_client_label(client)
     user_chat_id = request["user_chat_id"]
     user_id = request["user_id"]
+    client_id = client.get("id") if isinstance(client, dict) else None
+    if not user_id or not client_id:
+        await query.answer("Не удалось обработать запрос, данных недостаточно.", show_alert=True)
+        LOGGER.warning(
+            "Approval callback missing ids (request %s, client %s, user %s)",
+            request_id,
+            client_id,
+            user_id,
+        )
+        return
 
     if action == "approve":
         try:
             link_user_to_client(
                 tg_user_id=user_id,
-                client_id=client["id"],
+                client_id=client_id,
                 tg_username=request.get("user_username"),
                 tg_full_name=request.get("user_full_name"),
             )
@@ -3354,14 +3398,22 @@ async def _handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_T
         except Exception:
             LOGGER.debug("Failed to update admin message for request %s", request_id, exc_info=True)
 
-    try:
-        await context.bot.send_message(user_chat_id, user_text)
-    except Exception:
-        LOGGER.exception(
-            "Failed to notify user %s about decision %s for request %s",
-            user_id,
+    if user_chat_id:
+        try:
+            await context.bot.send_message(user_chat_id, user_text)
+        except Exception:
+            LOGGER.exception(
+                "Failed to notify user %s about decision %s for request %s",
+                user_id,
+                action,
+                request_id,
+            )
+    else:
+        LOGGER.warning(
+            "No user chat id available to notify about decision %s for request %s (user %s)",
             action,
             request_id,
+            user_id,
         )
 
 
