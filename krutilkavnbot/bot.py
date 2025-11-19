@@ -2419,6 +2419,9 @@ async def _unknown_command_handler(update: Update, context: ContextTypes.DEFAULT
     user = update.effective_user
     if message is None:
         return
+    if message.text and message.text.strip().lower().startswith("/book"):
+        await _book_command_handler(update, context)
+        return
     expectation = _describe_expected_input(context, user)
     lines: List[str] = []
     if expectation:
@@ -2433,6 +2436,10 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     message = update.effective_message
     user = update.effective_user
     if message is None or not message.text:
+        return
+
+    if message.text.strip().lower().startswith("/book"):
+        await _book_command_handler(update, context)
         return
 
     edit_state = _profile_edit_state(context)
