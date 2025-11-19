@@ -2407,10 +2407,15 @@ async def _help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if message is None:
         return
     await message.reply_text(
-        "Отправьте /start, чтобы пройти авторизацию и привязать свою анкету. "
-        "Если клиента нет в базе, можно заполнить короткую анкету для новой записи. "
-        "После привязки используйте /book, чтобы выбрать удобный слот, "
-        "/mybookings — посмотреть будущие записи, а /history — историю визитов.",
+        "Команды:\n"
+        "/start — привязать или создать анкету.\n"
+        "/book — запись на ближайшие слоты.\n"
+        "/cancel — отменить бронь.\n"
+        "/mybookings — будущие записи.\n"
+        "/history — история визитов.\n"
+        "/race — регистрация на гонку.\n"
+        "/intervals — подключение intervals.icu.\n"
+        "/strava — подключить Strava.",
     )
 
 
