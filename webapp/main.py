@@ -36,6 +36,7 @@ from repositories import (
     bikes_repository,
     client_link_repository,
     client_repository,
+    intervals_link_repository,
     instructors_repository,
     layout_repository,
     message_repository,
@@ -56,6 +57,7 @@ from .dependencies import (
     require_user,
 )
 from .routes.vk_client_links import router as vk_client_links_router
+from .routes.intervals_links import router as intervals_links_router
 
 
 BASE_DIR = Path(__file__).parent
@@ -116,6 +118,7 @@ def _send_telegram_message(chat_id: int, text: str, *, parse_mode: str | None = 
 
 api = APIRouter(prefix="/api", tags=["api"])
 api.include_router(vk_client_links_router, dependencies=[Depends(require_admin)])
+api.include_router(intervals_links_router, dependencies=[Depends(require_admin)])
 
 SCHEDULE_SESSION_KINDS = {"self_service", "instructor"}
 SCHEDULE_SESSION_KIND_LABELS = {

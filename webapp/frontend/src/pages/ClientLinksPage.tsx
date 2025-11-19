@@ -4,13 +4,20 @@ import { useState, type FormEvent } from "react";
 import Panel from "../components/Panel";
 import DataGrid from "../components/DataGrid";
 import { apiFetch } from "../lib/api";
-import type { ClientLinkListResponse, ClientLinkRow, VkClientLinkListResponse, VkClientLinkRow } from "../lib/types";
+import type {
+  ClientLinkListResponse,
+  ClientLinkRow,
+  VkClientLinkListResponse,
+  VkClientLinkRow,
+  IntervalsLinkListResponse,
+  IntervalsLinkRow
+} from "../lib/types";
 import { useAppContext } from "../lib/AppContext";
 
 export default function ClientLinksPage() {
   const { session } = useAppContext();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<"tg" | "vk" | "strava">("tg");
+  const [activeTab, setActiveTab] = useState<"tg" | "vk" | "strava" | "intervals">("tg");
 
   const tgQuery = useQuery<ClientLinkListResponse>({
     queryKey: ["client-links"],
@@ -20,6 +27,10 @@ export default function ClientLinksPage() {
   const vkQuery = useQuery<VkClientLinkListResponse>({
     queryKey: ["vk-client-links"],
     queryFn: () => apiFetch<VkClientLinkListResponse>("/api/vk-client-links")
+  });
+  const intervalsQuery = useQuery<IntervalsLinkListResponse>({
+    queryKey: ["intervals-links"],
+    queryFn: () => apiFetch<IntervalsLinkListResponse>("/api/intervals-links")
   });
 
   const tgCreate = useMutation({
@@ -74,6 +85,32 @@ export default function ClientLinksPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["vk-client-links"] })
   });
 
+  const intervalsCreate = useMutation({
+    mutationFn: (payload: Record<string, unknown>) =>
+      apiFetch("/api/intervals-links", {
+        method: "POST",
+        body: JSON.stringify(payload)
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["intervals-links"] })
+  });
+
+  const intervalsUpdate = useMutation({
+    mutationFn: ({ tgUserId, payload }: { tgUserId: number; payload: Record<string, unknown> }) =>
+      apiFetch(`/api/intervals-links/${tgUserId}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["intervals-links"] })
+  });
+
+  const intervalsDelete = useMutation({
+    mutationFn: (tgUserId: number) =>
+      apiFetch(`/api/intervals-links/${tgUserId}`, {
+        method: "DELETE"
+      }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["intervals-links"] })
+  });
+
   if (!session.isAdmin) {
     return (
       <Panel title="Связки" subtitle="Только администраторы могут управлять связками">
@@ -86,6 +123,10 @@ export default function ClientLinksPage() {
     tgCreate.isError && tgCreate.error instanceof Error ? `Не удалось создать связку: ${tgCreate.error.message}` : null;
   const vkError =
     vkCreate.isError && vkCreate.error instanceof Error ? `Не удалось создать связку: ${vkCreate.error.message}` : null;
+  const intervalsError =
+    intervalsCreate.isError && intervalsCreate.error instanceof Error
+      ? `Не удалось создать связку: ${intervalsCreate.error.message}`
+      : null;
 
   return (
     <Panel
@@ -99,12 +140,18 @@ export default function ClientLinksPage() {
           <button className={`tab ${activeTab === "vk" ? "tab--active" : ""}`} onClick={() => setActiveTab("vk")}>
             ВКонтакте
           </button>
-          <button
-            className={`tab ${activeTab === "strava" ? "tab--active" : ""}`}
-            onClick={() => setActiveTab("strava")}
-          >
-            Strava
-          </button>
+      <button
+        className={`tab ${activeTab === "strava" ? "tab--active" : ""}`}
+        onClick={() => setActiveTab("strava")}
+      >
+        Strava
+      </button>
+      <button
+        className={`tab ${activeTab === "intervals" ? "tab--active" : ""}`}
+        onClick={() => setActiveTab("intervals")}
+      >
+        Intervals.icu
+      </button>
         </div>
       }
     >
@@ -126,12 +173,24 @@ export default function ClientLinksPage() {
             createError={vkError}
             onCreate={handleVkCreate}
             onUpdate={handleVkUpdate}
-            onDelete={handleVkDelete}
-            updatePending={vkUpdate.isPending}
-            deletePending={vkDelete.isPending}
-          />
-        ) : (
-          <StravaSection listQuery={tgQuery} />
+          onDelete={handleVkDelete}
+          updatePending={vkUpdate.isPending}
+          deletePending={vkDelete.isPending}
+        />
+      ) : (
+          activeTab === "strava" ? (
+            <StravaSection listQuery={tgQuery} />
+          ) : (
+            <IntervalsSection
+              listQuery={intervalsQuery}
+              createError={intervalsError}
+              onCreate={handleIntervalsCreate}
+              onUpdate={handleIntervalsUpdate}
+              onDelete={handleIntervalsDelete}
+              updatePending={intervalsUpdate.isPending}
+              deletePending={intervalsDelete.isPending}
+            />
+          )
         )
       )}
     </Panel>
@@ -216,6 +275,47 @@ export default function ClientLinksPage() {
   function handleStravaConnect(row: ClientLinkRow) {
     const stravaAuthUrl = `/strava/authorize?state=${row.tg_user_id}`;
     window.open(stravaAuthUrl, "_blank");
+  }
+
+  function handleIntervalsCreate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    intervalsCreate.reset();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const tgUserId = Number(formData.get("tg_user_id"));
+    const apiKey = (formData.get("intervals_api_key") as string | null)?.trim();
+    const athleteId = (formData.get("intervals_athlete_id") as string | null)?.trim();
+    if (!tgUserId || Number.isNaN(tgUserId) || !apiKey) return;
+    const payload: Record<string, unknown> = {
+      tg_user_id: tgUserId,
+      intervals_api_key: apiKey
+    };
+    if (athleteId) payload.intervals_athlete_id = athleteId;
+    intervalsCreate.mutate(payload, {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ["intervals-links"] });
+        form.reset();
+      }
+    });
+  }
+
+  function handleIntervalsUpdate(event: FormEvent<HTMLFormElement>, row: IntervalsLinkRow) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const tgUserId = Number(formData.get("tg_user_id"));
+    const apiKey = (formData.get("intervals_api_key") as string | null)?.trim();
+    const athleteId = (formData.get("intervals_athlete_id") as string | null)?.trim();
+    if (!tgUserId || Number.isNaN(tgUserId) || !apiKey) return;
+    const payload: Record<string, unknown> = {
+      tg_user_id: tgUserId,
+      intervals_api_key: apiKey,
+      intervals_athlete_id: athleteId || null
+    };
+    intervalsUpdate.mutate({ tgUserId: row.tg_user_id, payload });
+  }
+
+  function handleIntervalsDelete(tgUserId: number) {
+    intervalsDelete.mutate(tgUserId);
   }
 }
 
@@ -462,5 +562,105 @@ function StravaSection({ listQuery }: { listQuery: ReturnType<typeof useQuery<Cl
         { key: "updated_at", title: "Обновлено", render: (item) => formatDate(item.updated_at) }
       ]}
     />
+  );
+}
+
+function IntervalsSection({
+  listQuery,
+  createError,
+  onCreate,
+  onUpdate,
+  onDelete,
+  updatePending,
+  deletePending
+}: {
+  listQuery: ReturnType<typeof useQuery<IntervalsLinkListResponse>>;
+  createError: string | null;
+  onCreate: (e: FormEvent<HTMLFormElement>) => void;
+  onUpdate: (e: FormEvent<HTMLFormElement>, row: IntervalsLinkRow) => void;
+  onDelete: (tgUserId: number) => void;
+  updatePending: boolean;
+  deletePending: boolean;
+}) {
+  return (
+    <>
+      {createError && <div className="form-error">{createError}</div>}
+      <form className="admin-form" onSubmit={onCreate}>
+        <input type="number" name="tg_user_id" placeholder="Telegram ID" required />
+        <input type="text" name="intervals_api_key" placeholder="API key" required />
+        <input type="text" name="intervals_athlete_id" placeholder="Athlete ID (опционально)" />
+        <button type="submit" className="button">
+          Создать
+        </button>
+      </form>
+      {listQuery.isLoading ? (
+        <div className="empty-state">Загружаем Intervals-связки…</div>
+      ) : (
+        <DataGrid<IntervalsLinkRow>
+          items={listQuery.data?.items ?? []}
+          getRowKey={(item) => item.tg_user_id}
+          emptyMessage={<div className="empty-state">Intervals-связок нет.</div>}
+          actions={(item) => (
+            <div className="row-actions">
+              <form id={`intervals-${item.tg_user_id}`} className="row-form" onSubmit={(event) => onUpdate(event, item)}>
+                <button type="submit" className="button">
+                  {updatePending ? "Сохраняю…" : "Сохранить"}
+                </button>
+              </form>
+              <button
+                type="button"
+                className="button danger"
+                onClick={() => onDelete(item.tg_user_id)}
+                disabled={deletePending}
+              >
+                {deletePending ? "Удаляю…" : "Удалить"}
+              </button>
+            </div>
+          )}
+          columns={[
+            { key: "tg_user_id", title: "Telegram ID", render: (item) => item.tg_user_id },
+            {
+              key: "client",
+              title: "Клиент",
+              render: (item) =>
+                item.client_id ? (
+                  <div>
+                    <div className="id-chip">#{item.client_id}</div>
+                    <div>{item.client_name ?? "—"}</div>
+                  </div>
+                ) : (
+                  "—"
+                )
+            },
+            {
+              key: "intervals_api_key",
+              title: "API key",
+              render: (item) => (
+                <input
+                  type="text"
+                  name="intervals_api_key"
+                  defaultValue={item.intervals_api_key}
+                  form={`intervals-${item.tg_user_id}`}
+                />
+              )
+            },
+            {
+              key: "intervals_athlete_id",
+              title: "Athlete ID",
+              render: (item) => (
+                <input
+                  type="text"
+                  name="intervals_athlete_id"
+                  defaultValue={item.intervals_athlete_id ?? ""}
+                  form={`intervals-${item.tg_user_id}`}
+                />
+              )
+            },
+            { key: "created_at", title: "Создано", render: (item) => formatDate(item.created_at) },
+            { key: "updated_at", title: "Обновлено", render: (item) => formatDate(item.updated_at) }
+          ]}
+        />
+      )}
+    </>
   );
 }

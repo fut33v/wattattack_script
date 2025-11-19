@@ -14,4 +14,5 @@ __all__ = [
     "link_requests_repository",
     "db_utils",
     "vk_client_link_repository",
+    "intervals_link_repository",
 ]

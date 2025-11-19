@@ -125,6 +125,20 @@ export interface VkClientLinkListResponse {
   items: VkClientLinkRow[];
 }
 
+export interface IntervalsLinkRow {
+  tg_user_id: number;
+  intervals_api_key: string;
+  intervals_athlete_id?: string | null;
+  client_id?: number | null;
+  client_name?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface IntervalsLinkListResponse {
+  items: IntervalsLinkRow[];
+}
+
 export interface ScheduleWeekRow {
   id: number;
   week_start_date: string;
