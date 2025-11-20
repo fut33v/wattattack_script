@@ -1249,10 +1249,17 @@ async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.
     if query is None:
         return
     await query.answer()
-    
+    data = query.data or ""
+    user = update.effective_user
+    LOGGER.info(
+        "Received cancel booking callback data=%s from user=%s",
+        data,
+        user.id if user else None,
+    )
+
     data = query.data or ""
     if data == "cancel_booking_cancel":
-        await query.edit_message_text("Отмена записи отменена.")
+        await _respond_to_callback(query, context, "Отмена записи отменена.")
         return
     
     if not data.startswith("cancel_booking:"):
@@ -1261,23 +1268,22 @@ async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.
     try:
         reservation_id = int(data.split(":", 1)[1])
     except (ValueError, IndexError):
-        await query.edit_message_text("Некорректный идентификатор записи.")
+        await _respond_to_callback(query, context, "Некорректный идентификатор записи.")
         return
 
     # Get user and client info
-    user = update.effective_user
     if user is None:
-        await query.edit_message_text("Не удалось определить пользователя.")
+        await _respond_to_callback(query, context, "Не удалось определить пользователя.")
         return
         
     link, client = _fetch_linked_client(user.id)
     if not link or not client:
-        await query.edit_message_text("Сначала привяжите свою анкету через /start.")
+        await _respond_to_callback(query, context, "Сначала привяжите свою анкету через /start.")
         return
 
     client_id = client.get("id")
     if not isinstance(client_id, int):
-        await query.edit_message_text("Не удалось определить вашу анкету.")
+        await _respond_to_callback(query, context, "Не удалось определить вашу анкету.")
         return
 
     # Get reservation details before cancelling
@@ -1285,16 +1291,16 @@ async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.
         reservation = schedule_repository.get_reservation(reservation_id)
     except Exception:
         LOGGER.exception("Failed to fetch reservation %s", reservation_id)
-        await query.edit_message_text("Не удалось получить информацию о записи.")
+        await _respond_to_callback(query, context, "Не удалось получить информацию о записи.")
         return
 
     if not reservation:
-        await query.edit_message_text("Запись не найдена.")
+        await _respond_to_callback(query, context, "Запись не найдена.")
         return
 
     # Check if reservation belongs to this client
     if reservation.get("client_id") != client_id:
-        await query.edit_message_text("Эта запись не принадлежит вам.")
+        await _respond_to_callback(query, context, "Эта запись не принадлежит вам.")
         return
 
     # Get slot details for notification
@@ -1318,11 +1324,11 @@ async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.
         )
     except Exception as exc:
         LOGGER.exception("Failed to cancel reservation %s", reservation_id)
-        await query.edit_message_text(f"❌ Не удалось отменить запись: {exc}")
+        await _respond_to_callback(query, context, f"❌ Не удалось отменить запись: {exc}")
         return
 
     if not cancelled_reservation:
-        await query.edit_message_text("❌ Не удалось отменить запись.")
+        await _respond_to_callback(query, context, "❌ Не удалось отменить запись.")
         return
 
     # Prepare notification details
@@ -1349,10 +1355,10 @@ async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.
         "Спасибо, что предупредили. Если захотите записаться снова — используйте /book."
     ]
     confirmation_text = "\n\n".join(confirmation_lines)
-    if query.message:
-        await query.edit_message_text(confirmation_text)
-    else:
-        await context.bot.send_message(chat_id=user.id, text=confirmation_text)
+    LOGGER.info(
+        "Reservation %s cancelled by user %s via callback", reservation_id, user.id
+    )
+    await _respond_to_callback(query, context, confirmation_text)
 
 
 def _straver_status(tg_user_id: int) -> bool:
@@ -3543,6 +3549,7 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application.add_handler(CallbackQueryHandler(_handle_strava_disconnect, pattern=r"^strava_disconnect$"), group=-1)
     application.add_handler(CallbackQueryHandler(_handle_profile_back, pattern=r"^profile_back$"), group=-1)
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"code="), _handle_strava_webhook), group=-1)
+    application.add_handler(CallbackQueryHandler(_handle_cancel_booking_callback, pattern=r"^cancel_booking"), group=-1)
 
     conversation = ConversationHandler(
         entry_points=[CommandHandler("start", _start_handler)],
@@ -3660,7 +3667,6 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application.add_handler(CallbackQueryHandler(_handle_race_payment_callback, pattern=r"^race_payment:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _fallback_text_handler))
     application.add_handler(CallbackQueryHandler(_handle_admin_decision, pattern=r"^(approve|reject):"))
-    application.add_handler(CallbackQueryHandler(_handle_cancel_booking_callback, pattern=r"^cancel_booking:"))
     application.add_handler(MessageHandler(filters.COMMAND, _unknown_command_handler))
 
     return application
