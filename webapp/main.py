@@ -1884,8 +1884,16 @@ async def api_create_race_registration(race_id: int, request: Request, user=Depe
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
 
     link = client_link_repository.get_link_by_client(client_id_int)
-    if not link or not link.get("tg_user_id"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Для клиента нет связанного Telegram пользователя")
+    tg_user_id: Optional[int] = None
+    tg_username: Optional[str] = None
+    tg_full_name: Optional[str] = None
+    if link and link.get("tg_user_id"):
+        try:
+            tg_user_id = int(link["tg_user_id"])
+        except (TypeError, ValueError):
+            tg_user_id = None
+        tg_username = link.get("tg_username")
+        tg_full_name = link.get("tg_full_name")
 
     race_mode_value = payload.get("race_mode") or payload.get("raceMode")
     race_mode: Optional[str]
@@ -1900,9 +1908,9 @@ async def api_create_race_registration(race_id: int, request: Request, user=Depe
         record = race_repository.upsert_registration(
             race_id=race_id,
             client_id=client_id_int,
-            tg_user_id=int(link["tg_user_id"]),
-            tg_username=link.get("tg_username"),
-            tg_full_name=link.get("tg_full_name"),
+            tg_user_id=tg_user_id,
+            tg_username=tg_username,
+            tg_full_name=tg_full_name,
         )
         if race_mode:
             record = race_repository.update_registration(record["id"], race_mode=race_mode) or record

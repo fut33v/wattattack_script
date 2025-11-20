@@ -569,6 +569,9 @@ function RegistrationRow({ registration, clusters, isSaving, onSave, onDelete, i
   const [clusterCode, setClusterCode] = useState(registration.cluster_code ?? "");
   const [notes, setNotes] = useState(registration.notes ?? "");
   const [mode, setMode] = useState(registration.race_mode ?? "");
+  const hasTelegram = typeof registration.tg_user_id === "number" && !Number.isNaN(registration.tg_user_id);
+  const usernameLabel = registration.tg_username ? `@${registration.tg_username}` : "—";
+  const tgIdLabel = hasTelegram ? registration.tg_user_id : "—";
 
   useEffect(() => {
     setStatus(registration.status);
@@ -620,8 +623,11 @@ function RegistrationRow({ registration, clusters, isSaving, onSave, onDelete, i
       <div>
         <div className="race-registration-name">{registration.client_name ?? `Клиент #${registration.client_id}`}</div>
         <div className="race-registration-meta">
-          Пользователь: @{registration.tg_username ?? "—"} · ID {registration.tg_user_id}
+          Пользователь: {usernameLabel} · ID {tgIdLabel}
         </div>
+        {!hasTelegram && (
+          <div className="race-registration-meta">Telegram не привязан — уведомления не отправляются.</div>
+        )}
         <div className="race-registration-meta">Отправлено: {formatDateTime(registration.payment_submitted_at)}</div>
         <div className="race-registration-meta">{modeLabel}</div>
         <div className="race-registration-meta">{bikePreference}</div>

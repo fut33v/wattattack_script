@@ -289,7 +289,7 @@ export interface RaceRegistration {
   cluster_code?: string | null;
   cluster_label?: string | null;
   payment_submitted_at?: string | null;
-  tg_user_id: number;
+  tg_user_id?: number | null;
   tg_username?: string | null;
   tg_full_name?: string | null;
   notes?: string | null;

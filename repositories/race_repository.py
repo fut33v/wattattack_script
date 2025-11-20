@@ -59,7 +59,7 @@ def ensure_tables() -> None:
                 id SERIAL PRIMARY KEY,
                 race_id INTEGER NOT NULL REFERENCES races(id) ON DELETE CASCADE,
                 client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-                tg_user_id BIGINT NOT NULL,
+                tg_user_id BIGINT,
                 tg_username TEXT,
                 tg_full_name TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
@@ -95,6 +95,7 @@ def ensure_tables() -> None:
         cur.execute("ALTER TABLE race_registrations ADD COLUMN IF NOT EXISTS axle_type TEXT")
         cur.execute("ALTER TABLE race_registrations ADD COLUMN IF NOT EXISTS gears_label TEXT")
         cur.execute("ALTER TABLE race_registrations ADD COLUMN IF NOT EXISTS race_mode TEXT")
+        cur.execute("ALTER TABLE race_registrations ALTER COLUMN tg_user_id DROP NOT NULL")
         conn.commit()
 
 
@@ -383,7 +384,7 @@ def upsert_registration(
     *,
     race_id: int,
     client_id: int,
-    tg_user_id: int,
+    tg_user_id: Optional[int],
     tg_username: Optional[str],
     tg_full_name: Optional[str],
 ) -> Dict:
