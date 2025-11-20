@@ -4,12 +4,13 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, time, timedelta
 import requests
-from typing import Any, Awaitable, Callable, Dict, Final, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Final, List, Optional, Set, Tuple
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from telegram import Bot, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update, User
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -212,6 +213,17 @@ _GENDER_LABELS: Final[Dict[str, str]] = {"male": "М", "female": "Ж"}
 _WEEKDAY_SHORT: Final[List[str]] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 _BOOKING_CUTOFF: Final[timedelta] = timedelta(minutes=90)
 _LOCAL_TZ: Final[ZoneInfo] = ZoneInfo("Europe/Moscow")
+_KNOWN_COMMANDS: Final[Set[str]] = {
+    "/start",
+    "/book",
+    "/cancel",
+    "/mybookings",
+    "/history",
+    "/race",
+    "/intervals",
+    "/strava",
+    "/help",
+}
 
 
 def _normalize_last_name(value: str) -> str:
@@ -1357,6 +1369,47 @@ def _straver_status(tg_user_id: int) -> bool:
         return False
 
 
+async def _respond_to_callback(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> None:
+    """Edit callback message or send a fresh one if editing fails."""
+    message = query.message
+    kwargs = {"reply_markup": reply_markup}
+    if message is not None:
+        try:
+            LOGGER.debug(
+                "Editing callback message for data=%s (chat=%s, message=%s)",
+                query.data,
+                message.chat_id,
+                message.message_id,
+            )
+            await query.edit_message_text(text, **kwargs)
+            return
+        except BadRequest as exc:
+            LOGGER.debug(
+                "Cannot edit callback message for data=%s: %s", query.data, exc, exc_info=True
+            )
+        except Exception:
+            LOGGER.exception("Unexpected error editing callback message for data=%s", query.data)
+    target_chat_id: Optional[int] = None
+    if message is not None:
+        target_chat_id = message.chat_id
+    elif query.from_user is not None:
+        target_chat_id = query.from_user.id
+
+    if target_chat_id is None:
+        LOGGER.warning("Unable to respond to callback %s: no target chat", query.data)
+        return
+
+    LOGGER.debug(
+        "Sending fallback callback response for data=%s to chat=%s", query.data, target_chat_id
+    )
+    await context.bot.send_message(chat_id=target_chat_id, text=text, **kwargs)
+
+
 async def _handle_strava_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle Strava OAuth callback."""
     query = update.callback_query
@@ -1365,33 +1418,43 @@ async def _handle_strava_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     await query.answer()
+    LOGGER.info("Received Strava connect callback data=%s from user=%s", query.data, user.id)
     
     # Check if user is linked to a client
     link = get_link_by_user(user.id)
     if not link:
-        await query.edit_message_text("Сначала привяжите свою анкету через /start.")
+        LOGGER.warning("User %s triggered Strava connect without linked client", user.id)
+        await _respond_to_callback(query, context, text="Сначала привяжите свою анкету через /start.")
         return
 
     # Generate Strava authorization URL
     try:
         straver = StraverClient()
         if not straver.is_configured():
+            LOGGER.error("Straver client is not configured; cannot start Strava auth for user %s", user.id)
             raise RuntimeError("Straver is not configured")
         auth_url = straver.build_authorize_url(state=str(user.id))
+        LOGGER.debug("Built Straver auth URL for user %s: %s", user.id, auth_url)
         
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Авторизоваться в Strava", url=auth_url)],
             [InlineKeyboardButton("Отмена", callback_data="strava_cancel")]
         ])
         
-        await query.edit_message_text(
+        await _respond_to_callback(
+            query,
+            context,
             "Чтобы подключить Strava, нажмите кнопку ниже и авторизуйтесь в своей учетной записи Strava. "
             "После этого ваши тренировки будут автоматически загружаться в Strava.",
-            reply_markup=keyboard
+            reply_markup=keyboard,
         )
     except Exception as e:
         LOGGER.error("Failed to generate Straver auth URL: %s", e)
-        await query.edit_message_text("Произошла ошибка при создании ссылки для авторизации Strava. Попробуйте позже.")
+        await _respond_to_callback(
+            query,
+            context,
+            "Произошла ошибка при создании ссылки для авторизации Strava. Попробуйте позже.",
+        )
 
 
 async def _handle_strava_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1401,7 +1464,8 @@ async def _handle_strava_cancel(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     await query.answer()
-    await query.edit_message_text("Подключение Strava отменено.")
+    LOGGER.info("User %s cancelled Strava auth (data=%s)", update.effective_user.id if update.effective_user else None, query.data)
+    await _respond_to_callback(query, context, text="Подключение Strava отменено.")
 
 
 async def _handle_strava_webhook(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1510,10 +1574,12 @@ async def _handle_strava_disconnect(update: Update, context: ContextTypes.DEFAUL
         return
 
     await query.answer()
+    LOGGER.info("Received Strava disconnect callback from user %s", user.id)
     
     try:
         straver = StraverClient()
         if straver.is_configured():
+            LOGGER.debug("Calling Straver disconnect for user %s", user.id)
             straver.disconnect(user.id)
         # Remove Strava tokens from the client link
         updated_link = update_strava_tokens(
@@ -1525,12 +1591,14 @@ async def _handle_strava_disconnect(update: Update, context: ContextTypes.DEFAUL
         )
         
         if updated_link:
-            await query.edit_message_text("✅ Strava успешно отключена.")
+            LOGGER.info("User %s successfully disconnected Strava via callback", user.id)
+            await _respond_to_callback(query, context, text="✅ Strava успешно отключена.")
         else:
-            await query.edit_message_text("Ошибка при отключении Strava.")
+            LOGGER.warning("Strava disconnect callback failed to update link for user %s", user.id)
+            await _respond_to_callback(query, context, text="Ошибка при отключении Strava.")
     except Exception as e:
         LOGGER.error("Failed to disconnect Strava: %s", e)
-        await query.edit_message_text("Произошла ошибка при отключении Strava.")
+        await _respond_to_callback(query, context, text="Произошла ошибка при отключении Strava.")
 
 async def _strava_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /strava command to manage Strava integration."""
@@ -1568,6 +1636,32 @@ async def _strava_command_handler(update: Update, context: ContextTypes.DEFAULT_
     )
 
     await message.reply_text(strava_text, reply_markup=InlineKeyboardMarkup(keyboard_buttons))
+
+
+async def _handle_profile_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Return to the profile summary menu from inline buttons."""
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return
+
+    await query.answer()
+    LOGGER.info("Received profile_back callback from user %s", user.id)
+
+    _, client = _fetch_linked_client(user.id)
+    if not client:
+        LOGGER.warning("profile_back callback without linked client for user %s", user.id)
+        await _respond_to_callback(query, context, text="Сначала привяжите свою анкету через /start.")
+        return
+
+    summary = _format_profile_summary(client)
+    LOGGER.debug("Sending profile summary back to user %s via profile_back", user.id)
+    await _respond_to_callback(
+        query,
+        context,
+        text=summary,
+        reply_markup=_build_profile_menu_keyboard(),
+    )
 
 
 # Removed upload command functionality - no longer needed
@@ -2423,6 +2517,11 @@ async def _unknown_command_handler(update: Update, context: ContextTypes.DEFAULT
     message = update.effective_message
     user = update.effective_user
     if message is None:
+        return
+    text = (message.text or "").strip()
+    command_lower = text.split()[0].lower() if text.startswith("/") else ""
+    if command_lower in _KNOWN_COMMANDS:
+        LOGGER.debug("Suppressing duplicate output for known command %s", command_lower)
         return
     if message.text and message.text.strip().lower().startswith("/book"):
         await _book_command_handler(update, context)
@@ -3437,6 +3536,14 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application = Application.builder().token(token).build()
     application.bot_data[_GREETING_KEY] = greeting or DEFAULT_GREETING
 
+    # High-priority handlers that must run even while a conversation is active
+    application.add_handler(CommandHandler("strava", _strava_command_handler), group=-1)
+    application.add_handler(CallbackQueryHandler(_handle_strava_callback, pattern=r"^strava_connect$"), group=-1)
+    application.add_handler(CallbackQueryHandler(_handle_strava_cancel, pattern=r"^strava_cancel$"), group=-1)
+    application.add_handler(CallbackQueryHandler(_handle_strava_disconnect, pattern=r"^strava_disconnect$"), group=-1)
+    application.add_handler(CallbackQueryHandler(_handle_profile_back, pattern=r"^profile_back$"), group=-1)
+    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"code="), _handle_strava_webhook), group=-1)
+
     conversation = ConversationHandler(
         entry_points=[CommandHandler("start", _start_handler)],
         states={
@@ -3545,17 +3652,7 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application.add_handler(CallbackQueryHandler(intervals.intervals_callback_handler, pattern=r"^intervals_(cancel|disconnect|skip_athlete|download_menu)$"))
     application.add_handler(CallbackQueryHandler(intervals.handle_intervals_zwo, pattern=r"^intervals_zwo\\|"))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), intervals.intervals_message_handler))
-    application.add_handler(CommandHandler("strava", _strava_command_handler))  # Add Strava command handler
-    
-    # Strava integration handlers
-    # Strava integration handlers
-    application.add_handler(CallbackQueryHandler(_handle_strava_callback, pattern=r"^strava_connect$"))
-    application.add_handler(CallbackQueryHandler(_handle_strava_cancel, pattern=r"^strava_cancel$"))
-    application.add_handler(CallbackQueryHandler(_handle_strava_disconnect, pattern=r"^strava_disconnect$"))
-    application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"code="), _handle_strava_webhook))
-    
-    # Placeholder for future document handlers
-    
+
     application.add_handler(CallbackQueryHandler(_handle_profile_edit_callback, pattern=r"^profile:edit:[a-z_]+$"))
     application.add_handler(CallbackQueryHandler(_handle_profile_gender_selection, pattern=r"^profile:set:gender:(male|female)$"))
     application.add_handler(CallbackQueryHandler(_handle_profile_pedals_selection, pattern=r"^profile:set:pedals:[^:]+$"))
