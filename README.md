@@ -67,7 +67,7 @@ See `AGENTS.md` for repository-wide guidelines on structure, workflows, and revi
 4. Start services:
    - Backend/API: `docker-compose up -d db webapp` (или `uvicorn webapp.main:app --reload`) — сервис отдаёт API и собранную SPA «Крутилка».
    - Frontend (разработка): `cd webapp/frontend && npm run dev` — Vite поднимет SPA «Крутилка» на `http://localhost:5173` и проксирует вызовы к `:8000`.
-   - Telegram-боты: `docker-compose up -d adminbot krutilkafitbot scheduler krutilkavnbot`.
+   - Telegram-боты: `docker-compose up -d adminbot fitbot scheduler clientbot`.
    - Для production-образа `docker-compose up -d db webapp` автоматически соберёт фронтенд внутри Dockerfile (используется Node-стадия).
 5. Import reference data:
    - Clients: `python -m scripts.load_clients --truncate` or send CSV via `/uploadclients`.

@@ -24,7 +24,7 @@ services:
       - db
     restart: unless-stopped
 
-  krutilkafitbot:
+  fitbot:
     build:
       context: .
       dockerfile: Dockerfile.bot
@@ -36,7 +36,7 @@ services:
       - db
     restart: unless-stopped
 
-  krutilkavnbot:
+  clientbot:
     build:
       context: .
       dockerfile: Dockerfile.bot
