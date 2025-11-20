@@ -86,7 +86,8 @@ See `AGENTS.md` for repository-wide guidelines on structure, workflows, and revi
      stands - показать доступные станки
      client - найти клиента по БД
      newclient - создать нового клиента
-    uploadclients - загрузить CSV (интерактивный выбор перезаписи/обновления + dry-run)
+     events - создать заезд или гонку
+     uploadclients - загрузить CSV (интерактивный выбор перезаписи/обновления + dry-run)
     downloadclients - выгрузить клиентов в CSV
      uploadbikes - загрузить CSV велосипедов
      uploadstands - загрузить CSV станков

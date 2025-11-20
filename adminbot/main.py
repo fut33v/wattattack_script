@@ -91,6 +91,7 @@ from wattattack_workouts import (
     parse_zwo_workout,
     zwo_to_chart_data,
 )
+from adminbot import events as events_admin
 from adminbot import intervals as intervals_admin
 from adminbot.accounts import (
     AccountConfig,
@@ -1988,12 +1989,24 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/uploadschedule [dry-run] [keep] — загрузить XLSX расписание\n"
         "/uploadworkout [all|аккаунт] — загрузить тренировку ZWO в библиотеку\n"
         "/newclient — создать новую запись клиента в базе\n"
+        "/events — создать заезд или (позже) гонку прямо из чата\n"
         "/admins — показать список администраторов\n"
         "/addadmin <id|@user> — добавить администратора (можно ответом на сообщение)\n"
         "/removeadmin <id|@user> — удалить администратора"
         "\n\nДля выгрузки активностей и FIT файлов используйте бота krutilkafitbot."
     )
     await update.message.reply_text(message)
+
+
+async def events_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+    if not ACCOUNT_REGISTRY:
+        await update.message.reply_text("⚠️ Нет доступных WattAttack аккаунтов.")
+        return
+    await events_admin.start_events_flow(update, context, ACCOUNT_REGISTRY)
 
 
 async def _newclient_send_gender_prompt(
@@ -3498,6 +3511,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         except ValueError:
             page = 0
         await show_client_page(account_id, page, query=query)
+    elif action == "events":
+        handled = await events_admin.handle_events_callback(
+            update,
+            context,
+            ACCOUNT_REGISTRY,
+            LOCAL_TIMEZONE,
+            DEFAULT_TIMEOUT,
+            parts[1:],
+        )
+        if handled:
+            return
     elif action == "select_accounts" and len(parts) >= 2:
         kind = parts[1]
         await show_account_selection(query=query, kind=kind)
@@ -6974,6 +6998,10 @@ async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not ensure_admin_message(update):
         return
 
+    handled_events = await events_admin.handle_events_text(update, context, LOCAL_TIMEZONE)
+    if handled_events:
+        return
+
     # Intervals.icu pending input (API key + athlete_id)
     handled_intervals = await intervals_admin.handle_intervals_text(update, context)
     if handled_intervals:
@@ -7225,6 +7253,7 @@ def build_application(token: str) -> Application:
 
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("help", help_handler))
+    application.add_handler(CommandHandler("events", events_handler))
     application.add_handler(CommandHandler("account", account_handler))
     application.add_handler(CommandHandler("combinate", combinate_handler))
     application.add_handler(CommandHandler("client", client_handler))
