@@ -1487,7 +1487,7 @@ async def api_broadcast_message(request: Request, user=Depends(require_admin)):
         if not links:
             return {"sent": 0, "message": "No linked users found"}
         
-        # Get the krutilkavnbot token
+        # Get the clientbot token
         settings = get_settings()
         bot_token = settings.krutilkavn_bot_token
         if not bot_token:

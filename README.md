@@ -35,7 +35,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 - **repositories/trainers_repository.py** – Trainer inventory access helpers (table creation, search/list helpers).
 - **repositories/db_utils.py** – PostgreSQL connection helpers.
 - **scripts/wattattack_profile_set.py** – CLI tool for updating WattAttack profile values (name, weight, FTP, etc.).
-- **krutilkavnbot/** – Telegram бот для клиентов: авторизация по фамилии и привязка Telegram-пользователей к записям клиентов.
+- **clientbot/** – Telegram бот для клиентов: авторизация по фамилии и привязка Telegram-пользователей к записям клиентов.
 - **webapp/frontend/** – одностраничное приложение «Крутилка» на React + Vite с React Query и современным UI для работы с API.
 - **webapp/** – FastAPI бэкенд (API + Telegram login) и современный React/Vite фронтенд для управления клиентами, велосипедами, тренажерами, связками и администраторами.
 
@@ -102,7 +102,7 @@ See `AGENTS.md` for repository-wide guidelines on structure, workflows, and revi
      recent - последние N активностей для аккаунта
      latest - последняя активность каждого аккаунта
      ```
-  - Для `krutilkavnbot`:
+  - Для `clientbot`:
     ```
     start - привязать Telegram к анкете или открыть меню редактирования данных
     help - подсказать доступные команды
@@ -115,7 +115,7 @@ See `AGENTS.md` for repository-wide guidelines on structure, workflows, and revi
 
 ## Usage Notes
 - **Administrators**: Only admins can invoke commands or interact with inline keyboards. Non-admins receive “Недостаточно прав”.
-- **Client linking**: `krutilkavnbot` запоминает выбранного клиента в таблице `client_links` (создаётся автоматически). Пользователь может повторно пройти авторизацию и выбрать другую запись в любой момент — привязка вступает в силу только после подтверждения администратором.
+- **Client linking**: `clientbot` запоминает выбранного клиента в таблице `client_links` (создаётся автоматически). Пользователь может повторно пройти авторизацию и выбрать другую запись в любой момент — привязка вступает в силу только после подтверждения администратором.
 - **Client onboarding**: Если клиент не найден по фамилии или пользователь выбрал «Создать новую запись», бот проводит через мини-анкету (имя, фамилия, вес, рост, пол, FTP, педали, цель) и автоматически создаёт запись в базе; имя, фамилия, вес и рост обязательны, FTP по умолчанию 150, пол выбирается кнопками «М/Ж», педали — из фиксированного списка, необязательные поля (FTP и цель) можно пропустить кнопкой «ОК».
 
 ## Web Admin (SPA «Крутилка»)

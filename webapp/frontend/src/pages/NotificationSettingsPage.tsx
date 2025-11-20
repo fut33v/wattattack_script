@@ -107,7 +107,7 @@ export default function NotificationSettingsPage() {
           <div className="settings-info">
             <h3>Информация</h3>
             <p>
-              Уведомления отправляются клиентам через бот <strong>krutilkavnbot</strong> за указанное 
+              Уведомления отправляются клиентам через бот <strong>clientbot</strong> за указанное 
               количество часов до начала тренировки.
             </p>
             <p>

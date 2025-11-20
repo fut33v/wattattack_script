@@ -81,7 +81,7 @@ export default function MessagingPage() {
   const linkedUsersCount = linksQuery.data?.items?.length || 0;
 
   return (
-    <Panel title="Рассылка сообщений" subtitle="Отправка сообщений всем пользователям через krutilkavnbot">
+    <Panel title="Рассылка сообщений" subtitle="Отправка сообщений всем пользователям через clientbot">
       <div className="messaging-page">
         <div className="messaging-stats">
           <div className="stat-card">
@@ -169,7 +169,7 @@ export default function MessagingPage() {
         <div className="messaging-info">
           <h3>Информация</h3>
           <ul>
-            <li>Сообщения отправляются через бот <strong>krutilkavnbot</strong></li>
+            <li>Сообщения отправляются через бот <strong>clientbot</strong></li>
             <li>Пользователи получают сообщения как личные сообщения в Telegram</li>
             <li>Отправка по расписанию будет реализована в следующих версиях</li>
           </ul>

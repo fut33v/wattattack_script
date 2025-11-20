@@ -827,7 +827,7 @@ def book_available_reservation(
     client_id: int,
     client_name: str,
     status: str = "booked",
-    source: str = "krutilkavnbot",
+    source: str = "clientbot",
     notes: Optional[str] = None,
 ) -> Optional[Dict]:
     """Mark placeholder reservation as occupied if it is still available."""

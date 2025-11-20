@@ -22,7 +22,7 @@ from telegram.ext import (
 )
 
 from repositories import bikes_repository, message_repository, race_repository, schedule_repository, trainers_repository
-from repositories.client_repository import create_client, get_client, search_clients, update_client_fields
+from repositories.client_repository import create_client, get_client, search_clients
 from repositories.client_link_repository import (
     get_link_by_client,
     get_link_by_user,
@@ -35,23 +35,23 @@ from repositories.link_requests_repository import (
 )
 from repositories.admin_repository import get_admin_ids, is_admin
 from straver_client import StraverClient
-from krutilkavnbot import intervals
+from clientbot import intervals
+from repositories.intervals_link_repository import get_link as get_intervals_link
 
 import os
 
 LOGGER = logging.getLogger(__name__)
 
-_GREETING_KEY: Final[str] = "krutilkavnbot:greeting"
-_CANDIDATES_KEY: Final[str] = "krutilkavnbot:candidates"
-_FORM_KEY: Final[str] = "krutilkavnbot:form"
-_PROFILE_EDIT_FIELD_KEY: Final[str] = "krutilkavnbot:profile_edit_field"
-_RELINK_MODE_KEY: Final[str] = "krutilkavnbot:relink_mode"
-_FORM_STEP_KEY: Final[str] = "krutilkavnbot:form_step"
-_PENDING_APPROVALS_KEY: Final[str] = "krutilkavnbot:pending_approvals"
-_LAST_SEARCH_KEY: Final[str] = "krutilkavnbot:last_name"
-_BOOKING_STATE_KEY: Final[str] = "krutilkavnbot:booking"
-_MY_BOOKINGS_CACHE_KEY: Final[str] = "krutilkavnbot:my_bookings"
-_RACE_CONTEXT_KEY: Final[str] = "krutilkavnbot:race_flow"
+_GREETING_KEY: Final[str] = "clientbot:greeting"
+_CANDIDATES_KEY: Final[str] = "clientbot:candidates"
+_FORM_KEY: Final[str] = "clientbot:form"
+_RELINK_MODE_KEY: Final[str] = "clientbot:relink_mode"
+_FORM_STEP_KEY: Final[str] = "clientbot:form_step"
+_PENDING_APPROVALS_KEY: Final[str] = "clientbot:pending_approvals"
+_LAST_SEARCH_KEY: Final[str] = "clientbot:last_name"
+_BOOKING_STATE_KEY: Final[str] = "clientbot:booking"
+_MY_BOOKINGS_CACHE_KEY: Final[str] = "clientbot:my_bookings"
+_RACE_CONTEXT_KEY: Final[str] = "clientbot:race_flow"
 _STATUS_LABELS: Final[Dict[str, str]] = {
     "booked": "Записан",
     "available": "Свободно",
@@ -120,7 +120,7 @@ def _get_admin_notification_bot() -> Optional[Bot]:
     if not token:
         if not _ADMIN_NOTIFICATION_WARNED:
             LOGGER.warning(
-                "TELEGRAM_BOT_TOKEN is not configured in krutilkavnbot; admin alerts will be sent from the client bot"
+                "TELEGRAM_BOT_TOKEN is not configured in clientbot; admin alerts will be sent from the client bot"
             )
             _ADMIN_NOTIFICATION_WARNED = True
         return None
@@ -148,7 +148,7 @@ async def _send_admin_notification(
             await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
             return True
         except Exception:
-            LOGGER.exception("Failed to send admin notification via krutilkavnbot fallback", exc_info=True)
+            LOGGER.exception("Failed to send admin notification via clientbot fallback", exc_info=True)
     return False
 
 _FORM_STEP_HINTS: Final[Dict[int, str]] = {
@@ -160,44 +160,6 @@ _FORM_STEP_HINTS: Final[Dict[int, str]] = {
     FORM_FTP: "Введите FTP в ваттах или нажмите «ОК», чтобы оставить 150.",
     FORM_PEDALS: "Выберите тип педалей на клавиатуре ниже.",
     FORM_GOAL: "Опишите цель или нажмите «ОК», чтобы пропустить.",
-}
-
-_PROFILE_EDIT_FIELDS: Final[Dict[str, Dict[str, str]]] = {
-    "first_name": {
-        "label": "Имя",
-        "prompt": "🖊️ Введите новое имя (или отправьте /start, чтобы отменить).",
-        "type": "text",
-    },
-    "last_name": {
-        "label": "Фамилия",
-        "prompt": "🖊️ Введите новую фамилию (или /start для отмены).",
-        "type": "text",
-    },
-    "weight": {
-        "label": "Вес",
-        "prompt": "⚖️ Введите новый вес в килограммах (например, 72.5).",
-        "type": "positive_float",
-    },
-    "height": {
-        "label": "Рост",
-        "prompt": "📏 Введите новый рост в сантиметрах (например, 178).",
-        "type": "positive_float",
-    },
-    "ftp": {
-        "label": "FTP",
-        "prompt": "⚡ Введите новое значение FTP в ваттах (например, 220).",
-        "type": "positive_float",
-    },
-    "gender": {
-        "label": "Пол",
-        "prompt": "Выберите новый пол с помощью кнопок ниже.",
-        "type": "gender",
-    },
-    "pedals": {
-        "label": "Педали",
-        "prompt": "Выберите тип педалей с помощью кнопок ниже.",
-        "type": "pedals",
-    },
 }
 
 _PEDAL_CHOICES: Final[List[Tuple[str, str]]] = [
@@ -224,6 +186,12 @@ _KNOWN_COMMANDS: Final[Set[str]] = {
     "/strava",
     "/help",
 }
+_MAIN_MENU_BUTTONS: Final[List[List[Tuple[str, str]]]] = [
+    [("🗓 Записаться", "main_menu:book"), ("❌ Отменить запись", "main_menu:cancel")],
+    [("📅 Мои записи", "main_menu:mybookings"), ("📖 История", "main_menu:history")],
+    [("📝 Мои данные", "main_menu:profile")],
+    [("⚙️ Подключение сервисов", "main_menu:services")],
+]
 
 
 def _normalize_last_name(value: str) -> str:
@@ -740,14 +708,26 @@ async def _handle_booking_cancel_callback(update: Update, context: ContextTypes.
             await query.edit_message_text("Бронирование отменено.")
         except Exception:
             LOGGER.debug("Failed to edit cancel message", exc_info=True)
+        target_chat = query.message.chat_id if query.message else query.from_user.id if query.from_user else None
+    else:
+        target_chat = update.effective_chat.id if update.effective_chat else None
     _clear_booking_state(context)
+    if target_chat is not None:
+        await _send_main_menu_prompt(context, target_chat, "Вы вернулись в главное меню. Выберите действие:")
     return ConversationHandler.END
 
 
 async def _booking_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     message = update.effective_message
+    user = update.effective_user
+    link_record = None
+    if user is not None:
+        link_record, _ = _fetch_linked_client(user.id)
+
     if message is not None:
         await message.reply_text("Бронирование отменено.")
+        if link_record:
+            await _send_main_menu_prompt(context, message.chat_id, "Вы вернулись в главное меню. Выберите действие:")
     _clear_booking_state(context)
     return ConversationHandler.END
 
@@ -852,7 +832,7 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
             reservation["id"],
             client_id=client["id"],
             client_name=client_display_name,
-            source="krutilkavnbot",
+            source="clientbot",
         )
     except Exception:
         LOGGER.exception("Failed to update reservation %s", reservation["id"])
@@ -963,7 +943,8 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
                 "Оплата переводом по СБП на телефон\n"
                 "+7 911 602 5498 (ТБАНК). Евгений Б.\n\n"
                 "Пожалуйста, оплатите заранее и покажите подтверждение перед тренировкой.\n\n"
-                "Если планы изменились — отправьте /cancel, чтобы освободить слот."
+                "Если планы изменились — отправьте /cancel, чтобы освободить слот.\n\n"
+                "Нажмите /start, чтобы попасть в главное меню."
             ),
         )
     except Exception:
@@ -1039,7 +1020,7 @@ async def _notify_admins_of_booking(
         f"{session_type}\n"
         f"🏋️ Станок: {stand_label}"
         f"{bike_info}\n\n"
-        f"Запись создана через бота krutilkavnbot"
+        f"Запись создана через бота clientbot"
     )
 
     # Send notification to all admins
@@ -1319,7 +1300,7 @@ async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.
             client_id=None,
             client_name=None,
             status="available",
-            source="krutilkavnbot",
+            source="clientbot",
             notes=f"cancelled via /cancel command by client {client_id}"
         )
     except Exception as exc:
@@ -1352,7 +1333,7 @@ async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.
     confirmation_lines = [
         "✅ Запись отменена.",
         f"Освобождён слот: {slot_summary}",
-        "Спасибо, что предупредили. Если захотите записаться снова — используйте /book."
+        "Спасибо, что предупредили. Если захотите записаться снова — используйте /book.\n\nНажмите /start, чтобы попасть в главное меню."
     ]
     confirmation_text = "\n\n".join(confirmation_lines)
     LOGGER.info(
@@ -1546,30 +1527,7 @@ async def _show_profile_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await message.reply_text("Сначала привяжите свою анкету через /start.")
         return
 
-    # Check if Strava is already connected
-    strava_connected = _straver_status(user.id) or bool(link.get("strava_access_token"))
-
-    keyboard_buttons = []
-    
-    if strava_connected:
-        keyboard_buttons.append([InlineKeyboardButton("🔄 Обновить подключение Strava", callback_data="strava_connect")])
-        keyboard_buttons.append([InlineKeyboardButton("❌ Отключить Strava", callback_data="strava_disconnect")])
-    else:
-        keyboard_buttons.append([InlineKeyboardButton("🔌 Подключить Strava", callback_data="strava_connect")])
-    
-    keyboard_buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="profile_back")])
-
-    client_name = _format_client_display_name(client)
-    
-    strava_status = "✅ Подключена" if strava_connected else "❌ Не подключена"
-    
-    profile_text = (
-        f"👤 Профиль: {client_name}\n\n"
-        f"🏅 Strava: {strava_status}\n\n"
-        "Настройте интеграцию с Strava для автоматической загрузки ваших тренировок."
-    )
-
-    await message.reply_text(profile_text, reply_markup=InlineKeyboardMarkup(keyboard_buttons))
+    await _send_profile_menu(context, message.chat_id, client)
 
 
 async def _handle_strava_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1666,7 +1624,6 @@ async def _handle_profile_back(update: Update, context: ContextTypes.DEFAULT_TYP
         query,
         context,
         text=summary,
-        reply_markup=_build_profile_menu_keyboard(),
     )
 
 
@@ -1715,7 +1672,7 @@ async def _notify_admins_of_cancellation(
         f"Клиент: {client_name}\n"
         f"Дата и время: {date_str} в {time_str}"
         f"{session_type}\n\n"
-        f"Запись отменена через бота krutilkavnbot"
+        f"Запись отменена через бота clientbot"
     )
 
     # Send notification to all admins
@@ -2070,15 +2027,6 @@ def _describe_expected_input(
     context: ContextTypes.DEFAULT_TYPE,
     user: Optional[User] = None,
 ) -> Optional[str]:
-    edit_state = _profile_edit_state(context)
-    if edit_state:
-        field = edit_state["field"]
-        config = _PROFILE_EDIT_FIELDS.get(field, {})
-        prompt = config.get("prompt")
-        if prompt:
-            return prompt
-        return "Отправьте новое значение или используйте /start для отмены."
-
     step = _current_form_step(context)
     form = _peek_form(context)
     if step is not None:
@@ -2107,8 +2055,6 @@ def _describe_expected_input(
     if user is not None:
         link, _ = _fetch_linked_client(user.id)
         if link:
-            if context.user_data.get(_RELINK_MODE_KEY):
-                return "Отправьте фамилию клиента, чтобы привязать другую анкету."
             return None
 
     last_search = (context.user_data.get(_LAST_SEARCH_KEY) or "").strip()
@@ -2131,28 +2077,9 @@ def _clear_form(context: ContextTypes.DEFAULT_TYPE) -> None:
     _clear_form_step(context)
 
 
-def _profile_edit_state(context: ContextTypes.DEFAULT_TYPE) -> Optional[Dict[str, str]]:
-    state = context.user_data.get(_PROFILE_EDIT_FIELD_KEY)
-    if isinstance(state, dict) and "field" in state:
-        field = state.get("field")
-        if isinstance(field, str) and field in _PROFILE_EDIT_FIELDS:
-            return {"field": field}
-    return None
-
-
-def _set_profile_edit_field(context: ContextTypes.DEFAULT_TYPE, field: str) -> None:
-    if field in _PROFILE_EDIT_FIELDS:
-        context.user_data[_PROFILE_EDIT_FIELD_KEY] = {"field": field}
-
-
-def _clear_profile_edit_field(context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop(_PROFILE_EDIT_FIELD_KEY, None)
-
-
 def _reset_authorization_flow(context: ContextTypes.DEFAULT_TYPE) -> None:
     _clear_candidates(context)
     _clear_form(context)
-    _clear_profile_edit_field(context)
     context.user_data.pop(_LAST_SEARCH_KEY, None)
 
 
@@ -2172,34 +2099,27 @@ def _format_profile_summary(client: Dict[str, Any]) -> str:
         f"FTP: {ftp_label} Вт",
         f"Педали: {pedals_label}",
         "",
-        "Выберите, что изменить:",
+        "Если данные устарели, напишите администратору, чтобы их обновить.",
     ]
     return "\n".join(lines)
 
 
-def _build_profile_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Имя", callback_data="profile:edit:first_name"),
-                InlineKeyboardButton("Фамилия", callback_data="profile:edit:last_name"),
-            ],
-            [
-                InlineKeyboardButton("Вес", callback_data="profile:edit:weight"),
-                InlineKeyboardButton("Рост", callback_data="profile:edit:height"),
-            ],
-            [
-                InlineKeyboardButton("Пол", callback_data="profile:edit:gender"),
-                InlineKeyboardButton("FTP", callback_data="profile:edit:ftp"),
-            ],
-            [
-                InlineKeyboardButton("Педали", callback_data="profile:edit:pedals"),
-            ],
-            [
-                InlineKeyboardButton("🔄 Привязать другую анкету", callback_data="profile:relink"),
-            ],
-        ]
-    )
+def _build_main_menu_keyboard() -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    for row in _MAIN_MENU_BUTTONS:
+        rows.append([InlineKeyboardButton(text, callback_data=data) for text, data in row])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _send_main_menu_prompt(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    text: str = "Выберите действие:",
+) -> None:
+    try:
+        await context.bot.send_message(chat_id, text, reply_markup=_build_main_menu_keyboard())
+    except Exception:
+        LOGGER.exception("Failed to send main menu prompt", exc_info=True)
 
 
 async def _send_profile_menu(
@@ -2208,7 +2128,47 @@ async def _send_profile_menu(
     client: Dict[str, Any],
 ) -> None:
     summary = _format_profile_summary(client)
-    await context.bot.send_message(chat_id, summary, reply_markup=_build_profile_menu_keyboard())
+    await context.bot.send_message(chat_id, summary)
+
+
+async def _show_services_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display integration options for Strava and Intervals."""
+    message = update.effective_message
+    user = update.effective_user
+    if message is None or user is None:
+        return
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await message.reply_text("Сначала привяжите свою анкету через /start.")
+        return
+
+    strava_connected = _straver_status(user.id) or bool(link.get("strava_access_token"))
+    strava_status = "✅ Strava подключена" if strava_connected else "❌ Strava не подключена"
+
+    intervals_link = get_intervals_link(user.id)
+    intervals_status = "✅ Intervals.icu подключен" if intervals_link else "❌ Intervals.icu не подключен"
+
+    lines = [
+        "⚙️ Подключение сервисов",
+        "",
+        f"🏅 {strava_status}",
+        f"📡 {intervals_status}",
+        "",
+        "Выберите сервис для настройки:",
+    ]
+
+    keyboard: List[List[InlineKeyboardButton]] = []
+    if strava_connected:
+        keyboard.append([InlineKeyboardButton("🔄 Обновить Strava", callback_data="strava_connect")])
+        keyboard.append([InlineKeyboardButton("❌ Отключить Strava", callback_data="strava_disconnect")])
+    else:
+        keyboard.append([InlineKeyboardButton("🔌 Подключить Strava", callback_data="strava_connect")])
+
+    keyboard.append([InlineKeyboardButton("📡 Intervals.icu", callback_data="services:intervals")])
+    keyboard.append([InlineKeyboardButton("🔙 В главное меню", callback_data="services:back")])
+
+    await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 def _pending_approvals(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Dict[str, Any]]:
@@ -2298,15 +2258,6 @@ def _compose_full_name(first_name: Optional[str], last_name: Optional[str]) -> O
     return full_name or None
 
 
-def _profile_field_updates(client: Dict[str, Any], field: str, value: object) -> Dict[str, object]:
-    updates: Dict[str, object] = {field: value}
-    if field == "first_name":
-        updates["full_name"] = _compose_full_name(value, client.get("last_name"))
-    elif field == "last_name":
-        updates["full_name"] = _compose_full_name(client.get("first_name"), value)
-    return updates
-
-
 def _skip_keyboard(callback: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("ОК", callback_data=callback)]])
 
@@ -2348,26 +2299,6 @@ async def _send_goal_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) ->
         "Если не хотите указывать, нажмите «ОК».",
         reply_markup=_skip_keyboard("form:skip:goal"),
     )
-
-
-async def _send_profile_gender_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("М", callback_data="profile:set:gender:male"),
-                InlineKeyboardButton("Ж", callback_data="profile:set:gender:female"),
-            ]
-        ]
-    )
-    await context.bot.send_message(chat_id, "👤 Выберите новый пол:", reply_markup=keyboard)
-
-
-async def _send_profile_pedals_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    rows = [
-        [InlineKeyboardButton(label, callback_data=f"profile:set:pedals:{code}")]
-        for label, code in _PEDAL_CHOICES
-    ]
-    await context.bot.send_message(chat_id, "🚴 Выберите тип педалей:", reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def _request_admin_approval(
@@ -2481,25 +2412,73 @@ async def _start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     if linked_client:
-        display_label = _format_client_label(linked_client)
+        name_only = _format_client_display_name(linked_client)
         text = (
             f"{greeting}\n\n{intro}\n\n"
-            f"✅ Ваш Telegram уже привязан к {display_label}.\n"
-            "Используйте меню ниже, чтобы обновить данные или привязать другую анкету."
+            f"✅ Ваш Telegram уже привязан к {name_only}.\n"
+            "Выберите одно из действий на клавиатуре ниже или откройте «Мои данные», чтобы посмотреть анкету."
         )
-        await message.reply_text(text, parse_mode=ParseMode.HTML)
-        await _send_profile_menu(context, message.chat_id, linked_client)
-        context.user_data[_RELINK_MODE_KEY] = False
-        return ASK_LAST_NAME
+        await message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_build_main_menu_keyboard(),
+        )
+        return ConversationHandler.END
 
-    text = (
-        f"{greeting}\n\n{intro}\n\n"
+    intro_text = f"{greeting}\n\n{intro}"
+    await message.reply_text(intro_text)
+
+    prompt_text = (
         "Пожалуйста, введите свою <b>ФАМИЛИЮ</b>, чтобы продолжить. "
-        "После подтверждения анкеты откроются записи и история посещений."
+        "После подтверждения анкеты откроются записи и история посещений. "
+        "Для быстрого доступа используйте кнопки ниже."
     )
-
-    await message.reply_text(text, parse_mode=ParseMode.HTML)
+    await message.reply_text(prompt_text, parse_mode=ParseMode.HTML)
     return ASK_LAST_NAME
+
+
+async def _handle_main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    data = (query.data or "").split(":", 1)
+    if len(data) != 2 or data[0] != "main_menu":
+        await query.answer("Неизвестное действие.", show_alert=True)
+        return
+
+    action = data[1]
+    handlers: Dict[str, Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[Any]]] = {
+        "cancel": _cancel_booking_handler,
+        "mybookings": _my_bookings_handler,
+        "history": _history_handler,
+        "profile": _show_profile_menu,
+        "services": _show_services_menu,
+    }
+    handler = handlers.get(action)
+    if handler is None:
+        await query.answer("Неизвестное действие.", show_alert=True)
+        return
+
+    await handler(update, context)
+
+
+async def _handle_services_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    data = (query.data or "").split(":", 1)
+    if len(data) != 2:
+        return
+    action = data[1]
+    if action == "intervals":
+        await intervals.intervals_command_handler(update, context)
+        return
+    if action == "back":
+        target_chat = query.message.chat_id if query.message else query.from_user.id if query.from_user else None
+        if target_chat is not None:
+            await _send_main_menu_prompt(context, target_chat, "Выберите действие:")
 
 
 async def _help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2552,12 +2531,7 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         await _book_command_handler(update, context)
         return
 
-    edit_state = _profile_edit_state(context)
-    if edit_state:
-        handled = await _process_profile_edit_text(update, context, edit_state)
-        if handled:
-            return
-    
+    link_record = None
     # Store the message in the database
     if user is not None:
         try:
@@ -2572,18 +2546,17 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
             await _notify_admins_of_new_message(context, user, message.text)
         except Exception:
             LOGGER.exception("Failed to store user message")
+        link_record, _ = _fetch_linked_client(user.id)
 
     expectation = _describe_expected_input(context, user)
     lines: List[str] = []
     if expectation:
         lines.append(expectation)
 
-    if user is not None:
-        link, _ = _fetch_linked_client(user.id)
-        if link:
-            lines.append(
-                "ℹ️ Переписка с оператором «Крутилки» пока доступна только через сообщения канала @krutilkavn."
-            )
+    if link_record:
+        lines.append(
+            "ℹ️ Переписка с оператором «Крутилки» пока доступна только через сообщения канала @krutilkavn."
+        )
 
     lines.append(
         "Команды:\n"
@@ -2595,6 +2568,8 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
         "/start — открыть меню анкеты."
     )
     await message.reply_text("\n\n".join(lines))
+    if link_record:
+        await _send_main_menu_prompt(context, message.chat_id)
 
 
 async def _handle_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2613,18 +2588,19 @@ async def _handle_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return ASK_LAST_NAME
 
-    relink_mode = bool(context.user_data.get(_RELINK_MODE_KEY))
     has_link = False
     if user is not None:
         link_record, _ = _fetch_linked_client(user.id)
         has_link = bool(link_record)
 
-    if has_link and not relink_mode:
-        await message.reply_text(
-            "Вы уже привязаны к анкете. Используйте /start и кнопку «Привязать другую анкету», "
-            "если хотите переключиться на другого клиента."
-        )
-        return ASK_LAST_NAME
+    if has_link:
+        if user is not None:
+            await _send_main_menu_prompt(
+                context,
+                message.chat_id,
+                "🤖 Бот не умеет общаться, но умеет давать вам кнопочки ниже.",
+            )
+        return ConversationHandler.END
 
     _clear_candidates(context)
     _clear_form(context)
@@ -2653,10 +2629,8 @@ async def _handle_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return ASK_LAST_NAME
 
         _start_new_client_form(context, last_name)
-        await message.reply_text(
-            "🔎 Клиентов с такой фамилией не нашлось. Давайте создадим новую запись.\n"
-            "🖊️ Введите своё имя:"
-        )
+        await message.reply_text("🔎 Клиентов с такой фамилией не нашлось. Давайте создадим новую запись.")
+        await message.reply_text("🖊️ Введите своё имя:")
         _set_form_step(context, FORM_FIRST_NAME)
         _clear_candidates(context)
         return FORM_FIRST_NAME
@@ -2729,7 +2703,6 @@ async def _handle_link_selection(update: Update, context: ContextTypes.DEFAULT_T
             "Запрос отправлен администраторам. После подтверждения привязки вы получите уведомление. "
             "Чтобы выбрать другого клиента, отправьте новую фамилию.",
         )
-        context.user_data.pop(_RELINK_MODE_KEY, None)
 
     return ASK_LAST_NAME
 
@@ -2764,223 +2737,6 @@ async def _handle_new_client_request(update: Update, context: ContextTypes.DEFAU
     await query.message.reply_text("\n".join(prompt_lines))
     _set_form_step(context, FORM_FIRST_NAME)
     return FORM_FIRST_NAME
-
-
-async def _handle_profile_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    user = update.effective_user
-    if query is None or query.message is None or user is None:
-        return
-
-    data = query.data or ""
-    parts = data.split(":")
-    if len(parts) != 3:
-        await query.answer("Неизвестное действие.", show_alert=True)
-        return
-    field = parts[2]
-    config = _PROFILE_EDIT_FIELDS.get(field)
-    if config is None:
-        await query.answer("Недоступно.", show_alert=True)
-        return
-
-    link, client = _fetch_linked_client(user.id)
-    if not link or not client:
-        await query.answer("Анкета не найдена. Используйте /start.", show_alert=True)
-        return
-
-    await query.answer()
-    field_type = config.get("type")
-    chat_id = query.message.chat_id
-    if field_type == "gender":
-        await _send_profile_gender_prompt(context, chat_id)
-        return
-    if field_type == "pedals":
-        await _send_profile_pedals_prompt(context, chat_id)
-        return
-
-    _set_profile_edit_field(context, field)
-    current_value = client.get(field)
-    if isinstance(current_value, (int, float)):
-        current_display = f"{current_value:g}"
-    else:
-        current_display = (current_value or "—").strip() or "—"
-    lines = [
-        config.get("prompt", "Введите новое значение."),
-        f"Текущее значение: {current_display}",
-    ]
-    await context.bot.send_message(chat_id, "\n".join(lines))
-
-
-async def _handle_profile_gender_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    user = update.effective_user
-    if query is None or query.message is None or user is None:
-        return
-
-    data = query.data or ""
-    parts = data.split(":")
-    if len(parts) != 4:
-        await query.answer("Неизвестный выбор.", show_alert=True)
-        return
-    gender_code = parts[3]
-    if gender_code not in {"male", "female"}:
-        await query.answer("Неизвестный выбор.", show_alert=True)
-        return
-
-    link, client = _fetch_linked_client(user.id)
-    if not link or not client:
-        await query.answer("Анкета не найдена. Используйте /start.", show_alert=True)
-        return
-
-    client_id = client.get("id")
-    if not isinstance(client_id, int):
-        await query.answer("Некорректная анкета.", show_alert=True)
-        return
-
-    try:
-        update_client_fields(client_id, gender=gender_code)
-    except Exception:
-        LOGGER.exception("Failed to update gender for client %s", client_id)
-        await query.answer("Не удалось обновить пол.", show_alert=True)
-        return
-
-    try:
-        refreshed = get_client(client_id) or client
-    except Exception:
-        LOGGER.exception("Failed to refresh client %s after gender update", client_id)
-        refreshed = client
-
-    label = "М" if gender_code == "male" else "Ж"
-    await query.message.reply_text(f"✅ Пол обновлён: {label}")
-    await _send_profile_menu(context, query.message.chat_id, refreshed)
-
-
-async def _handle_profile_pedals_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    user = update.effective_user
-    if query is None or query.message is None or user is None:
-        return
-
-    data = query.data or ""
-    parts = data.split(":")
-    if len(parts) != 4:
-        await query.answer("Неизвестный выбор.", show_alert=True)
-        return
-    code = parts[3]
-    label = _PEDAL_LABEL_BY_CODE.get(code)
-    if label is None:
-        await query.answer("Неизвестный вариант.", show_alert=True)
-        return
-
-    link, client = _fetch_linked_client(user.id)
-    if not link or not client:
-        await query.answer("Анкета не найдена. Используйте /start.", show_alert=True)
-        return
-
-    client_id = client.get("id")
-    if not isinstance(client_id, int):
-        await query.answer("Некорректная анкета.", show_alert=True)
-        return
-
-    try:
-        update_client_fields(client_id, pedals=label)
-    except Exception:
-        LOGGER.exception("Failed to update pedals for client %s", client_id)
-        await query.answer("Не удалось обновить педали.", show_alert=True)
-        return
-
-    try:
-        refreshed = get_client(client_id) or client
-    except Exception:
-        LOGGER.exception("Failed to refresh client %s after pedals update", client_id)
-        refreshed = client
-
-    await query.message.reply_text(f"✅ Педали обновлены: {label}")
-    await _send_profile_menu(context, query.message.chat_id, refreshed)
-
-
-async def _handle_profile_relink_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if query is None or query.message is None:
-        return
-
-    await query.answer()
-    _reset_authorization_flow(context)
-    context.user_data[_RELINK_MODE_KEY] = True
-    await query.message.reply_text(
-        "Отправьте фамилию клиента, которого нужно привязать. "
-        "Создание новой анкеты отключено, пока текущая связь активна."
-    )
-
-
-async def _process_profile_edit_text(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    edit_state: Dict[str, str],
-) -> bool:
-    message = update.effective_message
-    user = update.effective_user
-    if message is None or message.text is None or user is None:
-        return False
-
-    field = edit_state.get("field")
-    if not field:
-        _clear_profile_edit_field(context)
-        return False
-
-    config = _PROFILE_EDIT_FIELDS.get(field)
-    if config is None:
-        _clear_profile_edit_field(context)
-        return False
-
-    raw_value = message.text.strip()
-    if not raw_value:
-        await message.reply_text("⚠️ Значение не должно быть пустым.")
-        return True
-
-    field_type = config.get("type")
-    if field_type == "text":
-        new_value: object = raw_value
-    elif field_type == "positive_float":
-        ok, parsed = _parse_positive_float(raw_value)
-        if not ok or parsed is None:
-            await message.reply_text("⚠️ Введите положительное число (например, 72.5).")
-            return True
-        new_value = parsed
-    else:
-        return False
-
-    link, client = _fetch_linked_client(user.id)
-    if not link or not client:
-        await message.reply_text("Не удалось найти вашу анкету. Используйте /start.")
-        _clear_profile_edit_field(context)
-        return True
-
-    client_id = client.get("id")
-    if not isinstance(client_id, int):
-        await message.reply_text("Анкета недоступна. Попробуйте позже.")
-        _clear_profile_edit_field(context)
-        return True
-
-    updates = _profile_field_updates(client, field, new_value)
-    try:
-        update_client_fields(client_id, **updates)
-    except Exception:
-        LOGGER.exception("Failed to update client %s field %s", client_id, field)
-        await message.reply_text("❌ Не удалось сохранить значение. Попробуйте позже.")
-        return True
-
-    _clear_profile_edit_field(context)
-
-    try:
-        refreshed = get_client(client_id) or client
-    except Exception:
-        LOGGER.exception("Failed to refresh client %s after manual edit", client_id)
-        refreshed = client
-
-    await message.reply_text(f"✅ {config.get('label', 'Поле')} обновлено.")
-    await _send_profile_menu(context, message.chat_id, refreshed)
-    return True
 
 
 async def _handle_form_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3317,6 +3073,7 @@ async def _finalize_client_creation(
         await send_message(
             "🔗 Ваш Telegram автоматически привязан к новой анкете. Готово!"
         )
+        await _send_main_menu_prompt(context, chat_id)
     except Exception:
         LOGGER.exception("Failed to link new client %s to user %s", client["id"], user.id)
         await send_message(
@@ -3330,9 +3087,6 @@ async def _finalize_client_creation(
 
 async def _cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     _reset_authorization_flow(context)
-    message = update.effective_message
-    if message is not None:
-        await message.reply_text("Авторизация прервана. Чтобы начать заново, используйте /start.")
     return ConversationHandler.END
 
 
@@ -3549,6 +3303,8 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application.add_handler(CallbackQueryHandler(_handle_strava_disconnect, pattern=r"^strava_disconnect$"), group=-1)
     application.add_handler(CallbackQueryHandler(_handle_profile_back, pattern=r"^profile_back$"), group=-1)
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"code="), _handle_strava_webhook), group=-1)
+    application.add_handler(CallbackQueryHandler(_handle_services_callback, pattern=r"^services:(intervals|back)$"), group=-1)
+    application.add_handler(CallbackQueryHandler(_handle_main_menu_callback, pattern=r"^main_menu:(cancel|mybookings|history|profile|services)$"), group=-1)
     application.add_handler(CallbackQueryHandler(_handle_cancel_booking_callback, pattern=r"^cancel_booking"), group=-1)
 
     conversation = ConversationHandler(
@@ -3603,7 +3359,10 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
 
     application.add_handler(conversation)
     booking_conversation = ConversationHandler(
-        entry_points=[CommandHandler("book", _book_command_handler)],
+        entry_points=[
+            CommandHandler("book", _book_command_handler),
+            CallbackQueryHandler(_book_command_handler, pattern=r"^main_menu:book$"),
+        ],
         states={
             BOOK_SELECT_DAY: [
                 CallbackQueryHandler(_handle_booking_day, pattern=r"^book:day:\d{4}-\d{2}-\d{2}$"),
@@ -3658,12 +3417,8 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application.add_handler(CommandHandler("intervals", intervals.intervals_command_handler))
     application.add_handler(CallbackQueryHandler(intervals.intervals_callback_handler, pattern=r"^intervals_(cancel|disconnect|skip_athlete|download_menu)$"))
     application.add_handler(CallbackQueryHandler(intervals.handle_intervals_zwo, pattern=r"^intervals_zwo\\|"))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), intervals.intervals_message_handler))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), intervals.intervals_message_handler, block=False))
 
-    application.add_handler(CallbackQueryHandler(_handle_profile_edit_callback, pattern=r"^profile:edit:[a-z_]+$"))
-    application.add_handler(CallbackQueryHandler(_handle_profile_gender_selection, pattern=r"^profile:set:gender:(male|female)$"))
-    application.add_handler(CallbackQueryHandler(_handle_profile_pedals_selection, pattern=r"^profile:set:pedals:[^:]+$"))
-    application.add_handler(CallbackQueryHandler(_handle_profile_relink_callback, pattern=r"^profile:relink$"))
     application.add_handler(CallbackQueryHandler(_handle_race_payment_callback, pattern=r"^race_payment:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _fallback_text_handler))
     application.add_handler(CallbackQueryHandler(_handle_admin_decision, pattern=r"^(approve|reject):"))

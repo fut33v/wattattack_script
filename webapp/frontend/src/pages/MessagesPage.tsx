@@ -66,7 +66,7 @@ export default function MessagesPage() {
     <div className="messages-controls">
       <div className="messages-header">
         <h3>Сообщения пользователей</h3>
-        <p>Список всех сообщений, отправленных пользователями в krutilkavnbot</p>
+        <p>Список всех сообщений, отправленных пользователями в clientbot</p>
       </div>
       {pagination && (
         <div className="pagination-controls">
@@ -99,7 +99,7 @@ export default function MessagesPage() {
   return (
     <Panel
       title="Сообщения"
-      subtitle="Список сообщений от пользователей krutilkavnbot"
+      subtitle="Список сообщений от пользователей clientbot"
       headerExtra={headerControls}
     >
       {listQuery.isLoading ? (

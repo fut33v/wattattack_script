@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Core Telegram bot logic lives in `adminbot/`, `krutilkafitbot/`, and `krutilkavnbot/`, each exposing a `__main__` so you can run them with `python -m <package>`. The scheduler/notification loop resides in `scheduler/`, while backend APIs, templates, and auth helpers sit under `webapp/` with the React/Vite SPA in `webapp/frontend/`. Database helpers are centralized in `repositories/`, CSV/CLI utilities in `scripts/`, and seed assets in `data/` plus `accounts.sample.json`. The lightweight integration test harness currently lives at `test_activity_tracking.py`.
+Core Telegram bot logic lives in `adminbot/`, `krutilkafitbot/`, and `clientbot/`, each exposing a `__main__` so you can run them with `python -m <package>`. The scheduler/notification loop resides in `scheduler/`, while backend APIs, templates, and auth helpers sit under `webapp/` with the React/Vite SPA in `webapp/frontend/`. Database helpers are centralized in `repositories/`, CSV/CLI utilities in `scripts/`, and seed assets in `data/` plus `accounts.sample.json`. The lightweight integration test harness currently lives at `test_activity_tracking.py`.
 
 ## Build, Test, and Development Commands
 - `python -m venv venv && source venv/bin/activate && pip install -r requirements.txt` — create a 3.11+ environment for bots, schedulers, and the FastAPI service.

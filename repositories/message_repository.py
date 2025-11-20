@@ -1,4 +1,4 @@
-"""Manage user messages sent to the krutilkavnbot."""
+"""Manage user messages sent to the clientbot."""
 from __future__ import annotations
 
 from typing import Dict, List, Optional

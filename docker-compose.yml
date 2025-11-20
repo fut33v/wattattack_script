@@ -40,7 +40,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.bot
-    command: ["python", "-m", "krutilkavnbot.main"]
+    command: ["python", "-m", "clientbot.main"]
     env_file: .env
     restart: unless-stopped
   

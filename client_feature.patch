@@ -23,7 +23,7 @@
  ) -> None:
      fit_id = activity.get("fitFileId")
 +    
-+    # Get krutilkavnbot token for sending to clients
++    # Get clientbot token for sending to clients
 +    krutilkavn_token = os.environ.get(KRUTILKAVN_BOT_TOKEN_ENV)
 +    
      caption = format_activity_meta(activity, account_name, profile)
@@ -34,7 +34,7 @@
                  pass
          return
 +    
-+    # Send to matching clients if krutilkavnbot token is available
++    # Send to matching clients if clientbot token is available
 +    if krutilkavn_token:
 +        send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, None)
 +
@@ -57,7 +57,7 @@
 +            except requests.HTTPError:
 +                pass
 +                
-+        # Send to matching clients if krutilkavnbot token is available
++        # Send to matching clients if clientbot token is available
 +        if krutilkavn_token:
 +            send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, temp_file)
 +    except Exception:
@@ -72,7 +72,7 @@
 +                )
 +            except requests.HTTPError:
 +                pass
-+        # Send error message to matching clients if krutilkavnbot token is available
++        # Send error message to matching clients if clientbot token is available
 +        if krutilkavn_token:
 +            error_caption = f"Не удалось отправить FIT для активности {activity.get('id')}"
 +            send_to_matching_clients(activity, profile, error_caption, krutilkavn_token, timeout, None)

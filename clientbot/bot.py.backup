@@ -34,13 +34,13 @@ import os
 
 LOGGER = logging.getLogger(__name__)
 
-_GREETING_KEY: Final[str] = "krutilkavnbot:greeting"
-_CANDIDATES_KEY: Final[str] = "krutilkavnbot:candidates"
-_FORM_KEY: Final[str] = "krutilkavnbot:form"
-_PENDING_APPROVALS_KEY: Final[str] = "krutilkavnbot:pending_approvals"
-_LAST_SEARCH_KEY: Final[str] = "krutilkavnbot:last_name"
-_BOOKING_STATE_KEY: Final[str] = "krutilkavnbot:booking"
-_MY_BOOKINGS_CACHE_KEY: Final[str] = "krutilkavnbot:my_bookings"
+_GREETING_KEY: Final[str] = "clientbot:greeting"
+_CANDIDATES_KEY: Final[str] = "clientbot:candidates"
+_FORM_KEY: Final[str] = "clientbot:form"
+_PENDING_APPROVALS_KEY: Final[str] = "clientbot:pending_approvals"
+_LAST_SEARCH_KEY: Final[str] = "clientbot:last_name"
+_BOOKING_STATE_KEY: Final[str] = "clientbot:booking"
+_MY_BOOKINGS_CACHE_KEY: Final[str] = "clientbot:my_bookings"
 _STATUS_LABELS: Final[Dict[str, str]] = {
     "booked": "Записан",
     "available": "Свободно",
@@ -703,7 +703,7 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
             reservation["id"],
             client_id=client["id"],
             client_name=client_display_name,
-            source="krutilkavnbot",
+            source="clientbot",
         )
     except Exception:
         LOGGER.exception("Failed to update reservation %s", reservation["id"])
@@ -876,7 +876,7 @@ async def _notify_admins_of_booking(
         f"{session_type}\n"
         f"🏋️ Станок: {stand_label}"
         f"{bike_info}\n\n"
-        f"Запись создана через бота krutilkavnbot"
+        f"Запись создана через бота clientbot"
     )
 
     # Send notification to all admins
@@ -1151,7 +1151,7 @@ async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.
             client_id=None,
             client_name=None,
             status="available",
-            source="krutilkavnbot",
+            source="clientbot",
             notes=f"cancelled via /cancel command by client {client_id}"
         )
     except Exception as exc:
@@ -1400,7 +1400,7 @@ async def _notify_admins_of_cancellation(
         f"Клиент: {client_name}\n"
         f"Дата и время: {date_str} в {time_str}"
         f"{session_type}\n\n"
-        f"Запись отменена через бота krutilkavnbot"
+        f"Запись отменена через бота clientbot"
     )
 
     # Send notification to all admins

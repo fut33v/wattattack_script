@@ -389,8 +389,8 @@ def extract_athlete_field(profile: Dict[str, Any], field: str) -> str:
 
 
 def send_workout_reminders(*, timeout: float, reminder_hours: int = DEFAULT_REMINDER_HOURS) -> None:
-    """Send workout reminders to clients via krutilkavnbot."""
-    # Get the krutilkavnbot token
+    """Send workout reminders to clients via clientbot."""
+    # Get the clientbot token
     krutilkavn_token = os.environ.get("KRUTILKAVN_BOT_TOKEN")
     if not krutilkavn_token:
         LOGGER.info("KRUTILKAVN_BOT_TOKEN not set, skipping workout reminders")
@@ -463,7 +463,7 @@ def send_workout_reminders(*, timeout: float, reminder_hours: int = DEFAULT_REMI
             # Format reminder message
             message = format_workout_reminder(client, reservations, reminder_hours)
             
-            # Send reminder via krutilkavnbot
+            # Send reminder via clientbot
             try:
                 telegram_send_message(
                     krutilkavn_token,
@@ -605,7 +605,7 @@ def send_activity_fit(
 ) -> None:
     fit_id = activity.get("fitFileId")
     
-    # Get krutilkavnbot token for sending to clients
+    # Get clientbot token for sending to clients
     krutilkavn_token = os.environ.get(KRUTILKAVN_BOT_TOKEN_ENV)
     
     caption = format_activity_meta(activity, account_name, profile)
@@ -623,7 +623,7 @@ def send_activity_fit(
             except requests.HTTPError:
                 pass
         
-        # Send to matching clients if krutilkavnbot token is available
+        # Send to matching clients if clientbot token is available
         if krutilkavn_token:
             send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, None, account_name)
         return
@@ -649,7 +649,7 @@ def send_activity_fit(
             except requests.HTTPError:
                 pass
                 
-        # Send to matching clients if krutilkavnbot token is available
+        # Send to matching clients if clientbot token is available
         # Only send to matching clients AFTER we have downloaded the FIT file
         if krutilkavn_token:
             send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, temp_file, account_name)
@@ -666,7 +666,7 @@ def send_activity_fit(
                 )
             except requests.HTTPError:
                 pass
-        # Send error message to matching clients if krutilkavnbot token is available
+        # Send error message to matching clients if clientbot token is available
         # Send without FIT file when there was an error downloading it
         if krutilkavn_token:
             error_caption = f"Не удалось отправить FIT для активности {activity.get('id')}"
