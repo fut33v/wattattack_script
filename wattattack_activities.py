@@ -363,6 +363,76 @@ class WattAttackClient:
             f"Failed to upload workout ({response.status_code}): {message}"
         )
 
+    def list_events(self, *, timeout: float | None = None) -> List[Dict[str, Any]]:
+        """Return WattAttack events available to the current account."""
+
+        response = self.session.get(
+            self._api_url("/event/user-events"),
+            timeout=timeout,
+        )
+        data = self._parse_json(response)
+        if response.status_code == 200:
+            events = data.get("events")
+            if isinstance(events, list):
+                return events
+            return []
+
+        message = ""
+        if isinstance(data, dict):
+            message = data.get("message") or ""
+        if not message:
+            message = response.text.strip() or "unexpected response"
+        raise RuntimeError(
+            f"Failed to fetch events ({response.status_code}): {message}"
+        )
+
+    def fetch_maps_with_routes(self, *, timeout: float | None = None) -> List[Dict[str, Any]]:
+        """Return maps and their routes used in the event creator."""
+
+        response = self.session.get(
+            self._api_url("/map/get-with-routes"),
+            timeout=timeout,
+        )
+        if response.status_code == 200:
+            payload = self._parse_json(response)
+            items = payload.get("data")
+            if isinstance(items, list):
+                return items
+            return []
+        if response.status_code == 404:
+            return []
+
+        message = response.text.strip() or "unexpected response"
+        raise RuntimeError(
+            f"Failed to fetch map routes ({response.status_code}): {message}"
+        )
+
+    def create_event(
+        self,
+        payload: Dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> Dict[str, Any]:
+        """Create a WattAttack event via the hidden cabinet API."""
+
+        response = self.session.post(
+            self._api_url("/event/user-create"),
+            json=payload,
+            timeout=timeout,
+        )
+        data = self._parse_json(response)
+        if response.status_code in {200, 201}:
+            return data
+
+        message = ""
+        if isinstance(data, dict):
+            message = data.get("message") or ""
+        if not message:
+            message = response.text.strip() or "unexpected response"
+        raise RuntimeError(
+            f"Failed to create event ({response.status_code}): {message}"
+        )
+
     @staticmethod
     def _parse_json(response: requests.Response) -> Dict[str, Any]:
         try:
