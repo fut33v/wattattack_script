@@ -7,11 +7,12 @@ import json
 import logging
 import os
 import tempfile
-from datetime import datetime, timedelta, date, time
+from datetime import datetime, timedelta, date, time, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import requests
+from zoneinfo import ZoneInfo
 
 from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
 from repositories.admin_repository import (
@@ -28,6 +29,8 @@ from repositories.schedule_repository import (
     was_activity_id_seen,
     record_seen_activity_id,
     get_seen_activity_ids_for_account,
+    record_account_assignment,
+    was_account_assignment_done,
 )
 from repositories.client_link_repository import get_link_by_client
 from repositories.client_repository import get_client, search_clients
@@ -36,6 +39,7 @@ from repositories.client_repository import get_client, search_clients
 from scheduler.notifier_client import send_to_matching_clients
 from scheduler import intervals_plan
 from scheduler import intervals_upload
+from wattattack_profiles import apply_client_profile as apply_wattattack_profile
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,6 +54,39 @@ DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
 MAX_TRACKED_IDS = int(os.environ.get("WATTATTACK_TRACKED_LIMIT", "200"))
 DEFAULT_ADMIN_SEED = os.environ.get("TELEGRAM_ADMIN_IDS", "")
 DEFAULT_REMINDER_HOURS = int(os.environ.get("WORKOUT_REMINDER_HOURS", "4"))
+DEFAULT_ASSIGN_LEAD_MINUTES = int(os.environ.get("WATTATTACK_ASSIGN_LEAD_MINUTES", "20"))
+DEFAULT_ASSIGN_WINDOW_MINUTES = int(os.environ.get("WATTATTACK_ASSIGN_WINDOW_MINUTES", "10"))
+ASSIGN_ENABLE = os.environ.get("WATTATTACK_ASSIGN_ENABLED", "false").lower() in {"1", "true", "yes"}
+LOCAL_TIMEZONE = ZoneInfo(os.environ.get("WATTATTACK_LOCAL_TZ", "Europe/Moscow"))
+
+
+class TZFormatter(logging.Formatter):
+    """Formatter that renders timestamps in the configured timezone."""
+
+    def __init__(self, fmt: str, tz: ZoneInfo, datefmt: Optional[str] = None) -> None:
+        super().__init__(fmt, datefmt)
+        self._tz = tz
+
+    def formatTime(self, record: logging.LogRecord, datefmt: Optional[str] = None) -> str:
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc).astimezone(self._tz)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def configure_logging(level: int = logging.INFO) -> None:
+    """Configure root logger to use the local timezone when standalone."""
+
+    root = logging.getLogger()
+    if root.handlers:
+        return
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        TZFormatter("%(asctime)s %(levelname)s %(message)s", tz=LOCAL_TIMEZONE)
+    )
+    root.addHandler(handler)
+    root.setLevel(level)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -97,7 +134,35 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=DEFAULT_REMINDER_HOURS,
         help="Hours before workout to send reminder (default: 4)",
     )
+    parser.add_argument(
+        "--assign-lead-minutes",
+        type=int,
+        default=DEFAULT_ASSIGN_LEAD_MINUTES,
+        help="Minutes before slot start to set WattAttack accounts from the schedule (0 disables)",
+    )
+    parser.add_argument(
+        "--assign-window-minutes",
+        type=int,
+        default=DEFAULT_ASSIGN_WINDOW_MINUTES,
+        help="Window length in minutes when scanning slots for automatic assignments",
+    )
     return parser.parse_args(argv)
+
+
+def _parse_stand_ids(entry: Dict[str, Any]) -> List[int]:
+    raw_value = entry.get("stand_ids")
+    if raw_value is None and entry.get("stand_id") is not None:
+        raw_value = [entry.get("stand_id")]
+    if raw_value is None:
+        return []
+    iterable = raw_value if isinstance(raw_value, (list, tuple)) else [raw_value]
+    values: List[int] = []
+    for value in iterable:
+        try:
+            values.append(int(value))
+        except (TypeError, ValueError):
+            LOGGER.warning("Account %s has invalid stand id %r", entry.get("id"), value)
+    return values
 
 
 def load_accounts(config_path: Path) -> Dict[str, Dict[str, Any]]:
@@ -117,6 +182,7 @@ def load_accounts(config_path: Path) -> Dict[str, Dict[str, Any]]:
             "email": entry["email"],
             "password": entry["password"],
             "base_url": entry.get("base_url", DEFAULT_BASE_URL),
+            "stand_ids": _parse_stand_ids(entry),
         }
     if not accounts:
         raise ValueError("Accounts list is empty")
@@ -351,7 +417,7 @@ def send_workout_reminders(*, timeout: float, reminder_hours: int = DEFAULT_REMI
         return
 
     # Calculate time window for reminders (N hours before the workout)
-    now = datetime.now()
+    now = datetime.now(tz=LOCAL_TIMEZONE)
     since = now + timedelta(hours=reminder_hours-1)  # Slightly wider window to ensure we catch everything
     until = now + timedelta(hours=reminder_hours+1)
 
@@ -543,6 +609,184 @@ def format_workout_reminder(client: Dict[str, Any], reservations: List[Dict[str,
     return message
 
 
+def assign_clients_to_accounts(
+    *,
+    accounts: Dict[str, Dict[str, Any]],
+    lead_minutes: int,
+    window_minutes: int,
+    timeout: float,
+    dry_run: bool,
+    admin_ids: Sequence[int],
+    bot_token: str,
+) -> None:
+    """Apply client data to WattAttack accounts ahead of the scheduled slot."""
+
+    if lead_minutes <= 0 or window_minutes <= 0:
+        LOGGER.debug("Auto-assignment disabled (lead=%s, window=%s)", lead_minutes, window_minutes)
+        return
+
+    stand_accounts: Dict[int, Dict[str, Any]] = {}
+    for account_id, account in accounts.items():
+        for stand_id in account.get("stand_ids") or []:
+            if stand_id in stand_accounts:
+                LOGGER.warning(
+                    "Stand %s already mapped to %s, overriding with %s",
+                    stand_id,
+                    stand_accounts[stand_id]["id"],
+                    account_id,
+                )
+            stand_accounts[stand_id] = {**account, "id": account_id}
+
+    if not stand_accounts:
+        LOGGER.debug("No stand mappings in accounts file, skipping auto-assignment")
+        return
+
+    now = datetime.now(tz=LOCAL_TIMEZONE)
+    window_start = now + timedelta(minutes=lead_minutes)
+    window_end = window_start + timedelta(minutes=window_minutes)
+
+    try:
+        reservations = list_upcoming_reservations(window_start, window_end)
+    except Exception:
+        LOGGER.exception("Failed to load reservations for auto-assignment window")
+        return
+
+    if not reservations:
+        LOGGER.debug(
+            "No reservations scheduled between %s and %s for auto-assignment",
+            window_start,
+            window_end,
+        )
+        return
+
+    notifications: List[Dict[str, Any]] = []
+    applied = 0
+    for reservation in reservations:
+        account = None
+        stand_id = reservation.get("stand_id")
+        if not isinstance(stand_id, int):
+            continue
+        account = stand_accounts.get(stand_id)
+        if not account:
+            continue
+
+        reservation_id = reservation.get("id")
+        client_id = reservation.get("client_id")
+        if not reservation_id or not client_id:
+            continue
+        account_id = account["id"]
+        if was_account_assignment_done(reservation_id, account_id):
+            LOGGER.debug(
+                "Reservation %s already applied to account %s, skipping",
+                reservation_id,
+                account_id,
+            )
+            continue
+
+        try:
+            client = get_client(client_id)
+        except Exception:
+            LOGGER.exception("Failed to load client %s for reservation %s", client_id, reservation_id)
+            continue
+
+        if not client:
+            LOGGER.warning(
+                "Reservation %s references missing client %s; cannot assign to %s",
+                reservation_id,
+                client_id,
+                account_id,
+            )
+            continue
+
+        client_name = client.get("full_name") or f"ID {client_id}"
+        stand_label = reservation.get("stand_code") or reservation.get("stand_display_name") or f"Stand {stand_id}"
+        slot_date = reservation.get("slot_date")
+        start_time = reservation.get("start_time")
+        date_str = slot_date.strftime("%d.%m") if isinstance(slot_date, date) else str(slot_date)
+        time_str = start_time.strftime("%H:%M") if isinstance(start_time, time) else str(start_time)
+        account_label = account.get("name") or account_id
+
+        if dry_run:
+            LOGGER.info(
+                "[dry-run] Would assign client %s (%s) to account %s for %s %s (%s)",
+                client_name,
+                client_id,
+                account_label,
+                date_str,
+                time_str,
+                stand_label,
+            )
+            continue
+
+        if ASSIGN_ENABLE and not dry_run:
+            try:
+                apply_wattattack_profile(
+                    account_id=account_id,
+                    account_label=account_label,
+                    email=account["email"],
+                    password=account["password"],
+                    base_url=account.get("base_url"),
+                    client_record=client,
+                    timeout=timeout,
+                )
+                record_account_assignment(reservation_id, account_id, client_id)
+                LOGGER.info(
+                    "Assigned client %s (%s) to account %s for %s %s (%s)",
+                    client_name,
+                    client_id,
+                    account_label,
+                    date_str,
+                    time_str,
+                    stand_label,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "Failed to apply client %s (%s) to account %s (reservation %s)",
+                    client_name,
+                    client_id,
+                account_id,
+                reservation_id,
+            )
+        applied += 1
+        notifications.append(
+            {
+                "account_label": account_label,
+                "account_id": account_id,
+                "client_name": client_name,
+                "client_id": client_id,
+                "slot_label": f"{date_str} {time_str}",
+                "stand_label": stand_label,
+            }
+        )
+
+    if applied:
+        LOGGER.info("Applied %s client(s) to WattAttack accounts for upcoming slots", applied)
+    else:
+        LOGGER.debug("No auto-assignments were performed in this cycle")
+
+    if notifications and bot_token and admin_ids:
+        status_note = "наблюдаем" if dry_run or not ASSIGN_ENABLE else "назначили"
+        header = f"🕘 Ближайшие смены ({status_note}):"
+        lines = []
+        for row in notifications:
+            line = (
+                f"{row['account_label']}: {row['client_name']} (ID {row['client_id']}) "
+                f"— {row['slot_label']}, {row['stand_label']}"
+            )
+            lines.append(line)
+        message = f"{header}\n" + "\n".join(lines)
+        for chat_id in admin_ids:
+            try:
+                telegram_send_message(
+                    bot_token,
+                    str(chat_id),
+                    message,
+                    timeout=timeout,
+                )
+            except requests.HTTPError:
+                LOGGER.warning("Failed to notify admin %s about assignments list", chat_id)
+
+
 def send_activity_fit(
     *,
     client: WattAttackClient,
@@ -627,7 +871,6 @@ def send_activity_fit(
                 LOGGER.debug("Failed to remove temp file %s", temp_file)
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args(argv)
 
     if not args.token:
@@ -742,6 +985,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     #     if not args.state.exists():
     #         save_state(args.state, state)
 
+    try:
+        assign_clients_to_accounts(
+            accounts=accounts,
+            lead_minutes=args.assign_lead_minutes,
+            window_minutes=args.assign_window_minutes,
+            timeout=args.timeout,
+            dry_run=args.dry_run,
+            admin_ids=admin_ids,
+            bot_token=args.token,
+        )
+    except Exception:
+        LOGGER.exception("Failed to process automatic WattAttack account assignments")
+
     # Send workout reminders to clients
     if not args.dry_run:
         try:
@@ -773,4 +1029,5 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    configure_logging()
     raise SystemExit(main())

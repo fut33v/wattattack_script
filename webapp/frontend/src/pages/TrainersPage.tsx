@@ -118,7 +118,8 @@ export default function TrainersPage() {
           >
             <span className="trainer-list-title">{resolveTitle(trainer)}</span>
             <span className="trainer-list-meta">
-              {trainer.code ? `Код ${trainer.code}` : `ID ${trainer.id}`}
+              ID {trainer.id}
+              {trainer.code ? ` · Код ${trainer.code}` : ""}
               {trainer.owner ? ` · ${trainer.owner}` : ""}
             </span>
             <span className="trainer-list-bike">
@@ -153,6 +154,10 @@ export default function TrainersPage() {
                     ) : (
                       <span className="read-value">{selectedTrainer.title ?? "—"}</span>
                     )}
+                  </label>
+                  <label>
+                    ID станка
+                    <span className="read-value">{selectedTrainer.id}</span>
                   </label>
                   <label>
                     Отображаемое имя

@@ -122,6 +122,29 @@ def ensure_schedule_tables() -> None:
                 ON schedule_reservations (slot_id)
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schedule_account_assignments (
+                id SERIAL PRIMARY KEY,
+                reservation_id INTEGER NOT NULL REFERENCES schedule_reservations (id) ON DELETE CASCADE,
+                account_id TEXT NOT NULL,
+                client_id INTEGER REFERENCES clients (id) ON DELETE SET NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS schedule_account_assignments_reservation_idx
+                ON schedule_account_assignments (reservation_id, account_id)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS schedule_account_assignments_account_idx
+                ON schedule_account_assignments (account_id)
+            """
+        )
         conn.commit()
 
 
@@ -1259,3 +1282,37 @@ def list_upcoming_reservations(since: datetime, until: datetime) -> List[Dict]:
         )
         rows = cur.fetchall()
     return rows
+
+
+def record_account_assignment(reservation_id: int, account_id: str, client_id: Optional[int]) -> None:
+    """Store that a WattAttack account was updated for the reservation."""
+
+    ensure_schedule_tables()
+    with db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO schedule_account_assignments (reservation_id, account_id, client_id, applied_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (reservation_id, account_id)
+            DO UPDATE SET client_id = EXCLUDED.client_id, applied_at = NOW()
+            """,
+            (reservation_id, account_id, client_id),
+        )
+        conn.commit()
+
+
+def was_account_assignment_done(reservation_id: int, account_id: str) -> bool:
+    """Return True if we already applied a client profile for this reservation/account."""
+
+    ensure_schedule_tables()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM schedule_account_assignments
+            WHERE reservation_id = %s AND account_id = %s
+            """,
+            (reservation_id, account_id),
+        )
+        row = cur.fetchone()
+    return bool(row)

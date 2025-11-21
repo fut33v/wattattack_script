@@ -8,12 +8,16 @@ import os
 import signal
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
+
+from zoneinfo import ZoneInfo
 
 from .notifier import main as notifier_main
 
 DEFAULT_INTERVAL = int(os.environ.get("WATTATTACK_INTERVAL_SECONDS", str(30 * 60)))
+LOCAL_TIMEZONE = ZoneInfo(os.environ.get("WATTATTACK_LOCAL_TZ", "Europe/Moscow"))
 
 STOP_REQUESTED = False
 
@@ -47,12 +51,28 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+class TZFormatter(logging.Formatter):
+    """Formatter that renders timestamps in the configured timezone."""
+
+    def __init__(self, fmt: str, tz: ZoneInfo, datefmt: str | None = None) -> None:
+        super().__init__(fmt, datefmt)
+        self._tz = tz
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc).astimezone(self._tz)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def setup_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-    )
+    handler = logging.StreamHandler()
+    handler.setFormatter(TZFormatter("%(asctime)s [%(levelname)s] %(message)s", tz=LOCAL_TIMEZONE))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(level)
+    root.addHandler(handler)
 
 
 def request_stop(*_args) -> None:

@@ -3,6 +3,7 @@
     "id": "main",
     "name": "Основной аккаунт",
     "email": "account@example.com",
-    "password": "secret"
+    "password": "secret",
+    "stand_ids": [1]
   }
 ]

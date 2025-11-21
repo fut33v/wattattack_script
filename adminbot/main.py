@@ -85,6 +85,7 @@ from scripts.import_schedule_from_xlsx import (
     format_import_report as format_schedule_import_report,
 )
 from wattattack_activities import WattAttackClient
+from wattattack_profiles import apply_client_profile as apply_wattattack_profile
 from wattattack_workouts import (
     build_workout_payload,
     calculate_workout_metrics,
@@ -4049,96 +4050,18 @@ def extract_athlete_field(profile: Dict[str, Any], field: str) -> str:
     return ""
 
 
-def split_full_name(full_name: str) -> Tuple[Optional[str], Optional[str]]:
-    if not full_name:
-        return None, None
-    parts = full_name.strip().split()
-    if not parts:
-        return None, None
-    first = parts[0]
-    last = " ".join(parts[1:]) or None
-    return first, last
-
-
 def apply_client_profile(account_id: str, client_record: Dict[str, Any]) -> None:
     account = ACCOUNT_REGISTRY[account_id]
-    client = WattAttackClient(account.base_url)
-    client.login(account.email, account.password, timeout=DEFAULT_TIMEOUT)
-
-    existing_profile: Dict[str, Any] = {}
-    try:
-        existing_profile = client.fetch_profile(timeout=DEFAULT_TIMEOUT)
-        if not isinstance(existing_profile, dict):
-            existing_profile = {}
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Failed to fetch current profile for %s: %s", account_id, exc)
-        existing_profile = {}
-
-    athlete_section = existing_profile.get("athlete") if isinstance(existing_profile, dict) else {}
-    if not isinstance(athlete_section, dict):
-        athlete_section = {}
-
-    first = client_record.get("first_name") or None
-    last = client_record.get("last_name") or None
-    if not first and not last:
-        first, last = split_full_name(client_record.get("full_name", ""))
-
-    user_payload: Dict[str, Any] = {}
-    if first:
-        user_payload["firstName"] = str(first)
-    if last:
-        user_payload["lastName"] = str(last)
-
-    profile_payload: Dict[str, Any] = {}
-    weight = client_record.get("weight")
-    height = client_record.get("height")
-    ftp = client_record.get("ftp")
-    gender_value = client_record.get("gender")
-
-    if weight is not None:
-        try:
-            profile_payload["weight"] = float(weight)
-        except (TypeError, ValueError):
-            pass
-    if height is not None:
-        try:
-            profile_payload["height"] = float(height)
-        except (TypeError, ValueError):
-            pass
-    ftp_value = ftp
-    if ftp_value is None:
-        ftp_value = DEFAULT_CLIENT_FTP
-    elif isinstance(ftp_value, str):
-        ftp_value = ftp_value.strip()
-        if not ftp_value:
-            ftp_value = DEFAULT_CLIENT_FTP
-    try:
-        profile_payload["ftp"] = int(float(ftp_value))
-    except (TypeError, ValueError):
-        profile_payload["ftp"] = DEFAULT_CLIENT_FTP
-    if gender_value:
-        gender_norm = str(gender_value).strip().lower()
-        if gender_norm in {"m", "male", "м", "муж", "мужской"}:
-            profile_payload["gender"] = "male"
-        elif gender_norm in {"f", "female", "ж", "жен", "женский"}:
-            profile_payload["gender"] = "female"
-
-    # Preserve existing required fields to avoid validation errors
-    if "birthDate" not in profile_payload and athlete_section.get("birthDate"):
-        profile_payload["birthDate"] = athlete_section.get("birthDate")
-    if "gender" not in profile_payload and athlete_section.get("gender"):
-        profile_payload["gender"] = athlete_section.get("gender")
-    if not profile_payload.get("birthDate"):
-        profile_payload["birthDate"] = "2000-01-01"
-
-    if user_payload:
-        LOGGER.info("Updating user %s with payload: %s", account_id, user_payload)
-        client.update_user(user_payload, timeout=DEFAULT_TIMEOUT)
-        LOGGER.info("User update for %s completed", account_id)
-    if profile_payload:
-        LOGGER.info("Updating athlete %s with payload: %s", account_id, profile_payload)
-        response = client.update_profile(profile_payload, timeout=DEFAULT_TIMEOUT)
-        LOGGER.info("Athlete update for %s response: %s", account_id, response)
+    apply_wattattack_profile(
+        account_id=account_id,
+        account_label=account.name,
+        email=account.email,
+        password=account.password,
+        base_url=account.base_url,
+        client_record=client_record,
+        timeout=DEFAULT_TIMEOUT,
+        default_ftp=DEFAULT_CLIENT_FTP,
+    )
 
 
 def format_client_summary(client_record: Dict[str, Any]) -> str:

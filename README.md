@@ -23,7 +23,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
   - `/start`, `/help` – показать список аккаунтов и подсказки.
   - `/recent <n>` – fetch recent workouts for a selected account.
   - `/latest` – download latest workout FIT for each account.
-- **scheduler/** – Scheduler loop and notifier CLI that watch WattAttack for new activities and send FIT files with metadata to admins.
+- **scheduler/** – Scheduler loop and notifier CLI that watch WattAttack for new activities, auto-apply clients to WattAttack accounts based on upcoming schedule slots, and send FIT files with metadata to admins.
 - **wattattack_activities.py** – API wrapper for WattAttack endpoints (`/auth/login`, `/activities`, `/athlete/update`, `/user/update`, `/auth/check`, `/workouts/user-create`).
 - **wattattack_workouts.py** – ZWO workout parser, sanitizer, chart/metrics calculator, and payload builder for library uploads.
 - **scripts/load_clients.py** – CLI loader to import clients from CSV into PostgreSQL (with optional `--truncate`).
@@ -56,7 +56,9 @@ See `AGENTS.md` for repository-wide guidelines on structure, workflows, and revi
    - `TELEGRAM_BOT_TOKEN` для adminbot, optional `TELEGRAM_ADMIN_IDS` seed.
    - `KRUTILKAFIT_BOT_TOKEN` — токен отдельного бота для скачивания активностей (если не указан, будет использован `TELEGRAM_BOT_TOKEN`).
    - `KRUTILKAVN_BOT_TOKEN` for the greeting bot (use `KRUTILKAVN_GREETING` to override the default message).
-   - `WATTATTACK_ACCOUNTS_FILE` (JSON with email/password/base_url per account).
+- `WATTATTACK_ACCOUNTS_FILE` (JSON with email/password/base_url per account plus optional `stand_ids` for automatic assignments).
+   - `WATTATTACK_LOCAL_TZ` (default `Europe/Moscow`) — региональная таймзона для scheduler’а и ботов.
+   - `WATTATTACK_ASSIGN_ENABLED` — включить автоматическую запись клиентов в WattAttack-аккаунты (по умолчанию только уведомления).
    - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`.
    - Optional timeouts/page size (see `.env.example`).
    - `TELEGRAM_LOGIN_BOT_USERNAME` — username логин-бота без `@` (он же используется для виджета авторизации).

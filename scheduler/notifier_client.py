@@ -7,11 +7,12 @@ import json
 import logging
 import os
 import tempfile
-from datetime import datetime, timedelta, date, time
+from datetime import datetime, timedelta, date, time, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import requests
+from zoneinfo import ZoneInfo
 from straver_client import StraverClient
 from scheduler import intervals_sync
 
@@ -51,6 +52,36 @@ DEFAULT_REMINDER_HOURS = int(os.environ.get("WORKOUT_REMINDER_HOURS", "4"))
 STRAVER_BASE_URL = os.environ.get("STRAVER_BASE_URL")
 STRAVER_INTERNAL_SECRET = os.environ.get("STRAVER_INTERNAL_SECRET")
 STRAVER_HTTP_TIMEOUT = float(os.environ.get("STRAVER_HTTP_TIMEOUT", os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30")))
+LOCAL_TIMEZONE = ZoneInfo(os.environ.get("WATTATTACK_LOCAL_TZ", "Europe/Moscow"))
+
+
+class TZFormatter(logging.Formatter):
+    """Formatter that renders timestamps in the configured timezone."""
+
+    def __init__(self, fmt: str, tz: ZoneInfo, datefmt: Optional[str] = None) -> None:
+        super().__init__(fmt, datefmt)
+        self._tz = tz
+
+    def formatTime(self, record: logging.LogRecord, datefmt: Optional[str] = None) -> str:
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc).astimezone(self._tz)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def configure_logging(level: int = logging.DEBUG) -> None:
+    """Configure logging only when running notifier_client standalone."""
+
+    root = logging.getLogger()
+    if root.handlers:
+        return
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        TZFormatter("%(asctime)s %(levelname)s %(message)s", tz=LOCAL_TIMEZONE)
+    )
+    root.addHandler(handler)
+    root.setLevel(level)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -404,7 +435,7 @@ def send_workout_reminders(*, timeout: float, reminder_hours: int = DEFAULT_REMI
         return
 
     # Calculate time window for reminders (N hours before the workout)
-    now = datetime.now()
+    now = datetime.now(tz=LOCAL_TIMEZONE)
     since = now + timedelta(hours=reminder_hours-1)  # Slightly wider window to ensure we catch everything
     until = now + timedelta(hours=reminder_hours+1)
 
@@ -890,7 +921,6 @@ def send_to_matching_clients(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(message)s")
     args = parse_args(argv)
 
     if not args.token:
@@ -1016,4 +1046,5 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    configure_logging()
     raise SystemExit(main())
