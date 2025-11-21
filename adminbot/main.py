@@ -94,6 +94,7 @@ from wattattack_workouts import (
 )
 from adminbot import events as events_admin
 from adminbot import intervals as intervals_admin
+from adminbot import wizard as wizard_admin
 from adminbot.accounts import (
     AccountConfig,
     format_account_list as format_account_list_from_registry,
@@ -1978,6 +1979,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/setclient <аккаунт> — применить данные клиента из базы\n"
         "/account <аккаунт> — показать текущие данные аккаунта\n"
         "/combinate — подобрать велосипеды и станки; фамилии пришлите отдельным сообщением\n"
+        "/wizard — ближайшие слоты и массовая посадка на аккаунты\n"
         "/bikes [поиск] — показать доступные велосипеды\n"
         "/layout — показать текущую расстановку велосипедов\n"
         "/stands [поиск] — показать доступные станки\n"
@@ -2008,6 +2010,17 @@ async def events_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("⚠️ Нет доступных WattAttack аккаунтов.")
         return
     await events_admin.start_events_flow(update, context, ACCOUNT_REGISTRY)
+
+
+async def wizard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not ensure_admin_message(update):
+        return
+    if not ACCOUNT_REGISTRY:
+        await update.message.reply_text("⚠️ Нет доступных WattAttack аккаунтов.")
+        return
+    await wizard_admin.start(update, context, ACCOUNT_REGISTRY, LOCAL_TIMEZONE)
 
 
 async def _newclient_send_gender_prompt(
@@ -3520,6 +3533,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             LOCAL_TIMEZONE,
             DEFAULT_TIMEOUT,
             parts[1:],
+        )
+        if handled:
+            return
+    elif action == "wizard":
+        handled = await wizard_admin.handle_callback(
+            update,
+            context,
+            ACCOUNT_REGISTRY,
+            LOCAL_TIMEZONE,
+            DEFAULT_TIMEOUT,
+            DEFAULT_CLIENT_FTP,
         )
         if handled:
             return
@@ -7177,6 +7201,7 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("help", help_handler))
     application.add_handler(CommandHandler("events", events_handler))
+    application.add_handler(CommandHandler("wizard", wizard_handler))
     application.add_handler(CommandHandler("account", account_handler))
     application.add_handler(CommandHandler("combinate", combinate_handler))
     application.add_handler(CommandHandler("client", client_handler))
