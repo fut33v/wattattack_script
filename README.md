@@ -6,6 +6,7 @@ This repository contains a Telegram bot and supporting utilities for managing Wa
 ## Components
 - **adminbot/** – Telegram bot package that manages WattAttack profiles, clients, and inventory:
   - `/start`, `/help` – navigation/help.
+  - `/wizard` – upcoming schedule slots with quick bulk assignments to accounts.
   - `/account <id>` – show current WattAttack profile data.
   - `/combinate` — подбор велосипеда/станка по параметрам клиента.
   - `/bikes [поиск]` – list available bikes from the shared inventory (supports search term).
@@ -80,6 +81,7 @@ See `AGENTS.md` for repository-wide guidelines on structure, workflows, and revi
      ```
      start - краткое описание возможностей
      help - подсказать доступные команды
+     wizard - ближайшие слоты и массовая посадка на аккаунты
      setclient - применить данные клиента к аккаунту
      account - показать текущие данные аккаунта
      combinate - подобрать велосипеды и станки
@@ -90,7 +92,7 @@ See `AGENTS.md` for repository-wide guidelines on structure, workflows, and revi
      newclient - создать нового клиента
      events - создать заезд или гонку
      uploadclients - загрузить CSV (интерактивный выбор перезаписи/обновления + dry-run)
-    downloadclients - выгрузить клиентов в CSV
+     downloadclients - выгрузить клиентов в CSV
      uploadbikes - загрузить CSV велосипедов
      uploadstands - загрузить CSV станков
      uploadworkout - загрузить тренировку ZWO
