@@ -1007,6 +1007,16 @@ def _ensure_slot_capacity(conn, slot_id: int) -> int:
     return placeholders
 
 
+def ensure_slot_capacity(slot_id: int) -> int:
+    """Public helper to backfill placeholder reservations for a slot."""
+
+    ensure_schedule_tables()
+    with db_connection() as conn:
+        placeholders = _ensure_slot_capacity(conn, slot_id)
+        conn.commit()
+    return placeholders
+
+
 def ensure_workout_notifications_table() -> None:
     """Create table to track sent workout notifications."""
     with db_connection() as conn, dict_cursor(conn) as cur:

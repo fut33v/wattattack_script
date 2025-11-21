@@ -260,6 +260,8 @@ export interface AccountListResponse {
 export interface RaceCluster {
   code?: string | null;
   label: string;
+  start_time?: string | null;
+  end_time?: string | null;
 }
 
 export interface RaceRow {

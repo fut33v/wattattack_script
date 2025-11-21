@@ -168,6 +168,12 @@
         color: #1f2937;
       }
 
+      .cluster-time {
+        color: #64748b;
+        font-size: 14px;
+        margin-left: 6px;
+      }
+
       @media (max-width: 640px) {
         .meta-grid {
           grid-template-columns: 1fr;
@@ -208,16 +214,32 @@
           {% if participant_groups_offline %}
             {% for group in participant_groups_offline %}
               <div class="cluster-block">
-                <h3 class="cluster-title">{{ group.label }} · {{ group.participants|length }}</h3>
+                {% set cluster_meta = cluster_times.get(group.label) if cluster_times else None %}
+                <h3 class="cluster-title">
+                  {{ group.label }} · {{ group.participants|length }}
+                  {% if cluster_meta and (cluster_meta.start_time or cluster_meta.end_time) %}
+                    <span class="cluster-time">
+                      {% if cluster_meta.start_time and cluster_meta.end_time %}
+                        {{ cluster_meta.start_time }}–{{ cluster_meta.end_time }}
+                      {% elif cluster_meta.start_time %}
+                        с {{ cluster_meta.start_time }}
+                      {% elif cluster_meta.end_time %}
+                        до {{ cluster_meta.end_time }}
+                      {% endif %}
+                    </span>
+                  {% endif %}
+                </h3>
                 <ol class="participants-list">
                   {% for item in group.participants %}
                     <li class="participant-card">
                       <div class="participant-name">{{ loop.index }}. {{ item.name }}</div>
                       <div class="participant-cluster">
-                        {% if item.cluster %}
+                        {% if item.stand_label %}
+                          Станок: {{ item.stand_label }}
+                        {% elif item.cluster %}
                           Кластер: {{ item.cluster }}
                         {% else %}
-                          Кластер уточняется
+                          Место уточняется
                         {% endif %}
                       </div>
                       {% if item.is_pending %}
@@ -236,7 +258,21 @@
           {% if participant_groups_online %}
             {% for group in participant_groups_online %}
               <div class="cluster-block">
-                <h3 class="cluster-title">{{ group.label }} · {{ group.participants|length }}</h3>
+                {% set cluster_meta = cluster_times.get(group.label) if cluster_times else None %}
+                <h3 class="cluster-title">
+                  {{ group.label }} · {{ group.participants|length }}
+                  {% if cluster_meta and (cluster_meta.start_time or cluster_meta.end_time) %}
+                    <span class="cluster-time">
+                      {% if cluster_meta.start_time and cluster_meta.end_time %}
+                        {{ cluster_meta.start_time }}–{{ cluster_meta.end_time }}
+                      {% elif cluster_meta.start_time %}
+                        с {{ cluster_meta.start_time }}
+                      {% elif cluster_meta.end_time %}
+                        до {{ cluster_meta.end_time }}
+                      {% endif %}
+                    </span>
+                  {% endif %}
+                </h3>
                 <ol class="participants-list">
                   {% for item in group.participants %}
                     <li class="participant-card">

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
@@ -104,6 +104,26 @@ def _normalize_clusters(raw_clusters: Optional[Sequence[Any]]) -> List[Dict[str,
     if not raw_clusters:
         return result
     seen_codes: set[str] = set()
+
+    def _normalize_cluster_time(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, time):
+            return value.strftime("%H:%M")
+        if isinstance(value, str):
+            token = value.strip()
+        else:
+            token = str(value).strip()
+        if not token:
+            return None
+        for fmt in ("%H:%M", "%H:%M:%S"):
+            try:
+                parsed = datetime.strptime(token, fmt)
+                return parsed.strftime("%H:%M")
+            except ValueError:
+                continue
+        return None
+
     for idx, entry in enumerate(raw_clusters):
         if isinstance(entry, str):
             label = entry.strip()
@@ -124,7 +144,14 @@ def _normalize_clusters(raw_clusters: Optional[Sequence[Any]]) -> List[Dict[str,
             suffix += 1
             code = f"{base_code}-{suffix}"
         seen_codes.add(code)
-        result.append({"code": code, "label": label})
+        normalized: Dict[str, str] = {"code": code, "label": label}
+        start_time = _normalize_cluster_time(extra.get("start_time")) or _normalize_cluster_time(extra.get("start"))
+        end_time = _normalize_cluster_time(extra.get("end_time")) or _normalize_cluster_time(extra.get("end"))
+        if start_time:
+            normalized["start_time"] = start_time
+        if end_time:
+            normalized["end_time"] = end_time
+        result.append(normalized)
     return result
 
 
@@ -168,11 +195,22 @@ def _decode_clusters(value: Optional[Any]) -> List[Dict[str, str]]:
     if value is None:
         return []
     if isinstance(value, list):
-        return [
-            {"code": str(item.get("code") or item.get("key") or ""), "label": str(item.get("label") or "")}
-            for item in value
-            if isinstance(item, dict)
-        ]
+        decoded: List[Dict[str, str]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            entry: Dict[str, str] = {
+                "code": str(item.get("code") or item.get("key") or ""),
+                "label": str(item.get("label") or ""),
+            }
+            start_time = item.get("start_time") or item.get("start")
+            end_time = item.get("end_time") or item.get("end")
+            if start_time:
+                entry["start_time"] = str(start_time).strip()
+            if end_time:
+                entry["end_time"] = str(end_time).strip()
+            decoded.append(entry)
+        return decoded
     if isinstance(value, str):
         try:
             parsed = json.loads(value)

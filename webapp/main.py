@@ -7,7 +7,7 @@ import os
 from datetime import date, datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import psycopg2
@@ -120,10 +120,11 @@ api = APIRouter(prefix="/api", tags=["api"])
 api.include_router(vk_client_links_router, dependencies=[Depends(require_admin)])
 api.include_router(intervals_links_router, dependencies=[Depends(require_admin)])
 
-SCHEDULE_SESSION_KINDS = {"self_service", "instructor"}
+SCHEDULE_SESSION_KINDS = {"self_service", "instructor", "race"}
 SCHEDULE_SESSION_KIND_LABELS = {
     "self_service": "Самокрутка",
     "instructor": "Инструктор",
+    "race": "Гонка",
 }
 RESERVATION_STATUS_ALLOWED = {
     "available",
@@ -135,6 +136,7 @@ RESERVATION_STATUS_ALLOWED = {
     "waitlist",
     "blocked",
 }
+RESERVATION_STATUS_BOOKED = "booked"
 RACE_REGISTRATION_STATUSES = {
     race_repository.RACE_STATUS_PENDING,
     race_repository.RACE_STATUS_APPROVED,
@@ -192,6 +194,89 @@ def _parse_iso_time(field: str, value: object) -> time:
     raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}")
 
 
+def _parse_cluster_time(field: str, value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, time):
+        return value.strftime("%H:%M")
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return None
+    else:
+        token = str(value).strip()
+        if not token:
+            return None
+    parsed = _parse_iso_time(field, token)
+    return parsed.strftime("%H:%M")
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _score_bike_height(bike: Dict[str, Any], client_height: Optional[float]) -> float:
+    """Lower is better; penalize out-of-range bikes heavily."""
+
+    if client_height is None:
+        return 120.0
+
+    min_h = _to_float(bike.get("height_min_cm"))
+    max_h = _to_float(bike.get("height_max_cm"))
+
+    if min_h is not None and max_h is not None:
+        if min_h <= client_height <= max_h:
+            midpoint = (min_h + max_h) / 2
+            return abs(client_height - midpoint)
+        if client_height < min_h:
+            return 200.0 + (min_h - client_height)
+        return 200.0 + (client_height - max_h)
+
+    if min_h is not None:
+        if client_height >= min_h:
+            return client_height - min_h
+        return 200.0 + (min_h - client_height)
+
+    if max_h is not None:
+        if client_height <= max_h:
+            return max_h - client_height
+        return 200.0 + (client_height - max_h)
+
+    return 150.0
+
+
+def _match_favorite_bike_id(favorite_raw: Optional[str], bikes_map: Dict[int, Dict[str, Any]]) -> Optional[int]:
+    if not favorite_raw:
+        return None
+    needle = favorite_raw.strip().lower()
+    if not needle:
+        return None
+
+    exact_matches: List[int] = []
+    partial_matches: List[int] = []
+
+    for bike_id, bike in bikes_map.items():
+        title = (bike.get("title") or "").strip().lower()
+        owner = (bike.get("owner") or "").strip().lower()
+        if title == needle or owner == needle:
+            exact_matches.append(bike_id)
+        elif needle in title or (owner and needle in owner):
+            partial_matches.append(bike_id)
+
+    if exact_matches:
+        return exact_matches[0]
+    if partial_matches:
+        return partial_matches[0]
+    return None
+
+
 def _parse_positive_int(field: str, value: object) -> int:
     if isinstance(value, int):
         if value <= 0:
@@ -232,6 +317,23 @@ def _parse_clusters_payload(value: object) -> list[dict[str, str] | str]:
                     code = entry.get("code")
                     if isinstance(code, str) and code.strip():
                         cluster["code"] = code.strip()
+                    start_time = _parse_cluster_time("start_time", entry.get("start_time") or entry.get("startTime"))
+                    end_time = _parse_cluster_time("end_time", entry.get("end_time") or entry.get("endTime"))
+                    if start_time:
+                        cluster["start_time"] = start_time
+                    if end_time:
+                        cluster["end_time"] = end_time
+                    if start_time and end_time:
+                        try:
+                            start_dt = datetime.strptime(start_time, "%H:%M").time()
+                            end_dt = datetime.strptime(end_time, "%H:%M").time()
+                        except ValueError:
+                            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid cluster time format") from None
+                        if end_dt <= start_dt:
+                            raise HTTPException(
+                                status.HTTP_400_BAD_REQUEST,
+                                f"end_time must be after start_time for cluster '{label}'",
+                            )
                     clusters.append(cluster)
         return clusters
     if isinstance(value, str):
@@ -376,7 +478,14 @@ def _serialize_race(record: dict, *, include_registrations: bool = False) -> dic
             label = (entry.get("label") or "").strip()
             code = (entry.get("code") or "").strip() or None
             if label:
-                normalized_clusters.append({"label": label, "code": code})
+                cluster_payload: dict[str, str | None] = {"label": label, "code": code}
+                start_time = (entry.get("start_time") or "").strip()
+                end_time = (entry.get("end_time") or "").strip()
+                if start_time:
+                    cluster_payload["start_time"] = start_time
+                if end_time:
+                    cluster_payload["end_time"] = end_time
+                normalized_clusters.append(cluster_payload)
         serialized["clusters"] = normalized_clusters
     for key in ("pending_count", "approved_count"):
         value = serialized.get(key)
@@ -1864,6 +1973,378 @@ def api_get_race(race_id: int, user=Depends(require_admin)):
     return {"item": _serialize_race(record, include_registrations=True)}
 
 
+@api.post("/races/{race_id}/schedule/slots")
+def api_create_race_slots(race_id: int, user=Depends(require_admin)):
+    race = race_repository.get_race(race_id)
+    if not race:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Race not found")
+
+    race_date = race.get("race_date")
+    if isinstance(race_date, str):
+        try:
+            race_date = datetime.strptime(race_date, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid race_date") from exc
+    if not isinstance(race_date, date):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Race date is missing")
+
+    clusters = race.get("clusters") or []
+    if not clusters:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Race has no clusters")
+
+    week = schedule_repository.get_or_create_week(week_start_date=race_date, title=race.get("title"))
+
+    created_ids: list[int] = []
+    skipped: list[str] = []
+    duplicates: list[str] = []
+    errors: list[str] = []
+
+    for entry in clusters:
+        if not isinstance(entry, dict):
+            continue
+        label = (entry.get("label") or entry.get("code") or "").strip() or "Кластер"
+
+        start_time_value = entry.get("start_time") or entry.get("start")
+        end_time_value = entry.get("end_time") or entry.get("end")
+        if not start_time_value or not end_time_value:
+            skipped.append(label)
+            continue
+
+        try:
+            start_time_str = _parse_cluster_time("start_time", start_time_value)
+            end_time_str = _parse_cluster_time("end_time", end_time_value)
+        except HTTPException:
+            errors.append(label)
+            continue
+
+        if not start_time_str or not end_time_str:
+            skipped.append(label)
+            continue
+
+        try:
+            start_time = datetime.strptime(start_time_str, "%H:%M").time()
+            end_time = datetime.strptime(end_time_str, "%H:%M").time()
+        except ValueError:
+            errors.append(label)
+            continue
+
+        if end_time <= start_time:
+            errors.append(label)
+            continue
+
+        try:
+            slot = schedule_repository.create_slot(
+                week_id=week["id"],
+                slot_date=race_date,
+                start_time=start_time,
+                end_time=end_time,
+                label=f"Гонка · {label}",
+                session_kind="race",
+                notes=f"Гонка {race.get('title') or ''}".strip() or None,
+            )
+            if slot.get("id"):
+                created_ids.append(int(slot["id"]))
+        except psycopg2.errors.UniqueViolation:
+            duplicates.append(label)
+        except Exception:
+            log.exception("Failed to create schedule slot for race %s cluster %s", race_id, label)
+            errors.append(label)
+
+    race_date_label = race_date.isoformat()
+    week_start = week.get("week_start_date")
+    week_start_label = week_start.isoformat() if hasattr(week_start, "isoformat") else str(week_start)
+
+    return {
+        "created": len(created_ids),
+        "slot_ids": created_ids,
+        "race_date": race_date_label,
+        "week_id": week.get("id"),
+        "week_start_date": week_start_label,
+        "skipped_missing_time": skipped,
+        "duplicates": duplicates,
+        "errors": errors,
+    }
+
+
+@api.post("/races/{race_id}/schedule/seat")
+def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
+    race = race_repository.get_race(race_id)
+    if not race:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Race not found")
+
+    race_date = race.get("race_date")
+    if isinstance(race_date, str):
+        try:
+            race_date = datetime.strptime(race_date, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid race_date") from exc
+    if not isinstance(race_date, date):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Race date is missing")
+
+    clusters = race.get("clusters") or []
+    if not clusters:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Race has no clusters")
+
+    week = schedule_repository.get_week_by_start(race_date)
+    if not week:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Create slots for the race first")
+
+    def _normalize_date(value: object) -> Optional[date]:
+        if isinstance(value, date):
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.strptime(value, "%Y-%m-%d").date()
+            except ValueError:
+                return None
+        return None
+
+    def _normalize_time(value: object) -> Optional[time]:
+        if isinstance(value, time):
+            return value
+        if isinstance(value, str):
+            for fmt in ("%H:%M:%S", "%H:%M"):
+                try:
+                    return datetime.strptime(value, fmt).time()
+                except ValueError:
+                    continue
+        return None
+
+    # ensure placeholders exist before we read reservations
+    slots = schedule_repository.list_slots_with_reservations(week["id"])
+    race_slots: dict[int, dict] = {}
+    for slot in slots:
+        slot_date = _normalize_date(slot.get("slot_date"))
+        if slot_date != race_date:
+            continue
+        if slot.get("session_kind") != "race":
+            continue
+        if slot.get("id"):
+            schedule_repository.clear_reservations_for_slot(slot["id"])
+            schedule_repository.ensure_slot_capacity(slot["id"])
+            refreshed = schedule_repository.get_slot_with_reservations(slot["id"]) or slot
+            race_slots[slot["id"]] = refreshed
+
+    if not race_slots:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No race slots found for this date")
+
+    bikes = bikes_repository.list_bikes()
+    bikes_map: Dict[int, Dict[str, Any]] = {row["id"]: row for row in bikes if isinstance(row.get("id"), int)}
+    trainers = trainers_repository.list_trainers()
+    trainers_map: Dict[int, Dict[str, Any]] = {row["id"]: row for row in trainers if isinstance(row.get("id"), int)}
+    layout_rows = layout_repository.list_layout_details()
+    layout_map: Dict[int, Dict[str, Any]] = {
+        row["stand_id"]: row for row in layout_rows if isinstance(row.get("stand_id"), int)
+    }
+
+    def _stand_position_key(stand_id: int) -> int:
+        if stand_id in layout_map and layout_map[stand_id].get("stand_position") is not None:
+            return int(layout_map[stand_id]["stand_position"])
+        trainer_row = trainers_map.get(stand_id)
+        if trainer_row and trainer_row.get("position") is not None:
+            try:
+                return int(trainer_row["position"])
+            except (TypeError, ValueError):
+                return 9999
+        return 9999
+
+    # map clusters to slots by start time first, then by label fallback
+    slot_candidates: Dict[str, dict] = {}
+    for cluster in clusters:
+        code = (cluster.get("code") or cluster.get("label") or "").strip()
+        label = (cluster.get("label") or cluster.get("code") or "").strip() or "Кластер"
+        start = _normalize_time(cluster.get("start_time") or cluster.get("start"))
+        matched_slot: Optional[dict] = None
+        if start:
+            for slot in race_slots.values():
+                slot_start = _normalize_time(slot.get("start_time"))
+                if slot_start and slot_start == start:
+                    matched_slot = slot
+                    break
+        if matched_slot is None and label:
+            for slot in race_slots.values():
+                slot_label = (slot.get("label") or "").lower()
+                if slot_label and label.lower() in slot_label:
+                    matched_slot = slot
+                    break
+        if matched_slot:
+            slot_candidates[code] = matched_slot
+        else:
+            slot_candidates[code] = None
+
+    registrations = race_repository.list_registrations(race_id)
+    clients_cache: Dict[int, Dict[str, Any]] = {}
+
+    def _client_label(reg: Dict[str, Any]) -> str:
+        label = (reg.get("client_name") or "").strip()
+        if label:
+            return label
+        client_id = reg.get("client_id")
+        return f"ID {client_id}" if client_id is not None else "Участник"
+
+    cluster_results: Dict[str, Dict[str, Any]] = {}
+    missing_slots: List[str] = []
+    unplaced_clients: List[str] = []
+    placed_total = 0
+    total_candidates = 0
+    skipped_online = 0
+    skipped_missing_cluster = 0
+    unknown_cluster = 0
+    already_assigned = 0
+    slot_ids_used: set[int] = set()
+
+    for reg in registrations:
+        status_value = (reg.get("status") or "").lower()
+        if status_value != race_repository.RACE_STATUS_APPROVED:
+            continue
+        race_mode = (reg.get("race_mode") or "").strip().lower()
+        if race_mode == "online":
+            skipped_online += 1
+            continue
+        cluster_code = reg.get("cluster_code") or reg.get("cluster_label")
+        if not cluster_code:
+            skipped_missing_cluster += 1
+            continue
+
+        cluster_entry = next(
+            (entry for entry in clusters if cluster_code == entry.get("code") or cluster_code == entry.get("label")),
+            None,
+        )
+        if cluster_entry is None:
+            unknown_cluster += 1
+            continue
+
+        code = (cluster_entry.get("code") or cluster_entry.get("label") or "").strip()
+        label = (cluster_entry.get("label") or cluster_entry.get("code") or "").strip() or cluster_code
+        slot = slot_candidates.get(code) or slot_candidates.get(label)
+        total_candidates += 1
+        start_time_value = _normalize_time(cluster_entry.get("start_time") or cluster_entry.get("start"))
+
+        stats = cluster_results.setdefault(
+            code,
+            {
+                "cluster": label,
+                "code": code,
+                "slot_id": slot.get("id") if slot else None,
+                "slot_label": slot.get("label") if isinstance(slot, dict) else None,
+                "start_time": start_time_value.strftime("%H:%M") if start_time_value else None,
+                "requested": 0,
+                "placed": 0,
+                "already": 0,
+                "unplaced": [],
+            },
+        )
+        stats["requested"] += 1
+
+        if slot is None:
+            if label not in missing_slots:
+                missing_slots.append(label)
+            stats["unplaced"].append(_client_label(reg))
+            unplaced_clients.append(_client_label(reg))
+            continue
+
+        # if already booked in the slot, skip further processing
+        reservations = slot.get("reservations") or []
+        client_id = reg.get("client_id")
+        if client_id is not None:
+            existing_res = next((res for res in reservations if res.get("client_id") == client_id), None)
+            if existing_res:
+                stats["placed"] += 1
+                stats["already"] += 1
+                already_assigned += 1
+                placed_total += 1
+                slot_ids_used.add(slot["id"])
+                continue
+
+        if client_id not in clients_cache and isinstance(client_id, int):
+            clients_cache[client_id] = client_repository.get_client(client_id) or {}
+        client_record = clients_cache.get(client_id or -1, {})
+        client_height = _to_float(client_record.get("height"))
+        favorite_bike_id = _match_favorite_bike_id(client_record.get("favorite_bike"), bikes_map)
+        bring_own_bike = bool(reg.get("bring_own_bike"))
+
+        available: List[Dict[str, Any]] = []
+        for reservation in reservations:
+            if reservation.get("status") != "available":
+                continue
+            stand_id = reservation.get("stand_id")
+            if stand_id is None:
+                continue
+            available.append(
+                {
+                    "reservation_id": reservation["id"],
+                    "stand_id": stand_id,
+                    "bike_id": layout_map.get(stand_id, {}).get("bike_id") or trainers_map.get(stand_id, {}).get("bike_id"),
+                    "position_key": _stand_position_key(stand_id),
+                }
+            )
+
+        if not available:
+            stats["unplaced"].append(_client_label(reg))
+            unplaced_clients.append(_client_label(reg))
+            continue
+
+        def _candidate_score(candidate: Dict[str, Any]) -> Tuple[int, float, int, int]:
+            bike_id = candidate.get("bike_id")
+            if bring_own_bike:
+                return (
+                    0 if bike_id is None else 1,
+                    candidate["position_key"],
+                    candidate["stand_id"],
+                    candidate["reservation_id"],
+                )
+            favorite_priority = 0 if favorite_bike_id and bike_id == favorite_bike_id else 1
+            bike_row = bikes_map.get(bike_id) if bike_id is not None else None
+            return (
+                favorite_priority,
+                _score_bike_height(bike_row or {}, client_height),
+                candidate["position_key"],
+                candidate["stand_id"],
+            )
+
+        available.sort(key=_candidate_score)
+        choice = available[0]
+
+        updated = schedule_repository.update_reservation(
+            choice["reservation_id"],
+            client_id=client_id,
+            client_name=_client_label(reg),
+            status=RESERVATION_STATUS_BOOKED,
+            source="race_auto",
+            notes=reg.get("cluster_label") or reg.get("cluster_code"),
+        )
+        if updated:
+            stats["placed"] += 1
+            placed_total += 1
+            slot_ids_used.add(slot["id"])
+        else:
+            stats["unplaced"].append(_client_label(reg))
+            unplaced_clients.append(_client_label(reg))
+
+    cluster_results_list = [
+        {
+            **entry,
+            "unplaced": entry["unplaced"],
+        }
+        for entry in cluster_results.values()
+    ]
+
+    return {
+        "placed": placed_total,
+        "total": total_candidates,
+        "cluster_results": cluster_results_list,
+        "missing_slots": missing_slots,
+        "unplaced_clients": unplaced_clients,
+        "skipped_online": skipped_online,
+        "skipped_missing_cluster": skipped_missing_cluster,
+        "skipped_unknown_cluster": unknown_cluster,
+        "already_assigned": already_assigned,
+        "race_date": race_date.isoformat(),
+        "week_id": week["id"],
+        "slot_ids": sorted(slot_ids_used),
+    }
+
+
 @api.post("/races/{race_id}/registrations")
 async def api_create_race_registration(race_id: int, request: Request, user=Depends(require_admin)):
     race = race_repository.get_race(race_id)
@@ -2430,18 +2911,81 @@ def create_app() -> FastAPI:
             context["error"] = "Гонка не найдена или ещё не опубликована."
             return templates.TemplateResponse("public_race.html", context)
 
+        race_date_raw = race.get("race_date")
+        if isinstance(race_date_raw, date):
+            race_date = race_date_raw
+        elif isinstance(race_date_raw, str):
+            try:
+                race_date = datetime.strptime(race_date_raw, "%Y-%m-%d").date()
+            except ValueError:
+                race_date = None
+        else:
+            race_date = None
+
         registrations = race_repository.list_registrations(race["id"])
         participants: list[dict] = []
         pending_count = 0
         clusters_meta = race.get("clusters") or []
-        ordered_cluster_labels = []
+        cluster_times: dict[str, dict[str, Optional[str]]] = {}
+        cluster_order_keys: list[tuple] = []
         for cluster in clusters_meta:
             label = (cluster.get("label") or cluster.get("code") or "").strip()
+            start_time = (cluster.get("start_time") or "").strip() or None
+            end_time = (cluster.get("end_time") or "").strip() or None
             if label:
-                ordered_cluster_labels.append(label)
+                cluster_times[label] = {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                }
+                try:
+                    start_key = datetime.strptime(start_time, "%H:%M").time() if start_time else None
+                except ValueError:
+                    start_key = None
+                cluster_order_keys.append((start_key is None, start_key, label.lower(), label))
+
+        ordered_cluster_labels = [item[3] for item in sorted(cluster_order_keys, key=lambda entry: entry)]
+
+        client_stand_map: dict[int, str] = {}
+        if race_date:
+            week = schedule_repository.get_week_by_start(race_date)
+            if week:
+                slots = schedule_repository.list_slots_with_reservations(week["id"])
+                trainers = trainers_repository.list_trainers()
+                trainers_map = {row["id"]: row for row in trainers if isinstance(row.get("id"), int)}
+
+                for slot in slots:
+                    slot_date = slot.get("slot_date")
+                    if slot_date and str(slot_date) != race_date.isoformat():
+                        continue
+                    if slot.get("session_kind") != "race":
+                        continue
+                    for res in slot.get("reservations") or []:
+                        if res.get("status") != "booked":
+                            continue
+                        client_id = res.get("client_id")
+                        if not isinstance(client_id, int):
+                            continue
+                        label_parts: list[str] = []
+                        stand_id = res.get("stand_id")
+                        trainer = trainers_map.get(stand_id)
+                        stand_code = (res.get("stand_code") or "").strip()
+                        if trainer:
+                            code = (trainer.get("code") or "").strip()
+                            if code:
+                                label_parts.append(code)
+                        if not label_parts and stand_code:
+                            label_parts.append(stand_code)
+                        if not label_parts and stand_id is not None:
+                            label_parts.append(f"Станок {stand_id}")
+                        if label_parts:
+                            client_stand_map[client_id] = " · ".join(label_parts)
 
         for entry in registrations:
             status_value = (entry.get("status") or "").lower()
+            stand_label = None
+            client_id = entry.get("client_id")
+            if isinstance(client_id, int):
+                stand_label = client_stand_map.get(client_id)
             payload = {
                 "name": entry.get("client_name")
                 or entry.get("tg_full_name")
@@ -2450,6 +2994,7 @@ def create_app() -> FastAPI:
                 "notes": entry.get("notes"),
                 "is_pending": False,
                 "race_mode": entry.get("race_mode"),
+                "stand_label": stand_label,
             }
             submitted = entry.get("payment_submitted_at")
             if hasattr(submitted, "isoformat"):
@@ -2487,15 +3032,23 @@ def create_app() -> FastAPI:
 
         for label in ordered_cluster_labels:
             if label in groups_map_offline:
-                grouped_participants_offline.append({"label": label, "participants": groups_map_offline.pop(label)})
+                members = groups_map_offline.pop(label)
+                members.sort(key=lambda x: ((x.get("stand_label") or "станокzzz").lower(), x.get("name") or ""))
+                grouped_participants_offline.append({"label": label, "participants": members})
         for label in sorted(groups_map_offline.keys()):
-            grouped_participants_offline.append({"label": label, "participants": groups_map_offline[label]})
+            members = groups_map_offline[label]
+            members.sort(key=lambda x: ((x.get("stand_label") or "станокzzz").lower(), x.get("name") or ""))
+            grouped_participants_offline.append({"label": label, "participants": members})
 
         for label in ordered_cluster_labels:
             if label in groups_map_online:
-                grouped_participants_online.append({"label": label, "participants": groups_map_online.pop(label)})
+                members = groups_map_online.pop(label)
+                members.sort(key=lambda x: (x.get("name") or ""))
+                grouped_participants_online.append({"label": label, "participants": members})
         for label in sorted(groups_map_online.keys()):
-            grouped_participants_online.append({"label": label, "participants": groups_map_online[label]})
+            members = groups_map_online[label]
+            members.sort(key=lambda x: (x.get("name") or ""))
+            grouped_participants_online.append({"label": label, "participants": members})
 
         race_payload = {
             "title": race.get("title"),
@@ -2521,6 +3074,7 @@ def create_app() -> FastAPI:
                 "participants_count": len(participants),
                 "pending_count": pending_count,
                 "share_url": share_url,
+                "cluster_times": cluster_times,
             }
         )
         return templates.TemplateResponse("public_race.html", context)

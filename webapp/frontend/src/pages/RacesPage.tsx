@@ -38,14 +38,60 @@ function formatDateTime(value?: string | null) {
   });
 }
 
-function buildClustersPayload(value: FormDataEntryValue | null): string[] {
-  if (typeof value !== "string") {
-    return [];
-  }
-  return value
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+type ClusterDraft = {
+  label: string;
+  code?: string;
+  start_time?: string;
+  end_time?: string;
+};
+
+type RaceSlotsResponse = {
+  created: number;
+  slot_ids: number[];
+  race_date?: string;
+  week_id?: number;
+  week_start_date?: string;
+  skipped_missing_time: string[];
+  duplicates: string[];
+  errors: string[];
+};
+
+type RaceSeatClusterResult = {
+  cluster: string;
+  code?: string | null;
+  slot_id?: number | null;
+  slot_label?: string | null;
+  start_time?: string | null;
+  requested: number;
+  placed: number;
+  already?: number;
+  unplaced: string[];
+};
+
+type RaceSeatResponse = {
+  placed: number;
+  total: number;
+  cluster_results: RaceSeatClusterResult[];
+  missing_slots: string[];
+  unplaced_clients: string[];
+  skipped_online: number;
+  skipped_missing_cluster: number;
+  skipped_unknown_cluster: number;
+  already_assigned: number;
+  race_date?: string;
+  week_id?: number;
+  slot_ids?: number[];
+};
+
+function buildClustersPayload(drafts: ClusterDraft[]): RaceCluster[] {
+  return drafts
+    .map((draft) => ({
+      label: draft.label.trim(),
+      code: (draft.code ?? "").trim() || undefined,
+      start_time: (draft.start_time ?? "").trim() || undefined,
+      end_time: (draft.end_time ?? "").trim() || undefined
+    }))
+    .filter((item) => item.label);
 }
 
 function formatPrice(value?: number | null) {
@@ -70,11 +116,11 @@ type RacePayload = {
   notes?: string | null;
   description?: string | null;
   is_active: boolean;
-  clusters: string[];
+  clusters: RaceCluster[];
   slug?: string | null;
 };
 
-function readRacePayload(form: HTMLFormElement): RacePayload {
+function readRacePayload(form: HTMLFormElement, clusters: RaceCluster[]): RacePayload {
   const formData = new FormData(form);
   const title = String(formData.get("title") ?? "").trim();
   const raceDate = String(formData.get("race_date") ?? "").trim();
@@ -86,7 +132,6 @@ function readRacePayload(form: HTMLFormElement): RacePayload {
   const description = String(formData.get("description") ?? "").trim();
   const slug = String(formData.get("slug") ?? "").trim();
   const isActive = formData.get("is_active") === "on";
-  const clusters = buildClustersPayload(formData.get("clusters"));
   return {
     title,
     race_date: raceDate,
@@ -106,6 +151,9 @@ export default function RacesPage() {
   const [selectedRaceId, setSelectedRaceId] = useState<number | "new" | null>(null);
   const [updatingRegistrationId, setUpdatingRegistrationId] = useState<number | null>(null);
   const [deletingRegistrationId, setDeletingRegistrationId] = useState<number | null>(null);
+  const [clusterDrafts, setClusterDrafts] = useState<ClusterDraft[]>([]);
+  const [slotCreationResult, setSlotCreationResult] = useState<RaceSlotsResponse | null>(null);
+  const [seatResult, setSeatResult] = useState<RaceSeatResponse | null>(null);
 
   const racesQuery = useQuery<RaceListResponse>({
     queryKey: ["races"],
@@ -158,6 +206,34 @@ export default function RacesPage() {
 
   const selectedRaceDetail = detailQuery.data?.item ?? null;
 
+  useEffect(() => {
+    if (selectedRaceId === "new") {
+      setClusterDrafts([]);
+      setSlotCreationResult(null);
+      setSeatResult(null);
+      return;
+    }
+    setSlotCreationResult(null);
+    setSeatResult(null);
+    setClusterDrafts([]);
+  }, [selectedRaceId]);
+
+  useEffect(() => {
+    if (selectedRaceId === "new") {
+      return;
+    }
+    if (selectedRaceDetail?.clusters) {
+      setClusterDrafts(
+        (selectedRaceDetail.clusters ?? []).map((cluster) => ({
+          label: cluster.label,
+          code: cluster.code ?? undefined,
+          start_time: cluster.start_time ?? undefined,
+          end_time: cluster.end_time ?? undefined
+        }))
+      );
+    }
+  }, [selectedRaceDetail, selectedRaceId]);
+
   const shareUrl = useMemo(() => {
     if (!selectedRaceDetail?.slug) return "";
     if (typeof window !== "undefined" && window.location?.origin) {
@@ -192,6 +268,33 @@ export default function RacesPage() {
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ["races"] });
       queryClient.invalidateQueries({ queryKey: ["races", variables.id] });
+    }
+  });
+
+  const createSlotsMutation = useMutation({
+    mutationFn: (raceId: number) =>
+      apiFetch<RaceSlotsResponse>(`/api/races/${raceId}/schedule/slots`, {
+        method: "POST"
+      }),
+    onSuccess: (result) => {
+      setSlotCreationResult(result);
+      setSeatResult(null);
+    },
+    onError: () => {
+      setSlotCreationResult(null);
+    }
+  });
+
+  const seatParticipantsMutation = useMutation({
+    mutationFn: (raceId: number) =>
+      apiFetch<RaceSeatResponse>(`/api/races/${raceId}/schedule/seat`, {
+        method: "POST"
+      }),
+    onSuccess: (result) => {
+      setSeatResult(result);
+    },
+    onError: () => {
+      setSeatResult(null);
     }
   });
 
@@ -252,18 +355,29 @@ export default function RacesPage() {
 
   function handleCreateSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const payload = readRacePayload(event.currentTarget);
+    const payload = readRacePayload(event.currentTarget, buildClustersPayload(clusterDrafts));
     createMutation.mutate(payload, {
       onSuccess: () => {
         event.currentTarget.reset();
+        setClusterDrafts([]);
       }
     });
   }
 
   function handleUpdateSubmit(event: FormEvent<HTMLFormElement>, raceId: number) {
     event.preventDefault();
-    const payload = readRacePayload(event.currentTarget);
+    const payload = readRacePayload(event.currentTarget, buildClustersPayload(clusterDrafts));
     updateMutation.mutate({ id: raceId, payload });
+  }
+
+  function handleCreateSlotsClick() {
+    if (typeof selectedRaceId !== "number") return;
+    createSlotsMutation.mutate(selectedRaceId);
+  }
+
+  function handleSeatParticipantsClick() {
+    if (typeof selectedRaceId !== "number") return;
+    seatParticipantsMutation.mutate(selectedRaceId);
   }
 
   function handleSelectRace(raceId: number | "new") {
@@ -401,10 +515,13 @@ export default function RacesPage() {
                   Описание
                   <textarea name="description" rows={3} placeholder="Коротко о формате, регламенте, трассе" />
                 </label>
-                <label>
-                  Кластеры (каждый с новой строки)
-                  <textarea name="clusters" rows={3} placeholder={"A — быстрые\nB — уверенные\nC — новичкам"} />
-                </label>
+                <div className="clusters-section">
+                  <div className="clusters-section-header">
+                    <div>Кластеры</div>
+                    <div className="clusters-section-subtitle">Название, код и время старта/финиша</div>
+                  </div>
+                  <ClustersEditor value={clusterDrafts} onChange={setClusterDrafts} />
+                </div>
                 <label>
                   Примечание
                   <textarea name="notes" rows={2} placeholder="Дополнительные детали" />
@@ -458,14 +575,84 @@ export default function RacesPage() {
                     Описание
                     <textarea name="description" rows={3} defaultValue={selectedRaceDetail.description ?? ""} />
                   </label>
-                  <label>
-                    Кластеры (каждый с новой строки)
-                    <textarea
-                      name="clusters"
-                      rows={3}
-                      defaultValue={(selectedRaceDetail.clusters ?? []).map((cluster) => cluster.label).join("\n")}
-                    />
-                  </label>
+                  <div className="clusters-section">
+                    <div className="clusters-section-header">
+                      <div>Кластеры</div>
+                      <div className="clusters-section-subtitle">Название, код и время старта/финиша</div>
+                    </div>
+                    <ClustersEditor value={clusterDrafts} onChange={setClusterDrafts} />
+                  </div>
+                  <div className="race-slot-actions">
+                    <div>
+                      <div className="clusters-section-subtitle">Создаст слоты в расписании по времени кластеров этого старта.</div>
+                      <div className="clusters-section-subtitle">Сначала сохраните изменения по кластерам, затем нажмите кнопку.</div>
+                    </div>
+                    <button
+                      type="button"
+                      className="button"
+                      onClick={handleCreateSlotsClick}
+                      disabled={createSlotsMutation.isPending}
+                    >
+                      {createSlotsMutation.isPending ? "Создаём слоты…" : "Создать слоты в расписании"}
+                    </button>
+                  </div>
+                  {slotCreationResult && (
+                    <div className="race-slot-result">
+                      <div>
+                        Создано слотов: {slotCreationResult.created}. Недоступно времени: {slotCreationResult.skipped_missing_time.length}. Дубликаты: {slotCreationResult.duplicates.length}.
+                      </div>
+                      {slotCreationResult.errors.length > 0 && <div>Ошибки: {slotCreationResult.errors.join(", ")}</div>}
+                      {slotCreationResult.skipped_missing_time.length > 0 && (
+                        <div>Без времени: {slotCreationResult.skipped_missing_time.join(", ")}</div>
+                      )}
+                      {slotCreationResult.duplicates.length > 0 && (
+                        <div>Уже существовали: {slotCreationResult.duplicates.join(", ")}</div>
+                      )}
+                      {slotCreationResult.week_start_date && (
+                        <div>Неделя расписания: {formatDate(slotCreationResult.week_start_date)}</div>
+                      )}
+                    </div>
+                  )}
+                  <div className="race-slot-actions">
+                    <div>
+                      <div className="clusters-section-subtitle">Рассадить подтверждённых участников по слотам их кластера.</div>
+                      <div className="clusters-section-subtitle">Учитываем любимый велосипед и рост, если доступны.</div>
+                    </div>
+                    <button
+                      type="button"
+                      className="button"
+                      onClick={handleSeatParticipantsClick}
+                      disabled={seatParticipantsMutation.isPending}
+                    >
+                      {seatParticipantsMutation.isPending ? "Рассаживаем…" : "Рассадить участников"}
+                    </button>
+                  </div>
+                  {seatResult && (
+                    <div className="race-slot-result">
+                      <div>
+                        Рассажено {seatResult.placed} из {seatResult.total}. Онлайн пропущено: {seatResult.skipped_online}. Без кластера: {seatResult.skipped_missing_cluster}.
+                      </div>
+                      {seatResult.missing_slots.length > 0 && (
+                        <div>Нет слотов для: {seatResult.missing_slots.join(", ")}</div>
+                      )}
+                      {seatResult.cluster_results.length > 0 && (
+                        <div>
+                          Кластеры:
+                          <ul>
+                            {seatResult.cluster_results.map((result) => (
+                              <li key={result.code ?? result.cluster}>
+                                {result.cluster}: {result.placed}/{result.requested}
+                                {result.unplaced.length > 0 ? ` · не поместились: ${result.unplaced.join(", ")}` : ""}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {seatResult.unplaced_clients.length > 0 && (
+                        <div>Не удалось рассадить: {seatResult.unplaced_clients.join(", ")}</div>
+                      )}
+                    </div>
+                  )}
                   <label>
                     Примечание
                     <textarea name="notes" rows={2} defaultValue={selectedRaceDetail.notes ?? ""} />
@@ -548,6 +735,67 @@ export default function RacesPage() {
           </section>
         </div>
       </Panel>
+    </div>
+  );
+}
+
+function ClustersEditor({ value, onChange }: { value: ClusterDraft[]; onChange: (drafts: ClusterDraft[]) => void }) {
+  const drafts = value ?? [];
+
+  function handleChange(index: number, field: keyof ClusterDraft, next: string) {
+    const updated = [...drafts];
+    const existing = updated[index] ?? { label: "", code: "", start_time: "", end_time: "" };
+    updated[index] = { ...existing, [field]: next };
+    onChange(updated);
+  }
+
+  function handleAdd() {
+    onChange([...(drafts ?? []), { label: "", code: "", start_time: "", end_time: "" }]);
+  }
+
+  function handleRemove(index: number) {
+    const updated = drafts.filter((_, idx) => idx !== index);
+    onChange(updated);
+  }
+
+  return (
+    <div className="clusters-editor">
+      {drafts.length === 0 ? <div className="clusters-empty">Добавьте хотя бы один кластер.</div> : null}
+      {drafts.map((cluster, index) => (
+        <div className="cluster-row" key={index}>
+          <input
+            type="text"
+            value={cluster.label}
+            onChange={(event) => handleChange(index, "label", event.target.value)}
+            placeholder="Например, A — быстрые"
+            required
+          />
+          <input
+            type="text"
+            value={cluster.code ?? ""}
+            onChange={(event) => handleChange(index, "code", event.target.value)}
+            placeholder="Код (A/B/C)"
+          />
+          <input
+            type="time"
+            value={cluster.start_time ?? ""}
+            onChange={(event) => handleChange(index, "start_time", event.target.value)}
+            placeholder="Старт"
+          />
+          <input
+            type="time"
+            value={cluster.end_time ?? ""}
+            onChange={(event) => handleChange(index, "end_time", event.target.value)}
+            placeholder="Финиш"
+          />
+          <button type="button" className="button danger" onClick={() => handleRemove(index)}>
+            Удалить
+          </button>
+        </div>
+      ))}
+      <button type="button" className="button" onClick={handleAdd}>
+        Добавить кластер
+      </button>
     </div>
   );
 }

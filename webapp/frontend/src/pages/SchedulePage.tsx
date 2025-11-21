@@ -19,7 +19,8 @@ import "../styles/schedule.css";
 
 const SESSION_KIND_OPTIONS = [
   { value: "self_service", label: "Самокрутка" },
-  { value: "instructor", label: "С инструктором" }
+  { value: "instructor", label: "С инструктором" },
+  { value: "race", label: "Гонка" }
 ];
 
 const RESERVATION_STATUS_LABELS: Record<string, string> = {
