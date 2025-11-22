@@ -2089,7 +2089,14 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
     if not isinstance(race_date, date):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Race date is missing")
 
-    clusters = race.get("clusters") or []
+    clusters = list(race.get("clusters") or [])
+    registrations_raw = race_repository.list_registrations(race_id)
+    existing_codes = {str(entry.get("code") or entry.get("label") or "").strip() for entry in clusters}
+    for reg in registrations_raw:
+        code = (reg.get("cluster_code") or reg.get("cluster_label") or "").strip()
+        if code and code not in existing_codes:
+            clusters.append({"code": code, "label": code})
+            existing_codes.add(code)
     if not clusters:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Race has no clusters")
 
@@ -2121,6 +2128,8 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
     # ensure placeholders exist before we read reservations
     slots = schedule_repository.list_slots_with_reservations(week["id"])
     race_slots: dict[int, dict] = {}
+    slot_used: Dict[int, set[int]] = {}
+
     for slot in slots:
         slot_date = _normalize_date(slot.get("slot_date"))
         if slot_date != race_date:
@@ -2269,8 +2278,11 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
         bring_own_bike = bool(reg.get("bring_own_bike"))
 
         available: List[Dict[str, Any]] = []
+        used_res = slot_used.setdefault(slot["id"], set())
         for reservation in reservations:
             if reservation.get("status") != "available":
+                continue
+            if reservation.get("id") in used_res:
                 continue
             stand_id = reservation.get("stand_id")
             if stand_id is None:
@@ -2322,6 +2334,7 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
             stats["placed"] += 1
             placed_total += 1
             slot_ids_used.add(slot["id"])
+            used_res.add(choice["reservation_id"])
         else:
             stats["unplaced"].append(_client_label(reg))
             unplaced_clients.append(_client_label(reg))
