@@ -471,6 +471,11 @@ export default function RacesPage() {
               {Number(race.pending_count ?? 0)} ожидание · {Number(race.approved_count ?? 0)} подтверждено
             </span>
             <span className="race-list-meta">Ссылка: /race/{race.slug}</span>
+            <span className="race-list-meta">
+              <a className="race-slug-link" href={`/app/race/summary/${race.id}`}>
+                Сводка
+              </a>
+            </span>
             {!race.is_active && <span className="race-list-tag">архив</span>}
           </button>
         ))}
@@ -540,6 +545,9 @@ export default function RacesPage() {
                         Открыть публичную страницу
                       </a>
                     )}
+                    <a className="race-slug-link" href={`/app/race/summary/${selectedRaceDetail.id}`}>
+                      Сводка гонки
+                    </a>
                   </div>
                   <div className="form-grid">
                     <label>

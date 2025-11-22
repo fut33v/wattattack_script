@@ -459,6 +459,22 @@ def _serialize_race_registration(record: dict) -> dict:
         value = serialized.get(field)
         if hasattr(value, "isoformat"):
             serialized[field] = value.isoformat()
+    if "bike_id" in serialized and "bikeId" not in serialized:
+        serialized["bikeId"] = serialized.get("bike_id")
+    if "bike_title" in serialized and "bikeTitle" not in serialized:
+        serialized["bikeTitle"] = serialized.get("bike_title")
+    if "bike_owner" in serialized and "bikeOwner" not in serialized:
+        serialized["bikeOwner"] = serialized.get("bike_owner")
+    if "client_height" in serialized and "clientHeight" not in serialized:
+        serialized["clientHeight"] = serialized.get("client_height")
+    if "client_weight" in serialized and "clientWeight" not in serialized:
+        serialized["clientWeight"] = serialized.get("client_weight")
+    if "client_ftp" in serialized and "clientFtp" not in serialized:
+        serialized["clientFtp"] = serialized.get("client_ftp")
+    if "cluster_start_time" in serialized and "clusterStartTime" not in serialized:
+        serialized["clusterStartTime"] = serialized.get("cluster_start_time")
+    if "stand_order" in serialized and "standOrder" not in serialized:
+        serialized["standOrder"] = serialized.get("stand_order")
     return serialized
 
 
@@ -2640,6 +2656,12 @@ async def api_update_race_registration(race_id: int, registration_id: int, reque
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid status")
         updates["status"] = status_value
 
+    if "raceMode" in payload:
+        race_mode = payload["raceMode"]
+        if race_mode not in (None, "", "offline", "online"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid raceMode")
+        updates["race_mode"] = race_mode or None
+
     if "cluster_code" in payload:
         cluster_code = payload.get("cluster_code")
         cluster_label = None
@@ -2663,6 +2685,30 @@ async def api_update_race_registration(race_id: int, registration_id: int, reque
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "notes must be string")
         updates["notes"] = (notes or "").strip() or None
 
+    if "bikeId" in payload:
+        bike_value = payload.get("bikeId")
+        if bike_value in (None, "", "null"):
+            updates["bike_id"] = None
+        else:
+            try:
+                bike_id = int(bike_value)
+            except (TypeError, ValueError):
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid bikeId")
+            if not bikes_repository.get_bike(bike_id):
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Bike not found")
+            updates["bike_id"] = bike_id
+            updates.setdefault("bring_own_bike", False)
+
+    if "bringOwnBike" in payload:
+        bring_raw = payload.get("bringOwnBike")
+        if isinstance(bring_raw, str):
+            bring_value = bring_raw.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            bring_value = bool(bring_raw)
+        updates["bring_own_bike"] = bring_value
+        if bring_value:
+            updates["bike_id"] = None
+
     if not updates:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nothing to update")
 
@@ -2673,6 +2719,8 @@ async def api_update_race_registration(race_id: int, registration_id: int, reque
         cluster_label=updates.get("cluster_label"),
         notes=updates.get("notes"),
         race_mode=updates.get("race_mode"),
+        bring_own_bike=updates.get("bring_own_bike"),
+        bike_id=updates.get("bike_id"),
     )
     if not record:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registration not found")
@@ -2685,6 +2733,115 @@ async def api_update_race_registration(race_id: int, registration_id: int, reque
         log.exception("Failed to send Telegram notification for registration %s", registration_id)
 
     return {"item": _serialize_race_registration(detailed)}
+
+
+@api.get("/races/{race_id}/summary")
+def api_race_summary(race_id: int, user=Depends(require_admin)):
+    race = race_repository.get_race(race_id)
+    if not race:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Race not found")
+
+    registrations = race_repository.list_registrations(race_id)
+    client_cache: dict[int, dict] = {}
+    for reg in registrations:
+        client_id = reg.get("client_id")
+        if isinstance(client_id, int) and client_id not in client_cache:
+            client_cache[client_id] = client_repository.get_client(client_id) or {}
+        client_row = client_cache.get(client_id or -1, {})
+        if client_row:
+            reg["client_height"] = client_row.get("height")
+            reg["client_weight"] = client_row.get("weight")
+            reg["client_ftp"] = client_row.get("ftp")
+
+    cluster_time_map: dict[str, str] = {}
+    for cluster in race.get("clusters") or []:
+        code = (cluster.get("code") or cluster.get("label") or "").strip().lower()
+        start = (cluster.get("start_time") or "").strip()
+        if code and start:
+            cluster_time_map[code] = start
+
+    stand_labels: dict[int, dict] = {}
+    stand_order_map: dict[int, int] = {}
+    race_date_raw = race.get("race_date")
+    race_date: Optional[date] = None
+    if isinstance(race_date_raw, str):
+        try:
+            race_date = datetime.strptime(race_date_raw, "%Y-%m-%d").date()
+        except ValueError:
+            race_date = None
+    elif isinstance(race_date_raw, date):
+        race_date = race_date_raw
+
+    if race_date:
+        week = schedule_repository.get_week_by_start(race_date)
+        if week:
+            slots = schedule_repository.list_slots_with_reservations(week["id"])
+            trainers = trainers_repository.list_trainers()
+            trainers_map = {row["id"]: row for row in trainers if isinstance(row.get("id"), int)}
+            sorted_trainers = sorted(
+                trainers,
+                key=lambda row: (
+                    _to_float(row.get("code")) is None,
+                    _to_float(row.get("code")) if _to_float(row.get("code")) is not None else row.get("code") or "",
+                    row.get("id") or 0,
+                ),
+            )
+            for idx, trainer in enumerate(sorted_trainers):
+                if isinstance(trainer.get("id"), int):
+                    stand_order_map[trainer["id"]] = idx
+            for slot in slots:
+                slot_date = slot.get("slot_date")
+                if slot_date and str(slot_date) != race_date.isoformat():
+                    continue
+                if slot.get("session_kind") != "race":
+                    continue
+                for res in slot.get("reservations") or []:
+                    if res.get("status") != "booked":
+                        continue
+                    client_id = res.get("client_id")
+                    if not isinstance(client_id, int):
+                        continue
+                    stand_id = res.get("stand_id")
+                    label_parts: list[str] = []
+                    trainer = trainers_map.get(stand_id)
+                    stand_code = (res.get("stand_code") or "").strip()
+                    if trainer:
+                        code = (trainer.get("code") or "").strip()
+                        if code:
+                            label_parts.append(code)
+                    if not label_parts and stand_code:
+                        label_parts.append(stand_code)
+                    if not label_parts and stand_id is not None:
+                        label_parts.append(f"Станок {stand_id}")
+                    stand_labels[client_id] = {
+                        "label": " · ".join(label_parts) if label_parts else None,
+                        "stand_id": stand_id,
+                        "stand_code": stand_code or None,
+                        "stand_order": stand_order_map.get(stand_id),
+                    }
+
+    bikes = bikes_repository.list_bikes()
+
+    registrations_payload = []
+    for reg in registrations:
+        client_id = reg.get("client_id")
+        stand_meta = stand_labels.get(client_id) if isinstance(client_id, int) else None
+        cluster_key = (reg.get("cluster_code") or reg.get("cluster_label") or "").strip().lower()
+        payload = _serialize_race_registration(reg)
+        if stand_meta:
+            payload["stand_label"] = stand_meta.get("label")
+            payload["stand_id"] = stand_meta.get("stand_id")
+            payload["stand_code"] = stand_meta.get("stand_code")
+            payload["stand_order"] = stand_meta.get("stand_order")
+        if cluster_key in cluster_time_map:
+            payload["cluster_start_time"] = cluster_time_map[cluster_key]
+        registrations_payload.append(payload)
+
+    return {
+        "race": _serialize_race(race),
+        "registrations": registrations_payload,
+        "bikes": jsonable_encoder(bikes),
+    }
 
 
 @api.delete("/races/{race_id}/registrations/{registration_id}")

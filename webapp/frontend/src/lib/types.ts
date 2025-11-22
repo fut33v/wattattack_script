@@ -295,6 +295,9 @@ export interface RaceRegistration {
   race_id: number;
   client_id: number;
   client_name?: string | null;
+  client_height?: number | null;
+  client_weight?: number | null;
+  client_ftp?: number | null;
   status: string;
   cluster_code?: string | null;
   cluster_label?: string | null;
@@ -304,6 +307,9 @@ export interface RaceRegistration {
   tg_full_name?: string | null;
   notes?: string | null;
   bring_own_bike?: boolean | null;
+  bike_id?: number | null;
+  bike_title?: string | null;
+  bike_owner?: string | null;
   axle_type?: string | null;
   gears_label?: string | null;
   race_mode?: string | null;
@@ -317,4 +323,18 @@ export interface RaceListResponse {
 
 export interface RaceDetailResponse {
   item: RaceRow & { registrations: RaceRegistration[] };
+}
+
+export interface RaceSummaryResponse {
+  race: RaceRow;
+  registrations: Array<
+    RaceRegistration & {
+      stand_label?: string | null;
+      stand_id?: number | null;
+      stand_code?: string | null;
+      stand_order?: number | null;
+      cluster_start_time?: string | null;
+    }
+  >;
+  bikes: BikeRow[];
 }

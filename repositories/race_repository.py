@@ -73,6 +73,7 @@ def ensure_tables() -> None:
                 bring_own_bike BOOLEAN,
                 axle_type TEXT,
                 gears_label TEXT,
+                bike_id INTEGER REFERENCES bikes(id) ON DELETE SET NULL,
                 race_mode TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -95,6 +96,7 @@ def ensure_tables() -> None:
         cur.execute("ALTER TABLE race_registrations ADD COLUMN IF NOT EXISTS axle_type TEXT")
         cur.execute("ALTER TABLE race_registrations ADD COLUMN IF NOT EXISTS gears_label TEXT")
         cur.execute("ALTER TABLE race_registrations ADD COLUMN IF NOT EXISTS race_mode TEXT")
+        cur.execute("ALTER TABLE race_registrations ADD COLUMN IF NOT EXISTS bike_id INTEGER REFERENCES bikes(id) ON DELETE SET NULL")
         cur.execute("ALTER TABLE race_registrations ALTER COLUMN tg_user_id DROP NOT NULL")
         conn.commit()
 
@@ -373,9 +375,15 @@ def list_registrations(race_id: int) -> List[Dict]:
             reg.*,
             c.first_name,
             c.last_name,
-            c.full_name
+            c.full_name,
+            c.height,
+            c.weight,
+            c.ftp,
+            b.title AS bike_title,
+            b.owner AS bike_owner
         FROM race_registrations reg
         LEFT JOIN clients c ON c.id = reg.client_id
+        LEFT JOIN bikes b ON b.id = reg.bike_id
         WHERE reg.race_id = %s
         ORDER BY reg.created_at DESC
     """
@@ -492,6 +500,7 @@ def update_registration(
     axle_type: Optional[str] = None,
     gears_label: Optional[str] = None,
     race_mode: Optional[str] = None,
+    bike_id: Optional[int] = None,
 ) -> Optional[Dict]:
     ensure_tables()
     updates: List[str] = []
@@ -519,6 +528,9 @@ def update_registration(
     if race_mode is not None:
         updates.append("race_mode = %s")
         values.append(race_mode)
+    if bike_id is not None:
+        updates.append("bike_id = %s")
+        values.append(bike_id)
     if not updates:
         return None
     updates.append("updated_at = NOW()")
