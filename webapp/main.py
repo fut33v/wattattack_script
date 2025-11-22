@@ -158,20 +158,21 @@ WEEKDAY_FULL_NAMES = (
 def _reservation_display_entry(reservation: dict) -> dict:
     status = str(reservation.get("status") or "").lower()
     client_name = (reservation.get("client_name") or "").strip()
+
     if status == "available" or (not client_name and status in {"cancelled"}):
-        return {"label": "Свободно", "kind": "free"}
+        return {"label": "Свободно", "full_label": "Свободно", "kind": "free"}
 
     if client_name:
         parts = [part for part in client_name.split() if part]
         if len(parts) >= 2:
             first_name = parts[0]
             last_name = parts[-1]
-            label = f"{last_name} {first_name}"
+            base_label = f"{last_name} {first_name}"
         else:
-            label = client_name
-        return {"label": label, "full_label": client_name, "kind": "booked"}
+            base_label = client_name
+        return {"label": base_label, "full_label": client_name, "kind": "booked"}
 
-    return {"label": "Занято", "kind": "busy"}
+    return {"label": "Занято", "full_label": "Занято", "kind": "busy"}
 
 
 def _parse_iso_date(field: str, value: object) -> date:
@@ -610,6 +611,21 @@ def _build_day_columns(slots: list[dict], week_start_date: str | date, instructo
             continue
         instructor_map[instructor_id] = instructor.get("full_name") or instructor.get("name")
 
+    # Build ordering for stands to keep rows aligned on public page
+    stand_order: dict[int, int] = {}
+    for idx, stand in enumerate(
+        sorted(
+            trainers_repository.list_trainers(),
+            key=lambda row: (
+                _to_float(row.get("code")) is None,
+                _to_float(row.get("code")) if _to_float(row.get("code")) is not None else row.get("code") or "",
+                row.get("id") or 0,
+            ),
+        )
+    ):
+        if isinstance(stand.get("id"), int):
+            stand_order[stand["id"]] = idx
+
     slots_by_date: dict[str, list[dict]] = {}
     for slot in slots or []:
         key = slot.get("slot_date") or slot.get("slotDate")
@@ -641,6 +657,11 @@ def _build_day_columns(slots: list[dict], week_start_date: str | date, instructo
             totals["occupied"] += occupied
             totals["free"] += free
 
+            if stand_order:
+                reservations = sorted(
+                    reservations,
+                    key=lambda res: stand_order.get(res.get("stand_id"), 10_000),
+                )
             reservation_rows = [_reservation_display_entry(res) for res in reservations]
             session_kind = (raw_slot.get("session_kind") or "").strip() or raw_slot.get("session_kind")
 
@@ -1536,6 +1557,26 @@ def api_delete_schedule_slot(slot_id: int, user=Depends(require_admin)):
     return {"slots": serialized_slots, "instructors": instructors_payload}
 
 
+@api.get("/schedule/slots/{slot_id}")
+def api_get_schedule_slot(slot_id: int, user=Depends(require_user)):
+    slot = schedule_repository.get_slot(slot_id)
+    if not slot:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Slot not found")
+
+    payload = _load_schedule_week_payload(slot["week_id"])
+    if not payload:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Week not found")
+
+    slot_payload = schedule_repository.get_slot_with_reservations(slot_id) or slot
+    instructors_payload = payload.get("instructors") or jsonable_encoder(instructors_repository.list_instructors())
+    return {
+        "week": payload["week"],
+        "slot": _serialize_slot(slot_payload),
+        "stands": payload.get("stands") or [],
+        "instructors": instructors_payload,
+    }
+
+
 @api.post("/schedule/weeks/{week_id}/sync")
 def api_sync_schedule_week(week_id: int, user=Depends(require_admin)):
     if not schedule_repository.get_week(week_id):
@@ -1663,6 +1704,7 @@ async def api_update_reservation(reservation_id: int, request: Request, user=Dep
     reservation = schedule_repository.get_reservation(reservation_id)
     if not reservation:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Reservation not found")
+    slot_id = reservation.get("slot_id")
 
     if "clientId" in payload:
         client_value = payload["clientId"]
@@ -1717,6 +1759,50 @@ async def api_update_reservation(reservation_id: int, request: Request, user=Dep
         else:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid source")
 
+    if "standId" in payload:
+        stand_value = payload.get("standId")
+        swap_reservation_id = payload.get("swapReservationId")
+        trainer_row = None
+        if stand_value in (None, "", "null"):
+            new_stand_id = None
+        else:
+            try:
+                new_stand_id = int(stand_value)
+            except (TypeError, ValueError):
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid standId")
+            trainer_row = trainers_repository.get_trainer(new_stand_id)
+            if not trainer_row:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Stand not found")
+
+        current_stand_id = reservation.get("stand_id")
+        if new_stand_id != current_stand_id:
+            existing_for_stand = None
+            if new_stand_id is not None and slot_id is not None:
+                existing_for_stand = schedule_repository.get_reservation_for_stand(slot_id, new_stand_id)
+            if existing_for_stand and existing_for_stand.get("id") != reservation_id:
+                if swap_reservation_id is None or swap_reservation_id != existing_for_stand.get("id"):
+                    raise HTTPException(status.HTTP_409_CONFLICT, "Stand already occupied")
+                current_code = reservation.get("stand_code")
+                if current_stand_id is not None and current_code is None:
+                    current_trainer = trainers_repository.get_trainer(current_stand_id)
+                    current_code = current_trainer.get("code") if current_trainer else None
+                try:
+                    if current_stand_id is not None:
+                        schedule_repository.update_reservation(
+                            reservation_id,
+                            stand_id=None,
+                            stand_code=None,
+                        )
+                    schedule_repository.update_reservation(
+                        existing_for_stand["id"],
+                        stand_id=current_stand_id,
+                        stand_code=current_code,
+                    )
+                except psycopg2.errors.UniqueViolation as exc:
+                    raise HTTPException(status.HTTP_409_CONFLICT, "Stand already occupied") from exc
+            updates["stand_id"] = new_stand_id
+            updates["stand_code"] = trainer_row.get("code") if trainer_row else None
+
     if not updates and not {"clientId", "clientName"} & payload.keys():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nothing to update")
 
@@ -1728,7 +1814,10 @@ async def api_update_reservation(reservation_id: int, request: Request, user=Dep
         elif "client_id" in updates or "client_name" in updates:
             updates.setdefault("status", "available")
 
-    record = schedule_repository.update_reservation(reservation_id, **updates)
+    try:
+        record = schedule_repository.update_reservation(reservation_id, **updates)
+    except psycopg2.errors.UniqueViolation as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Stand already occupied") from exc
     if not record:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Reservation not found")
 
@@ -2868,43 +2957,47 @@ def create_app() -> FastAPI:
         # Convert slug to week start date
         week_start = _week_start_for_slug(slug)
         if not week_start:
-            # Try to parse as a specific date slug
             try:
                 week_start = datetime.strptime(slug, "%Y-%m-%d").date()
-                # Normalize to Monday of the week
                 week_start = week_start - timedelta(days=week_start.weekday())
             except ValueError:
-                return templates.TemplateResponse(
+                response = templates.TemplateResponse(
                     "public_schedule.html",
                     {
                         "request": request,
                         "error_message": "Недопустимый формат даты в URL"
                     }
                 )
+                response.headers["Cache-Control"] = "no-store"
+                return response
         
         # Get or create the week
         try:
             week = schedule_repository.get_or_create_week(week_start_date=week_start)
         except Exception as e:
             log.error("Failed to get or create week for %s: %s", week_start, e)
-            return templates.TemplateResponse(
+            response = templates.TemplateResponse(
                 "public_schedule.html",
                 {
                     "request": request,
                     "error_message": "Не удалось загрузить расписание"
                 }
             )
+            response.headers["Cache-Control"] = "no-store"
+            return response
         
         # Load schedule data
         payload = _load_schedule_week_payload(week["id"])
         if not payload:
-            return templates.TemplateResponse(
+            response = templates.TemplateResponse(
                 "public_schedule.html",
                 {
                     "request": request,
                     "error_message": "Не удалось загрузить данные расписания"
                 }
             )
+            response.headers["Cache-Control"] = "no-store"
+            return response
         
         # Build day columns for display
         day_columns = _build_day_columns(
@@ -2937,7 +3030,9 @@ def create_app() -> FastAPI:
             "share_url": f"{request.url.scheme}://{request.url.netloc}/schedule/{slug}"
         }
         
-        return templates.TemplateResponse("public_schedule.html", context)
+        response = templates.TemplateResponse("public_schedule.html", context)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.get("/schedule")
     def schedule_default():

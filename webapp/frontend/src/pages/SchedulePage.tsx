@@ -1,5 +1,6 @@
 import classNames from "classnames";
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import Panel from "../components/Panel";
@@ -159,8 +160,22 @@ export default function SchedulePage() {
   });
 
   useEffect(() => {
-    if (!weeksQuery.data) return;
-    if (selectedWeekId === null && weeksQuery.data.items.length > 0) {
+    if (!weeksQuery.data || selectedWeekId !== null) return;
+
+    const today = new Date();
+    const currentWeek = weeksQuery.data.items.find((week) => {
+      const start = new Date(`${week.week_start_date}T00:00:00`);
+      const end = new Date(start);
+      end.setDate(start.getDate() + 7);
+      return today >= start && today < end;
+    });
+
+    if (currentWeek) {
+      setSelectedWeekId(currentWeek.id);
+      return;
+    }
+
+    if (weeksQuery.data.items.length > 0) {
       setSelectedWeekId(weeksQuery.data.items[0].id);
     }
   }, [weeksQuery.data, selectedWeekId]);
@@ -842,6 +857,9 @@ export default function SchedulePage() {
                     Обновить
                   </button>
                 </form>
+                <Link to={`/schedule/slot/${slot.id}`} className="btn ghost">
+                  Изменить рассадку
+                </Link>
                 <button
                   type="button"
                   className="btn danger"

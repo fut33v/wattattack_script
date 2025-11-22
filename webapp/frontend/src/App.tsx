@@ -22,6 +22,7 @@ import MessagingPage from "./pages/MessagingPage";
 import MessagesPage from "./pages/MessagesPage";
 import ActivitiesPage from "./pages/ActivitiesPage";
 import RacesPage from "./pages/RacesPage";
+import SlotSeatingPage from "./pages/SlotSeatingPage";
 
 import "./styles/layout.css";
 import "./styles/messaging.css";
@@ -64,6 +65,7 @@ export default function App() {
           <Route path="/clients/new" element={<ClientCreatePage />} />
           <Route path="/clients/:id" element={<ClientEditPage />} />
           <Route path="/schedule/manage" element={<SchedulePage />} />
+          <Route path="/schedule/slot/:id" element={<SlotSeatingPage />} />
           <Route path="/schedule/notifications" element={<NotificationsPage />} />
           <Route path="/activities" element={<ActivitiesPage />} />
           <Route path="/races" element={<RacesPage />} />

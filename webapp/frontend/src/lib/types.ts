@@ -199,6 +199,13 @@ export interface ScheduleWeekDetailResponse {
   instructors: InstructorRow[];
 }
 
+export interface ScheduleSlotDetailResponse {
+  week: ScheduleWeekRow;
+  slot: ScheduleSlot;
+  stands: ScheduleStandSummary[];
+  instructors: InstructorRow[];
+}
+
 export interface InstructorRow {
   id: number;
   full_name: string;

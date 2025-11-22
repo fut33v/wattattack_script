@@ -693,3 +693,147 @@
   transform: none;
   box-shadow: none;
 }
+
+/* Slot seating editor */
+.slot-seating-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.slot-seating-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.slot-seating-title {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.slot-seating-subtitle {
+  color: #cbd5f5;
+  font-size: 14px;
+}
+
+.slot-seating-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.slot-seating-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 20px;
+}
+
+.slot-stands-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 360px;
+}
+
+.slot-stand-tile {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed rgba(148, 163, 255, 0.4);
+  border-radius: 12px;
+  padding: 12px;
+  min-height: 120px;
+  transition: border-color 0.2s ease, background 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.slot-stand-tile.active {
+  border-color: #8b5cf6;
+  background: rgba(139, 92, 246, 0.08);
+}
+
+.slot-stand-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.slot-stand-title {
+  font-weight: 600;
+}
+
+.slot-stand-code {
+  font-size: 12px;
+  color: #cbd5f5;
+}
+
+.slot-stand-empty {
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.slot-stand-tile .slot-seat-card {
+  width: 100%;
+}
+
+.slot-seat-card {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(139, 92, 246, 0.2));
+  border: 1px solid rgba(148, 163, 255, 0.4);
+  cursor: grab;
+  user-select: none;
+}
+
+.slot-seat-card .slot-seat-name {
+  font-weight: 700;
+}
+
+.slot-seat-meta {
+  font-size: 12px;
+  color: #cbd5f5;
+}
+
+.slot-seat-status {
+  font-size: 12px;
+  color: #e0e7ff;
+  margin-top: 6px;
+}
+
+.slot-seat-card.available {
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(34, 197, 94, 0.5);
+}
+
+.slot-seat-card.pending,
+.slot-seat-card.waitlist,
+.slot-seat-card.hold {
+  background: rgba(251, 191, 36, 0.12);
+  border-color: rgba(251, 191, 36, 0.5);
+}
+
+.slot-seat-card.cancelled,
+.slot-seat-card.blocked {
+  background: rgba(248, 113, 113, 0.12);
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.slot-unassigned {
+  border-style: solid;
+}
+
+.slot-unassigned-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.slot-seating-hint {
+  margin-top: 12px;
+  color: #cbd5f5;
+  font-size: 13px;
+}

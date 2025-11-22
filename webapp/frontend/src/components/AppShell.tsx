@@ -19,7 +19,7 @@ interface NavLinkConfig {
 const PRIMARY_NAV_LINKS: readonly NavLinkConfig[] = [
   { to: "/dashboard", label: "Панель", adminOnly: false },
   { to: "/clients", label: "Клиенты", adminOnly: false },
-  { to: "/schedule/manage", label: "Редактор", adminOnly: true },
+  { to: "/schedule/manage", label: "Расписание", adminOnly: true },
   { to: "/races", label: "Гонки", adminOnly: true },
   { to: "/schedule/settings", label: "Настройки", adminOnly: true },
   { to: "/instructors", label: "Инструкторы", adminOnly: true },
