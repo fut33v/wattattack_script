@@ -11,7 +11,9 @@ import type {
   ScheduleSlot,
   ScheduleSlotDetailResponse,
   ScheduleStandSummary,
-  ScheduleWeekDetailResponse
+  ScheduleWeekDetailResponse,
+  ClientRow,
+  ClientListResponse
 } from "../lib/types";
 
 import "../styles/schedule.css";
@@ -70,13 +72,27 @@ function StandTile({
   reservation,
   onDrop,
   isActive,
-  onHover
+  onHover,
+  onAssignClick,
+  showAssign,
+  searchTerm,
+  onSearchChange,
+  searchResults,
+  onSelectClient,
+  isAssigning
 }: {
   stand: ScheduleStandSummary | null;
   reservation: ScheduleReservation | null;
   onDrop: (reservationId: number, targetStandId: number | null) => void;
   isActive: boolean;
   onHover?: (standId: number | null) => void;
+  onAssignClick?: () => void;
+  showAssign?: boolean;
+  searchTerm?: string;
+  onSearchChange?: (value: string) => void;
+  searchResults?: ClientRow[];
+  onSelectClient?: (client: ClientRow) => void;
+  isAssigning?: boolean;
 }) {
   const title = stand ? stand.display_name || stand.code || stand.title || `Станок ${stand.id}` : "Без станка";
   const standId = stand?.id ?? null;
@@ -110,6 +126,47 @@ function StandTile({
       ) : (
         <div className="slot-stand-empty">Перетащите клиента</div>
       )}
+      {onAssignClick ? (
+        <div className="slot-assign">
+          <button type="button" className="btn primary" onClick={onAssignClick} disabled={isAssigning}>
+            Добавить клиента
+          </button>
+          {showAssign ? (
+            <div className="slot-assign-panel">
+              <input
+                type="search"
+                placeholder="Поиск по имени…"
+                value={searchTerm}
+                onChange={(event) => onSearchChange?.(event.target.value)}
+              />
+              {searchTerm && (searchResults?.length ?? 0) === 0 ? (
+                <div className="slot-stand-empty">Ничего не найдено</div>
+              ) : null}
+              <div className="slot-assign-results">
+                {searchResults?.map((client) => {
+                  const name =
+                    client.full_name ||
+                    [client.last_name, client.first_name].filter(Boolean).join(" ").trim() ||
+                    `Клиент #${client.id}`;
+                  const height = client.height ? `${client.height} см` : "";
+                  return (
+                    <button
+                      key={client.id}
+                      type="button"
+                      className="slot-assign-option"
+                      onClick={() => onSelectClient?.(client)}
+                      disabled={isAssigning}
+                    >
+                      <span className="slot-assign-name">{name}</span>
+                      {height ? <span className="slot-assign-meta">{height}</span> : null}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -122,12 +179,59 @@ export default function SlotSeatingPage() {
   const slotId = id ? Number(id) : NaN;
   const [activeStandId, setActiveStandId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [assignStandId, setAssignStandId] = useState<number | null>(null);
+  const [searchTerm, setSearchTerm] = useState<string>("");
 
   const slotQuery = useQuery<ScheduleSlotDetailResponse>({
     queryKey: ["schedule-slot", slotId],
     enabled: Number.isFinite(slotId),
     queryFn: () => apiFetch<ScheduleSlotDetailResponse>(`/api/schedule/slots/${slotId}`)
   });
+
+  const clientSearchQuery = useQuery<ClientListResponse>({
+    queryKey: ["clients-search", searchTerm],
+    enabled: assignStandId !== null && searchTerm.trim().length >= 2,
+    queryFn: () =>
+      apiFetch(`/api/clients?search=${encodeURIComponent(searchTerm.trim())}&page=1&sort=last_name&direction=asc`),
+    staleTime: 30_000
+  });
+
+  function applySlotUpdate(data: MoveResponse | { reservation: ScheduleReservation; slot?: ScheduleSlot }) {
+    if (!data || !slotId) return;
+    const weekId = (data as MoveResponse).slot?.week_id ?? slot?.week_id;
+    queryClient.invalidateQueries({ queryKey: ["schedule-slot", slotId] });
+    if (weekId) {
+      queryClient.invalidateQueries({ queryKey: ["schedule-week", weekId] });
+      queryClient.invalidateQueries({ queryKey: ["schedule-week"], exact: false });
+      queryClient.invalidateQueries({ queryKey: ["schedule-weeks"] });
+    }
+    setErrorMessage(null);
+    queryClient.setQueryData<ScheduleSlotDetailResponse>(["schedule-slot", slotId], (prev) => {
+      if (!prev) return prev;
+      if ((data as MoveResponse).slot) {
+        return { ...prev, slot: (data as MoveResponse).slot! };
+      }
+      const updated = data.reservation;
+      return {
+        ...prev,
+        slot: {
+          ...prev.slot,
+          reservations: prev.slot.reservations.map((item) => (item.id === updated.id ? updated : item))
+        }
+      };
+    });
+    if (weekId && (data as MoveResponse).slot) {
+      queryClient.setQueryData<ScheduleWeekDetailResponse | undefined>(["schedule-week", weekId], (prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          slots: prev.slots.map((slotEntry: ScheduleSlot) =>
+            slotEntry.id === (data as MoveResponse).slot!.id ? (data as MoveResponse).slot! : slotEntry
+          )
+        };
+      });
+    }
+  }
 
   const moveMutation = useMutation<MoveResponse, unknown, MovePayload>({
     mutationFn: ({ reservationId, standId, swapReservationId }) =>
@@ -136,45 +240,34 @@ export default function SlotSeatingPage() {
         body: JSON.stringify({ standId, swapReservationId })
       }),
     onSuccess: (data) => {
-      if (!data || !slotId) return;
-      const weekId = data.slot?.week_id ?? slot?.week_id;
-      queryClient.invalidateQueries({ queryKey: ["schedule-slot", slotId] });
-      if (weekId) {
-        queryClient.invalidateQueries({ queryKey: ["schedule-week", weekId] });
-        queryClient.invalidateQueries({ queryKey: ["schedule-week"], exact: false });
-        queryClient.invalidateQueries({ queryKey: ["schedule-weeks"] });
-      }
-      setErrorMessage(null);
-      queryClient.setQueryData<ScheduleSlotDetailResponse>(["schedule-slot", slotId], (prev) => {
-        if (!prev) return prev;
-        if (data.slot) {
-          return { ...prev, slot: data.slot };
-        }
-        const updated = data.reservation;
-        return {
-          ...prev,
-          slot: {
-            ...prev.slot,
-            reservations: prev.slot.reservations.map((item) => (item.id === updated.id ? updated : item))
-          }
-        };
-      });
-      if (weekId && data.slot) {
-        queryClient.setQueryData<ScheduleWeekDetailResponse | undefined>(["schedule-week", weekId], (prev) => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            slots: prev.slots.map((slotEntry: ScheduleSlot) =>
-              slotEntry.id === data.slot!.id ? data.slot! : slotEntry
-            )
-          };
-        });
-      }
+      applySlotUpdate(data);
     },
     onError: (error) => {
       console.error("SlotSeatingPage: failed to move reservation", error);
       const apiError = error as ApiError;
       setErrorMessage(apiError?.message ?? "Не удалось изменить рассадку. Попробуйте ещё раз.");
+    }
+  });
+
+  const assignMutation = useMutation<
+    MoveResponse,
+    unknown,
+    { standId: number; clientId: number; reservationId: number }
+  >({
+    mutationFn: ({ reservationId, clientId }) =>
+      apiFetch<MoveResponse>(`/api/schedule/reservations/${reservationId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ clientId, status: "booked" })
+      }),
+    onSuccess: (data) => {
+      applySlotUpdate(data);
+      setAssignStandId(null);
+      setSearchTerm("");
+    },
+    onError: (error) => {
+      console.error("SlotSeatingPage: failed to assign client", error);
+      const apiError = error as ApiError;
+      setErrorMessage(apiError?.message ?? "Не удалось добавить клиента. Попробуйте ещё раз.");
     }
   });
 
@@ -202,6 +295,14 @@ export default function SlotSeatingPage() {
   }, [reservations]);
 
   const unassigned = reservations.filter((res) => res.stand_id == null);
+
+  function findReservationForStand(standId: number): ScheduleReservation | undefined {
+    const direct = reservations.find((res) => res.stand_id === standId);
+    if (direct) return direct;
+    const available = reservations.find((res) => res.stand_id == null && res.status === "available");
+    if (available) return available;
+    return reservations.find((res) => res.stand_id == null);
+  }
 
   function handleDrop(reservationId: number, targetStandId: number | null) {
     if (!session.isAdmin) {
@@ -279,6 +380,28 @@ export default function SlotSeatingPage() {
               onDrop={(reservationId) => handleDrop(reservationId, stand.id)}
               isActive={activeStandId === stand.id}
               onHover={setActiveStandId}
+              onAssignClick={
+                (standAssignments.get(stand.id)?.status ?? "") !== "booked"
+                  ? () => setAssignStandId(stand.id)
+                  : undefined
+              }
+              showAssign={assignStandId === stand.id}
+              searchTerm={assignStandId === stand.id ? searchTerm : ""}
+              onSearchChange={setSearchTerm}
+              searchResults={assignStandId === stand.id ? clientSearchQuery.data?.items ?? [] : []}
+              onSelectClient={(client) => {
+                const targetReservation = findReservationForStand(stand.id);
+                if (!targetReservation) {
+                  setErrorMessage("Не найден слот для станка, попробуйте обновить страницу.");
+                  return;
+                }
+                assignMutation.mutate({
+                  standId: stand.id,
+                  clientId: client.id,
+                  reservationId: targetReservation.id
+                });
+              }}
+              isAssigning={assignMutation.isPending}
             />
           ))}
         </div>
