@@ -2209,6 +2209,7 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
     unknown_cluster = 0
     already_assigned = 0
     slot_ids_used: set[int] = set()
+    assigned_reservation_ids: set[int] = set()
     blocked_count = 0
     race_title = (race.get("title") or "").strip()
 
@@ -2337,6 +2338,7 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
             placed_total += 1
             slot_ids_used.add(slot["id"])
             used_res.add(choice["reservation_id"])
+            assigned_reservation_ids.add(choice["reservation_id"])
         else:
             stats["unplaced"].append(_client_label(reg))
             unplaced_clients.append(_client_label(reg))
@@ -2345,6 +2347,8 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
     for slot in race_slots.values():
         reservations = slot.get("reservations") or []
         for reservation in reservations:
+            if reservation.get("id") in assigned_reservation_ids:
+                continue
             if reservation.get("status") != "available":
                 continue
             updated = schedule_repository.update_reservation(
