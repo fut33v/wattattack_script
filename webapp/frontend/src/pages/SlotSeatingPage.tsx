@@ -47,6 +47,7 @@ function SeatCard({
 }) {
   const statusLabel = RESERVATION_STATUS_LABELS[reservation.status] ?? reservation.status;
   const secondary = reservation.client_name && reservation.client_name.trim() !== label ? label : "";
+  const heightLabel = reservation.client_height ? `${reservation.client_height} см` : null;
 
   return (
     <div
@@ -58,6 +59,7 @@ function SeatCard({
     >
       <div className="slot-seat-name">{reservation.client_name || "—"}</div>
       {secondary ? <div className="slot-seat-meta">{secondary}</div> : null}
+      {heightLabel ? <div className="slot-seat-meta">{heightLabel}</div> : null}
       <div className="slot-seat-status">{statusLabel}</div>
     </div>
   );

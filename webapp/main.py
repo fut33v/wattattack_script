@@ -406,7 +406,7 @@ def _notify_registration_update(old_record: dict, new_record: dict, race: dict) 
             log.warning("Failed to notify user %s about race registration update", tg_user_id)
 
 
-def _serialize_slot(slot: dict) -> dict:
+def _serialize_slot(slot: dict, client_lookup: Optional[dict[int, dict]] = None) -> dict:
     serialized = dict(slot)
     slot_date = serialized.get("slot_date")
     if isinstance(slot_date, date):
@@ -424,11 +424,11 @@ def _serialize_slot(slot: dict) -> dict:
         serialized["instructorName"] = serialized.pop("instructor_name")
 
     reservations = serialized.get("reservations") or []
-    serialized["reservations"] = [_serialize_reservation(res) for res in reservations]
+    serialized["reservations"] = [_serialize_reservation(res, client_lookup) for res in reservations]
     return serialized
 
 
-def _serialize_reservation(reservation: dict) -> dict:
+def _serialize_reservation(reservation: dict, client_lookup: Optional[dict[int, dict]] = None) -> dict:
     serialized = dict(reservation)
     created_at = serialized.get("created_at")
     if hasattr(created_at, "isoformat"):
@@ -436,6 +436,11 @@ def _serialize_reservation(reservation: dict) -> dict:
     updated_at = serialized.get("updated_at")
     if hasattr(updated_at, "isoformat"):
         serialized["updated_at"] = updated_at.isoformat()
+    client_id = serialized.get("client_id")
+    if client_id is not None and client_lookup is not None:
+        client_row = client_lookup.get(client_id)
+        if client_row and client_row.get("height") is not None:
+            serialized["client_height"] = client_row.get("height")
     return serialized
 
 
@@ -521,6 +526,14 @@ def _load_schedule_week_payload(week_id: int) -> Optional[dict]:
 
     trainers_repository.ensure_trainers_table()
     stands = trainers_repository.list_trainers()
+    client_lookup: dict[int, dict] = {}
+    for slot in slots or []:
+        for res in slot.get("reservations") or []:
+            client_id = res.get("client_id")
+            if client_id is not None and client_id not in client_lookup:
+                client_row = client_repository.get_client(client_id)
+                if client_row:
+                    client_lookup[client_id] = client_row
     stands_payload = [
         {
             "id": trainer["id"],
@@ -531,7 +544,7 @@ def _load_schedule_week_payload(week_id: int) -> Optional[dict]:
         for trainer in stands
     ]
 
-    serialized_slots = [_serialize_slot(slot) for slot in slots]
+    serialized_slots = [_serialize_slot(slot, client_lookup) for slot in slots]
     instructors_payload = jsonable_encoder(instructors_repository.list_instructors())
 
     return {
@@ -1568,10 +1581,18 @@ def api_get_schedule_slot(slot_id: int, user=Depends(require_user)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Week not found")
 
     slot_payload = schedule_repository.get_slot_with_reservations(slot_id) or slot
+    client_lookup: dict[int, dict] = {}
+    for res in slot_payload.get("reservations") or []:
+        client_id = res.get("client_id")
+        if client_id is not None and client_id not in client_lookup:
+            client_row = client_repository.get_client(client_id)
+            if client_row:
+                client_lookup[client_id] = client_row
+
     instructors_payload = payload.get("instructors") or jsonable_encoder(instructors_repository.list_instructors())
     return {
         "week": payload["week"],
-        "slot": _serialize_slot(slot_payload),
+        "slot": _serialize_slot(slot_payload, client_lookup),
         "stands": payload.get("stands") or [],
         "instructors": instructors_payload,
     }

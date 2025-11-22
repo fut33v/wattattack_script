@@ -162,6 +162,7 @@ export interface ScheduleReservation {
   stand_code?: string | null;
   client_id?: number | null;
   client_name?: string | null;
+  client_height?: number | null;
   status: string;
   source?: string | null;
   notes?: string | null;
