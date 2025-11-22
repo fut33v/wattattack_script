@@ -2209,6 +2209,8 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
     unknown_cluster = 0
     already_assigned = 0
     slot_ids_used: set[int] = set()
+    blocked_count = 0
+    race_title = (race.get("title") or "").strip()
 
     for reg in registrations:
         status_value = (reg.get("status") or "").lower()
@@ -2339,6 +2341,21 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
             stats["unplaced"].append(_client_label(reg))
             unplaced_clients.append(_client_label(reg))
 
+    # Block remaining free spots so никто посторонний не занял
+    for slot in race_slots.values():
+        reservations = slot.get("reservations") or []
+        for reservation in reservations:
+            if reservation.get("status") != "available":
+                continue
+            updated = schedule_repository.update_reservation(
+                reservation["id"],
+                status="blocked",
+                source="race_lock",
+                notes=(f"Гонка {race_title}".strip() or "Гонка") if race_title else "Гонка",
+            )
+            if updated:
+                blocked_count += 1
+
     cluster_results_list = [
         {
             **entry,
@@ -2357,6 +2374,7 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
         "skipped_missing_cluster": skipped_missing_cluster,
         "skipped_unknown_cluster": unknown_cluster,
         "already_assigned": already_assigned,
+        "blocked_placeholders": blocked_count,
         "race_date": race_date.isoformat(),
         "week_id": week["id"],
         "slot_ids": sorted(slot_ids_used),
