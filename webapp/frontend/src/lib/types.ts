@@ -310,6 +310,7 @@ export interface RaceRegistration {
   bike_id?: number | null;
   bike_title?: string | null;
   bike_owner?: string | null;
+  client_pedals?: string | null;
   axle_type?: string | null;
   gears_label?: string | null;
   race_mode?: string | null;

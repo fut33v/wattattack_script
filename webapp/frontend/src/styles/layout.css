@@ -787,6 +787,13 @@
   gap: 0.75rem;
 }
 
+.race-form-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
 .race-slug-link {
   font-size: 0.9rem;
   color: rgba(118, 186, 255, 0.95);
@@ -809,6 +816,45 @@
   color: rgba(227, 233, 255, 0.95);
   padding: 0.55rem 0.7rem;
   font-size: 0.95rem;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 14, 26, 0.6);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1200;
+  padding: 1rem;
+}
+
+.modal-card {
+  background: #0f1729;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 1.2rem 1.4rem;
+  max-width: 440px;
+  width: 100%;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.modal-card h3 {
+  margin: 0 0 0.35rem;
+}
+
+.modal-card p {
+  margin: 0;
+  color: rgba(226, 232, 240, 0.82);
+  line-height: 1.4;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1rem;
 }
 
 .race-registrations {
@@ -841,6 +887,33 @@
 .race-registration-meta {
   font-size: 0.85rem;
   color: rgba(196, 205, 238, 0.65);
+}
+
+.meta-subtle {
+  color: rgba(196, 205, 238, 0.6);
+  font-size: 0.85rem;
+  margin-top: 0.1rem;
+}
+
+.race-cluster-block {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 0.75rem;
+  background: rgba(15, 21, 38, 0.55);
+  margin-bottom: 1rem;
+}
+
+.race-cluster-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem 0.35rem 0.5rem;
+}
+
+.race-cluster-header h4 {
+  margin: 0;
+  font-size: 1.1rem;
 }
 
 .race-registration-controls {

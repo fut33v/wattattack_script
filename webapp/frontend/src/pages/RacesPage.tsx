@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import Panel from "../components/Panel";
-import { apiFetch } from "../lib/api";
+import { apiFetch, ApiError } from "../lib/api";
 import type {
   RaceCluster,
   RaceDetailResponse,
@@ -151,6 +151,7 @@ export default function RacesPage() {
   const [selectedRaceId, setSelectedRaceId] = useState<number | "new" | null>(null);
   const [updatingRegistrationId, setUpdatingRegistrationId] = useState<number | null>(null);
   const [deletingRegistrationId, setDeletingRegistrationId] = useState<number | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [clusterDrafts, setClusterDrafts] = useState<ClusterDraft[]>([]);
   const [slotCreationResult, setSlotCreationResult] = useState<RaceSlotsResponse | null>(null);
   const [seatResult, setSeatResult] = useState<RaceSeatResponse | null>(null);
@@ -205,6 +206,20 @@ export default function RacesPage() {
   }, [selectedRaceId, races]);
 
   const selectedRaceDetail = detailQuery.data?.item ?? null;
+
+  const deleteRaceMutation = useMutation<{ status: string }, ApiError, number>({
+    mutationFn: (raceId) => apiFetch(`/api/races/${raceId}`, { method: "DELETE" }),
+    onSuccess: (_data, raceId) => {
+      queryClient.setQueryData<RaceListResponse>(["races"], (prev) => {
+        if (!prev) return prev;
+        return { ...prev, items: prev.items.filter((race) => race.id !== raceId) };
+      });
+      queryClient.removeQueries({ queryKey: ["races", raceId] });
+      queryClient.invalidateQueries({ queryKey: ["races"] });
+      setIsDeleteModalOpen(false);
+      setSelectedRaceId(null);
+    }
+  });
 
   useEffect(() => {
     if (selectedRaceId === "new") {
@@ -540,14 +555,24 @@ export default function RacesPage() {
                 <form className="race-form" key={selectedRaceDetail.id} onSubmit={(event) => handleUpdateSubmit(event, selectedRaceDetail.id)}>
                   <div className="race-form-header">
                     <h3>{selectedRaceDetail.title}</h3>
-                    {selectedRaceDetail.slug && (
-                      <a className="race-slug-link" href={`/race/${selectedRaceDetail.slug}`} target="_blank" rel="noreferrer">
-                        Открыть публичную страницу
+                    <div className="race-form-header-actions">
+                      {selectedRaceDetail.slug && (
+                        <a className="race-slug-link" href={`/race/${selectedRaceDetail.slug}`} target="_blank" rel="noreferrer">
+                          Открыть публичную страницу
+                        </a>
+                      )}
+                      <a className="race-slug-link" href={`/app/race/summary/${selectedRaceDetail.id}`}>
+                        Сводка гонки
                       </a>
-                    )}
-                    <a className="race-slug-link" href={`/app/race/summary/${selectedRaceDetail.id}`}>
-                      Сводка гонки
-                    </a>
+                      <button
+                        type="button"
+                        className="button danger"
+                        onClick={() => setIsDeleteModalOpen(true)}
+                        disabled={deleteRaceMutation.isPending}
+                      >
+                        {deleteRaceMutation.isPending ? "Удаляем…" : "Удалить гонку"}
+                      </button>
+                    </div>
                   </div>
                   <div className="form-grid">
                     <label>
@@ -743,6 +768,33 @@ export default function RacesPage() {
           </section>
         </div>
       </Panel>
+
+      {isDeleteModalOpen && selectedRaceDetail && (
+        <div className="modal-backdrop">
+          <div className="modal-card">
+            <h3>Удалить гонку «{selectedRaceDetail.title}»?</h3>
+            <p>Удалятся сама гонка и все её регистрации. Действие необратимо.</p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="button"
+                onClick={() => setIsDeleteModalOpen(false)}
+                disabled={deleteRaceMutation.isPending}
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                className="button danger"
+                onClick={() => deleteRaceMutation.mutate(selectedRaceDetail.id)}
+                disabled={deleteRaceMutation.isPending}
+              >
+                {deleteRaceMutation.isPending ? "Удаляем…" : "Удалить"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -368,6 +368,16 @@ def update_race(race_id: int, **fields: Any) -> Optional[Dict]:
     return record
 
 
+def delete_race(race_id: int) -> bool:
+    """Delete race and cascade registrations."""
+    ensure_tables()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute("DELETE FROM races WHERE id = %s", (race_id,))
+        deleted = cur.rowcount > 0
+        conn.commit()
+    return deleted
+
+
 def list_registrations(race_id: int) -> List[Dict]:
     ensure_tables()
     query = """
