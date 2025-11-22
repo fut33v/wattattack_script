@@ -1988,7 +1988,15 @@ def api_create_race_slots(race_id: int, user=Depends(require_admin)):
     if not isinstance(race_date, date):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Race date is missing")
 
-    clusters = race.get("clusters") or []
+    clusters = list(race.get("clusters") or [])
+    existing_codes = {str(entry.get("code") or entry.get("label") or "").strip() for entry in clusters}
+    # Ensure clusters include codes used by registrations even if отсутствуют в метаданных
+    registrations_raw = race_repository.list_registrations(race_id)
+    for reg in registrations_raw:
+        code = (reg.get("cluster_code") or reg.get("cluster_label") or "").strip()
+        if code and code not in existing_codes:
+            clusters.append({"code": code, "label": code})
+            existing_codes.add(code)
     if not clusters:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Race has no clusters")
 
@@ -2172,7 +2180,7 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
         else:
             slot_candidates[code] = None
 
-    registrations = race_repository.list_registrations(race_id)
+    registrations = registrations_raw
     clients_cache: Dict[int, Dict[str, Any]] = {}
 
     def _client_label(reg: Dict[str, Any]) -> str:
@@ -2208,11 +2216,8 @@ def api_seat_race_participants(race_id: int, user=Depends(require_admin)):
 
         cluster_entry = next(
             (entry for entry in clusters if cluster_code == entry.get("code") or cluster_code == entry.get("label")),
-            None,
+            {"code": cluster_code, "label": cluster_code},
         )
-        if cluster_entry is None:
-            unknown_cluster += 1
-            continue
 
         code = (cluster_entry.get("code") or cluster_entry.get("label") or "").strip()
         label = (cluster_entry.get("label") or cluster_entry.get("code") or "").strip() or cluster_code
