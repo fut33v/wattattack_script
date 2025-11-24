@@ -21,7 +21,6 @@ from fastapi import (
     HTTPException,
     Request,
     Response,
-    UploadFile,
     status,
 )
 from fastapi.encoders import jsonable_encoder
@@ -56,6 +55,7 @@ from .dependencies import (
     require_admin,
     require_user,
 )
+from .routes.messaging import ensure_uploads_dir, router as messaging_router, UPLOADS_DIR as MESSAGING_UPLOADS_DIR
 from .routes.vk_client_links import router as vk_client_links_router
 from .routes.intervals_links import router as intervals_links_router
 from .routes.races import router as races_router, _format_race_date_label
@@ -86,10 +86,33 @@ def _json_success(payload: dict) -> JSONResponse:
     return JSONResponse(payload)
 
 
+def _build_base_url(request: Request) -> str:
+    settings = get_settings()
+    base = settings.public_url or settings.base_url or str(request.base_url)
+    return base.rstrip("/")
+
+
+def _store_uploaded_image(image_upload: UploadFile, *, request: Request, image_bytes: bytes) -> str:
+    """Persist uploaded image and return absolute URL for Telegram."""
+    target_dir = UPLOADS_DIR / "messaging"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    original_suffix = Path(image_upload.filename or "").suffix.lower()
+    safe_suffix = original_suffix if original_suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp"} else ".jpg"
+    filename = f"{uuid4().hex}{safe_suffix}"
+    destination = target_dir / filename
+    destination.write_bytes(image_bytes)
+
+    public_url = f"{_build_base_url(request)}/uploads/messaging/{filename}"
+    log.info("messaging: stored image %s (%s bytes) -> %s", destination, len(image_bytes), public_url)
+    return public_url
+
+
 api = APIRouter(prefix="/api", tags=["api"])
 api.include_router(vk_client_links_router, dependencies=[Depends(require_admin)])
 api.include_router(intervals_links_router, dependencies=[Depends(require_admin)])
 api.include_router(races_router)
+api.include_router(messaging_router)
 
 SCHEDULE_SESSION_KINDS = {"self_service", "instructor", "race"}
 SCHEDULE_SESSION_KIND_LABELS = {
@@ -1305,94 +1328,6 @@ def api_fill_week_template(week_id: int, force: bool = False, user=Depends(requi
     return {"created": created, "slots": serialized_slots, "instructors": instructors_payload}
 
 
-@api.post("/messages/broadcast")
-async def api_broadcast_message(request: Request, user=Depends(require_admin)):
-    """Broadcast a message to all linked Telegram users."""
-    try:
-        payload = await request.json()
-        message_text = payload.get("message")
-        send_at = payload.get("sendAt")  # ISO datetime string or None for immediate
-        
-        if not message_text or not isinstance(message_text, str):
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Message text is required")
-        
-        if len(message_text.strip()) == 0:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Message text cannot be empty")
-        
-        # For now, we'll implement immediate sending only
-        # Scheduled sending would require a separate job queue system
-        if send_at is not None:
-            # In a real implementation, we would store this in a scheduled messages table
-            # and have a separate process pick them up at the scheduled time
-            log.warning("Scheduled messaging not yet implemented, sending immediately")
-        
-        # Get all linked Telegram users
-        try:
-            links = client_link_repository.list_links()
-        except Exception as exc:
-            log.exception("Failed to fetch client links")
-            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch client links") from exc
-        
-        if not links:
-            return {"sent": 0, "message": "No linked users found"}
-        
-        # Get the clientbot token
-        settings = get_settings()
-        bot_token = settings.krutilkavn_bot_token
-        if not bot_token:
-            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "KRUTILKAVN_BOT_TOKEN not configured")
-        
-        # Send message to each user
-        sent_count = 0
-        failed_count = 0
-        
-        for link in links:
-            tg_user_id = link.get("tg_user_id")
-            if not tg_user_id:
-                continue
-                
-            try:
-                # Send message via Telegram API
-                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                data = {
-                    "chat_id": str(tg_user_id),
-                    "text": message_text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True
-                }
-                
-                # In a real implementation, we would use a proper HTTP client with timeout
-                # For now, we'll use a simple request
-                import requests
-                response = requests.post(url, json=data, timeout=10)
-                
-                if response.status_code == 200:
-                    sent_count += 1
-                else:
-                    log.warning(
-                        "Failed to send message to user %s: %s %s",
-                        tg_user_id,
-                        response.status_code,
-                        response.text
-                    )
-                    failed_count += 1
-                    
-            except Exception as exc:
-                log.exception("Failed to send message to user %s", tg_user_id)
-                failed_count += 1
-        
-        return {
-            "sent": sent_count,
-            "failed": failed_count,
-            "total": len(links),
-            "message": f"Message sent to {sent_count} users, {failed_count} failed"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as exc:
-        log.exception("Failed to broadcast message")
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to broadcast message") from exc
 
 
 @api.patch("/schedule/reservations/{reservation_id}")
@@ -1795,35 +1730,6 @@ def api_delete_client_link(client_id: int, user=Depends(require_admin)):
     return {"status": "ok"}
 
 
-@api.get("/messages")
-def api_list_messages(user=Depends(require_admin), page: int = 1, page_size: int = 50):
-    """Return paginated list of user messages."""
-    if page < 1:
-        page = 1
-    if page_size < 1 or page_size > 100:
-        page_size = 50
-        
-    offset = (page - 1) * page_size
-    try:
-        messages = message_repository.list_user_messages(limit=page_size, offset=offset)
-        total = message_repository.get_user_message_count()
-        
-        pagination = {
-            "page": page,
-            "pageSize": page_size,
-            "total": total,
-            "totalPages": (total + page_size - 1) // page_size
-        }
-        
-        return _json_success({
-            "items": jsonable_encoder(messages),
-            "pagination": pagination
-        })
-    except Exception as exc:
-        log.exception("Failed to fetch user messages")
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch messages") from exc
-
-
 @api.get("/activities")
 def api_get_activity_ids(
     account_id: Optional[str] = None,
@@ -1949,8 +1855,14 @@ def create_app() -> FastAPI:
         try:
             instructors_repository.ensure_instructors_table()
             message_repository.ensure_user_messages_table()
+            ensure_uploads_dir()
         except Exception as exc:  # pylint: disable=broad-except
             log.warning("Failed to ensure instructors table on startup: %s", exc)
+
+        try:
+            UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:  # pylint: disable=broad-except
+            log.warning("Failed to create uploads dir: %s", exc)
 
     @app.get("/")
     def root():
@@ -2283,72 +2195,71 @@ def create_app() -> FastAPI:
         request.session.pop(SESSION_KEY_USER, None)
         return {"status": "ok"}
 
-    if FRONTEND_DIST.exists():
-        dist_root = FRONTEND_DIST.resolve()
-        assets_dir = dist_root / "assets"
-        if assets_dir.exists():
-            app.mount("/app/assets", StaticFiles(directory=str(assets_dir), html=False), name="frontend-assets")
+    dist_root = FRONTEND_DIST.resolve()
+    assets_dir = dist_root / "assets"
+    if assets_dir.exists():
+        app.mount("/app/assets", StaticFiles(directory=str(assets_dir), html=False), name="frontend-assets")
 
-        index_file = dist_root / "index.html"
+    if MESSAGING_UPLOADS_DIR.exists():
+        app.mount("/uploads", StaticFiles(directory=str(MESSAGING_UPLOADS_DIR), html=False), name="uploads")
 
-        @lru_cache()
-        def _index_html() -> str:
-            if not index_file.exists():
-                raise RuntimeError("Frontend index.html is missing. Run npm install && npm run build inside webapp/frontend.")
+    index_file = dist_root / "index.html"
+
+    @lru_cache()
+    def _index_html() -> str | None:
+        if not index_file.exists():
+            return None
+        try:
             return index_file.read_text(encoding="utf-8")
+        except Exception:  # pylint: disable=broad-except
+            return None
 
-        @app.get("/app", response_class=HTMLResponse)
-        def serve_spa_root(request: Request):
-            # Check if user is logged in
-            user = get_current_user(request)
-            if not user:
-                # If not logged in, redirect to login
-                return HTMLResponse(_index_html())
-            
-            # Check if user is admin
-            if is_admin_user(user):
-                # Serve the full SPA for admin users
-                return HTMLResponse(_index_html())
-            else:
-                # Serve placeholder for non-admin users
-                context = {
-                    "request": request,
-                }
-                return templates.TemplateResponse("non_admin_placeholder.html", context)
+    def _spa_response_for(request: Request) -> Response:
+        html = _index_html()
+        if html is None:
+            return JSONResponse(
+                {
+                    "detail": "Frontend is not built yet. Run npm install && npm run build inside webapp/frontend.",
+                },
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return HTMLResponse(html)
 
-        @app.get("/app/{path:path}")
-        def serve_spa_asset(request: Request, path: str):
-            # Check if user is logged in
-            user = get_current_user(request)
-            if not user:
-                # If not logged in, serve the SPA (login page)
-                target = (dist_root / path).resolve()
-                if dist_root in target.parents or target == dist_root:
-                    if target.is_file():
-                        return FileResponse(target)
-                return HTMLResponse(_index_html())
-            
-            # Check if user is admin
-            if not is_admin_user(user):
-                # For non-admin users, redirect to placeholder for any /app/* path
-                context = {
-                    "request": request,
-                }
-                return templates.TemplateResponse("non_admin_placeholder.html", context)
-            
-            # For admin users, serve the SPA normally
+    @app.get("/app", response_class=HTMLResponse)
+    def serve_spa_root(request: Request):
+        user = get_current_user(request)
+        if not user:
+            return _spa_response_for(request)
+
+        if is_admin_user(user):
+            return _spa_response_for(request)
+
+        context = {
+            "request": request,
+        }
+        return templates.TemplateResponse("non_admin_placeholder.html", context)
+
+    @app.get("/app/{path:path}")
+    def serve_spa_asset(request: Request, path: str):
+        user = get_current_user(request)
+        if not user:
             target = (dist_root / path).resolve()
             if dist_root in target.parents or target == dist_root:
                 if target.is_file():
                     return FileResponse(target)
-            return HTMLResponse(_index_html())
+            return _spa_response_for(request)
 
-    else:
-        @app.get("/app")
-        def spa_placeholder():
-            return {
-                "detail": "Frontend is not built yet. Run npm install && npm run build inside webapp/frontend.",
+        if not is_admin_user(user):
+            context = {
+                "request": request,
             }
+            return templates.TemplateResponse("non_admin_placeholder.html", context)
+
+        target = (dist_root / path).resolve()
+        if dist_root in target.parents or target == dist_root:
+            if target.is_file():
+                return FileResponse(target)
+        return _spa_response_for(request)
 
     return app
 

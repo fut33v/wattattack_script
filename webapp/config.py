@@ -22,6 +22,7 @@ class Settings:
     telegram_login_bot_token: str
     krutilkavn_bot_token: str
     base_url: Optional[str] = None
+    public_url: Optional[str] = None
     straver_base_url: Optional[str] = None
     straver_internal_secret: Optional[str] = None
     clients_page_size: int = 25
@@ -50,6 +51,7 @@ def get_settings() -> Settings:
         krutilkavn_bot_token=krutilkavn_token,
         session_secret_key=_env("WEBAPP_SECRET_KEY", required=True),
         base_url=os.environ.get("WEBAPP_BASE_URL"),
+        public_url=os.environ.get("WEBAPP_PUBLIC_URL"),
         straver_base_url=os.environ.get("STRAVER_BASE_URL"),
         straver_internal_secret=os.environ.get("STRAVER_INTERNAL_SECRET"),
         clients_page_size=default_page_size,

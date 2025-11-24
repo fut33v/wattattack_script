@@ -24,9 +24,16 @@ async function parseJson(response: Response) {
 }
 
 export async function apiFetch<T>(input: RequestInfo, init: RequestInit = {}): Promise<T> {
+  const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
+  const headers = isFormData
+    ? init.headers
+    : init.body
+      ? { ...defaultHeaders, ...(init.headers || {}) }
+      : init.headers;
+
   const response = await fetch(input, {
     credentials: "include",
-    headers: init.body ? { ...defaultHeaders, ...(init.headers || {}) } : init.headers,
+    headers,
     ...init
   });
 

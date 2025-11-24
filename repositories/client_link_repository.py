@@ -199,10 +199,13 @@ def list_links(limit: int | None = None, offset: int = 0) -> List[Dict]:
 
     ensure_client_links_table()
     query = (
-        "SELECT client_id, tg_user_id, tg_username, tg_full_name, "
-        "strava_access_token, strava_refresh_token, strava_token_expires_at, strava_athlete_id, "
-        "created_at, updated_at "
-        "FROM client_links ORDER BY created_at DESC"
+        "SELECT cl.client_id, cl.tg_user_id, cl.tg_username, cl.tg_full_name, "
+        "cl.strava_access_token, cl.strava_refresh_token, cl.strava_token_expires_at, cl.strava_athlete_id, "
+        "cl.created_at, cl.updated_at, "
+        "COALESCE(c.full_name, CONCAT_WS(' ', c.first_name, c.last_name)) AS client_name "
+        "FROM client_links cl "
+        "LEFT JOIN clients c ON c.id = cl.client_id "
+        "ORDER BY cl.created_at DESC"
     )
     params: tuple = ()
     if limit is not None:
