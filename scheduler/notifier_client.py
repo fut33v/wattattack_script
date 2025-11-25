@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import tempfile
+import shutil
 import time as time_module
 from datetime import datetime, timedelta, date, time as dt_time, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from repositories.schedule_repository import (
     record_seen_activity_id,
     get_seen_activity_ids_for_account,
     find_reservation_for_activity,
+    find_reservation_by_client_name,
 )
 from repositories.client_link_repository import get_link_by_client
 from repositories.intervals_link_repository import get_link as get_intervals_link
@@ -516,6 +518,7 @@ def parse_activity_start_dt(activity: Dict[str, Any]) -> Optional[datetime]:
 def resolve_scheduled_client(
     account: Optional[Dict[str, Any]],
     activity: Dict[str, Any],
+    profile: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Resolve which client was scheduled on the account's stand at the activity time.
@@ -534,6 +537,8 @@ def resolve_scheduled_client(
         return None
 
     start_local = start_dt.astimezone(LOCAL_TIMEZONE)
+    athlete_name = extract_athlete_name(profile or {})
+
     try:
         reservation = find_reservation_for_activity(
             stand_ids,
@@ -542,30 +547,64 @@ def resolve_scheduled_client(
         )
     except Exception:
         LOGGER.exception("Failed to resolve reservation for account %s", account.get("id") or account.get("name"))
+        reservation = None
+
+    fallback_reservation = None
+    if athlete_name:
+        try:
+            fallback_reservation = find_reservation_by_client_name(
+                start_local,
+                athlete_name,
+                grace_minutes=MATCH_GRACE_MINUTES,
+            )
+        except Exception:
+            LOGGER.exception("Failed to resolve reservation by athlete name for account %s", account.get("id") or account.get("name"))
+
+    chosen = None
+    if reservation and athlete_name:
+        scheduled_name = (
+            reservation.get("client_full_name")
+            or " ".join(
+                part
+                for part in [
+                    reservation.get("client_first_name"),
+                    reservation.get("client_last_name"),
+                ]
+                if part
+            ).strip()
+        )
+        if not scheduled_name and reservation.get("client_name"):
+            scheduled_name = reservation.get("client_name")
+        if scheduled_name and scheduled_name.lower() == athlete_name.lower():
+            chosen = reservation
+    if not chosen:
+        chosen = fallback_reservation or reservation
+
+    if not chosen:
         return None
 
-    if not reservation:
-        return None
-
-    client_id = reservation.get("client_id")
+    client_id = chosen.get("client_id")
     if not client_id:
         return None
 
     client_name = (
-        reservation.get("client_full_name")
+        chosen.get("client_full_name")
         or " ".join(
             part
             for part in [
-                reservation.get("client_first_name"),
-                reservation.get("client_last_name"),
+                chosen.get("client_first_name"),
+                chosen.get("client_last_name"),
             ]
             if part
         ).strip()
     )
+    if not client_name and chosen.get("client_name"):
+        client_name = chosen.get("client_name")
+
     return {
         "client_id": client_id,
         "client_name": client_name or f"ID {client_id}",
-        "reservation": reservation,
+        "reservation": chosen,
     }
 
 
@@ -776,6 +815,7 @@ def format_workout_reminder(client: Dict[str, Any], reservations: List[Dict[str,
 
 def send_activity_fit(
     *,
+    account_id: str,
     client: WattAttackClient,
     activity: Dict[str, Any],
     account_name: str,
@@ -784,9 +824,9 @@ def send_activity_fit(
     token: str,
     admin_ids: Sequence[int],
     timeout: float,
-) -> Tuple[bool, Optional[int], Optional[str], Optional[datetime], Optional[str], bool, bool, bool]:
+) -> Tuple[bool, Optional[int], Optional[str], Optional[datetime], Optional[str], bool, bool, bool, Optional[str]]:
     fit_id = activity.get("fitFileId")
-    scheduled_match = resolve_scheduled_client(account, activity)
+    scheduled_match = resolve_scheduled_client(account, activity, profile)
     matched_client_id = scheduled_match.get("client_id") if scheduled_match else None
     matched_client_name = scheduled_match.get("client_name") if scheduled_match else None
     start_dt = parse_activity_start_dt(activity)
@@ -795,10 +835,13 @@ def send_activity_fit(
     sent_clientbot = False
     sent_strava = False
     sent_intervals = False
+    fit_path: Optional[str] = None
     
     # Get clientbot token for sending to clients
     krutilkavn_token = os.environ.get(KRUTILKAVN_BOT_TOKEN_ENV)
     
+    final_client_id = matched_client_id
+
     if not fit_id:
         should_wait, age_seconds = should_wait_for_fit_file(activity)
         if should_wait:
@@ -808,7 +851,7 @@ def send_activity_fit(
                 age_seconds or 0,
                 FIT_WAIT_SECONDS,
             )
-            return False, None, None, start_dt, profile_name, sent_clientbot, sent_strava, sent_intervals
+            return False, final_client_id, matched_client_name, start_dt, profile_name, sent_clientbot, sent_strava, sent_intervals, fit_path
 
         LOGGER.info("Activity %s has no FIT file", activity.get("id"))
         # Send to admins
@@ -825,7 +868,13 @@ def send_activity_fit(
         
         # Send to matching clients if clientbot token is available
         if krutilkavn_token:
-            sent_clientbot, sent_strava, sent_intervals = send_to_matching_clients(
+            (
+                sent_clientbot,
+                sent_strava,
+                sent_intervals,
+                resolved_client_id,
+                resolved_client_name,
+            ) = send_to_matching_clients(
                 activity,
                 profile,
                 caption,
@@ -836,7 +885,9 @@ def send_activity_fit(
                 matched_client_id,
                 matched_client_name,
             )
-        return True, matched_client_id, matched_client_name, start_dt, profile_name, sent_clientbot, sent_strava, sent_intervals
+            if not final_client_id and resolved_client_id:
+                final_client_id = resolved_client_id
+        return True, final_client_id, matched_client_name, start_dt, profile_name, sent_clientbot, sent_strava, sent_intervals, fit_path
     
     # For activities with FIT files, we need to download the file first
     temp_file = None
@@ -845,6 +896,16 @@ def send_activity_fit(
             temp_file = Path(tmp.name)
         client.download_fit_file(str(fit_id), temp_file, timeout=timeout)
         filename = f"activity_{activity.get('id')}.fit"
+        try:
+            dest_dir = schedule_repository.ensure_fit_files_dir() / account_id
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_file = dest_dir / f"{activity.get('id')}.fit"
+            if not dest_file.exists():
+                shutil.copy2(temp_file, dest_file)
+            if dest_file.exists():
+                fit_path = f"/fitfiles/{account_id}/{activity.get('id')}.fit"
+        except Exception:
+            LOGGER.exception("Failed to archive FIT file for %s %s", account_id, activity.get("id"))
         # Send to admins
         for chat_id in admin_ids:
             try:
@@ -862,7 +923,13 @@ def send_activity_fit(
         # Send to matching clients if clientbot token is available
         # Only send to matching clients AFTER we have downloaded the FIT file
         if krutilkavn_token:
-            sent_clientbot, sent_strava, sent_intervals = send_to_matching_clients(
+            (
+                sent_clientbot,
+                sent_strava,
+                sent_intervals,
+                resolved_client_id,
+                resolved_client_name,
+            ) = send_to_matching_clients(
                 activity,
                 profile,
                 caption,
@@ -873,6 +940,8 @@ def send_activity_fit(
                 matched_client_id,
                 matched_client_name,
             )
+            if not final_client_id and resolved_client_id:
+                final_client_id = resolved_client_id
     except Exception:
         LOGGER.exception("Failed to download/send FIT %s", fit_id)
         # Send error message to admins
@@ -907,7 +976,16 @@ def send_activity_fit(
                 temp_file.unlink()
             except OSError:
                 LOGGER.debug("Failed to remove temp file %s", temp_file)
-    return True, matched_client_id, matched_client_name, start_dt, profile_name, sent_clientbot, sent_strava, sent_intervals
+    return (
+        True,
+        final_client_id,
+        matched_client_name,
+        start_dt,
+        profile_name,
+        sent_clientbot,
+        sent_strava,
+        sent_intervals,
+    )
 
 
 def send_to_matching_clients(
@@ -920,11 +998,13 @@ def send_to_matching_clients(
     account_name: Optional[str] = None,
     scheduled_client_id: Optional[int] = None,
     scheduled_client_name: Optional[str] = None,
-) -> Tuple[bool, bool, bool]:
+) -> Tuple[bool, bool, bool, Optional[int], Optional[str]]:
     """Send activity information or file to clients whose names match the athlete profile."""
     target_clients: List[Dict[str, Any]] = []
     athlete_name = extract_athlete_name(profile)
     used_schedule = False
+    resolved_client_id: Optional[int] = None
+    resolved_client_name: Optional[str] = None
 
     if scheduled_client_id:
         try:
@@ -955,13 +1035,13 @@ def send_to_matching_clients(
     if not target_clients:
         if not athlete_name:
             LOGGER.debug("No athlete name and no scheduled client, skipping client matching")
-            return False, False, False
+            return False, False, False, None, None
 
         LOGGER.info("Searching for clients matching athlete name: %s", athlete_name)
         matching_clients = search_clients(athlete_name, limit=100)
         if not matching_clients:
             LOGGER.info("No clients found matching athlete name: %s", athlete_name)
-            return False, False, False
+            return False, False, False, None, None
 
         athlete_name_lower = athlete_name.lower()
         for client in matching_clients:
@@ -983,7 +1063,7 @@ def send_to_matching_clients(
 
         if not target_clients:
             LOGGER.info("No exact name matches found for athlete: %s", athlete_name)
-            return False, False, False
+            return False, False, False, None, None
         LOGGER.info("Found %d exact client matches for athlete: %s", len(target_clients), athlete_name)
     else:
         LOGGER.info(
@@ -998,6 +1078,16 @@ def send_to_matching_clients(
         secret=STRAVER_INTERNAL_SECRET,
         timeout=STRAVER_HTTP_TIMEOUT,
     )
+    if target_clients:
+        first = target_clients[0]
+        resolved_client_id = first.get("id")
+        resolved_client_name = (
+            first.get("full_name")
+            or " ".join(
+                part for part in [first.get("first_name"), first.get("last_name")] if part
+            ).strip()
+        ) or athlete_name
+
     links_cache: Dict[int, Dict[str, Any]] = {}
     user_ids_for_status: List[int] = []
     for client in target_clients:
@@ -1152,7 +1242,13 @@ def send_to_matching_clients(
     LOGGER.info("Uploaded activities to Intervals.icu for %d clients", intervals_uploaded_count)
     LOGGER.info("=== END OF CLIENT PROCESSING ===")
 
-    return sent_count > 0, strava_uploaded_count > 0, intervals_uploaded_count > 0
+    return (
+        sent_count > 0,
+        strava_uploaded_count > 0,
+        intervals_uploaded_count > 0,
+        resolved_client_id,
+        resolved_client_name,
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -1250,7 +1346,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         sent_clientbot,
                         sent_strava,
                         sent_intervals,
+                        fit_path,
                     ) = send_activity_fit(
+                        account_id=account_id,
                         client=client,
                         activity=activity,
                         account_name=account.get("name", account_id),
@@ -1261,6 +1359,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         timeout=args.timeout,
                     )
                     if processed:
+                        distance = activity.get("distance")
+                        elapsed_time = activity.get("elapsedTime")
+                        elevation_gain = activity.get("totalElevationGain")
+                        average_power = activity.get("averageWatts")
+                        average_cadence = activity.get("averageCadence")
+                        average_heartrate = activity.get("averageHeartrate")
                         record_seen_activity_id(
                             account_id,
                             str(activity.get("id")),
@@ -1271,6 +1375,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             sent_clientbot=sent_clientbot,
                             sent_strava=sent_strava,
                             sent_intervals=sent_intervals,
+                            fit_path=fit_path,
+                            distance=distance,
+                            elapsed_time=elapsed_time,
+                            elevation_gain=elevation_gain,
+                            average_power=average_power,
+                            average_cadence=average_cadence,
+                            average_heartrate=average_heartrate,
                         )
                     else:
                         LOGGER.info(

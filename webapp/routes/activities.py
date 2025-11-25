@@ -15,6 +15,9 @@ def _serialize_activity_id(activity_record: dict) -> dict:
     created_at = serialized.get("created_at")
     if hasattr(created_at, "isoformat"):
         serialized["created_at"] = created_at.isoformat()
+    start_time = serialized.get("start_time")
+    if hasattr(start_time, "isoformat"):
+        serialized["start_time"] = start_time.isoformat()
     return serialized
 
 
@@ -38,6 +41,18 @@ def _serialize_activity_id_enriched(activity_record: dict) -> dict:
             serialized[flag] = value.isoformat()
         elif value is not None:
             serialized[flag] = value
+    for metric in (
+        "distance",
+        "elapsed_time",
+        "elevation_gain",
+        "average_power",
+        "average_cadence",
+        "average_heartrate",
+        "fit_path",
+    ):
+        value = activity_record.get(metric)
+        if value is not None:
+            serialized[metric] = value
     return serialized
 
 
@@ -51,6 +66,7 @@ def api_get_activity_ids(
 ):
     """Get list of activity IDs."""
     try:
+        schedule_repository.ensure_activity_ids_table()
         if page < 1:
             page = 1
         if page_size < 1 or page_size > 100:
@@ -103,6 +119,35 @@ def api_get_activity_ids(
         ) from exc
 
 
+@router.get("/{account_id}/{activity_id}")
+def api_get_activity_id(
+    account_id: str,
+    activity_id: str,
+):
+    """Return a single activity record."""
+    try:
+        schedule_repository.ensure_activity_ids_table()
+        with schedule_repository.db_connection() as conn, schedule_repository.dict_cursor(conn) as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM seen_activity_ids
+                WHERE account_id = %s AND activity_id = %s
+                """,
+                (account_id, activity_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Activity not found")
+        return {"item": _serialize_activity_id_enriched(row)}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch activity"
+        ) from exc
+
+
 @router.delete("/{account_id}/{activity_id}")
 def api_delete_activity_id(
     account_id: str,
@@ -126,6 +171,7 @@ def api_delete_activity_id(
 def api_list_accounts():
     """Get list of all accounts that have activity IDs."""
     try:
+        schedule_repository.ensure_activity_ids_table()
         accounts = schedule_repository.list_all_accounts()
         return {"accounts": accounts}
     except Exception as exc:  # noqa: BLE001

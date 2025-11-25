@@ -21,3 +21,11 @@ History shows short, imperative commits such as `schedule fix` or `docker compos
 
 ## Security & Configuration Tips
 Do not commit filled `accounts.json`, `.env`, or bot tokens; rely on `accounts.sample.json` and document secrets in team vaults. Required settings include `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ADMIN_IDS`, the login bot credentials, and `DATABASE_URL` consumed by `repositories/db_utils.py`. The default Postgres in `docker-compose.yml` listens on `localhost:55432`; point tests to that instance or to a disposable container rather than production. Rotate tokens promptly if they leak in logs, and keep long-running services behind the `docker compose` stack so credentials only live in container env vars.
+
+## Activities Processing Logic (Bots + Web)
+- The table `seen_activity_ids` stores WattAttack activities with schedule match info (client_id, scheduled_name), profile name from WattAttack, delivery flags (sent_clientbot/strava/intervals), metrics (distance, elapsed_time, elevation_gain, average_power/cadence/heartrate), optional `fit_path`, timestamps, and start_time.
+- Matching: `resolve_scheduled_client` first tries to match by assigned stand (account.stand_ids) within a grace window; if the WattAttack athlete name differs, it falls back to a name-based lookup across reservations in the same time window (`find_reservation_by_client_name`). If matched by profile, we only set client_id; scheduled_name remains for true slot matches.
+- Notifier stores delivery flags and metrics via `record_seen_activity_id`; FIT files are archived under `data/fit_files/{account}/{activity}.fit` (served at `/fitfiles/...`) when available.
+- Activities API lives in `webapp/routes/activities.py`; detail endpoint `/api/activities/{account}/{activity}` returns all fields including metrics and fit_path.
+- Frontend: `/app/activities` list with sorting, bulk delete, flags, and links to detail; detail page shows meta, metrics, status flags, client link (when matched), and FIT download link if archived.
+- Sync: `/app/sync` triggers background sync (`/api/sync/activities`) that walks all WattAttack accounts, upserts metadata, matches schedule (with name fallback), and downloads FITs if missing. Status polled via `/api/sync/status`, log tail capped to 400 lines; progress and current account are shown in UI.

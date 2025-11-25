@@ -4,11 +4,14 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from pathlib import Path
+import os
 
 from .db_utils import db_connection, dict_cursor
 from . import trainers_repository, instructors_repository
 
 LOGGER = logging.getLogger(__name__)
+FIT_FILES_DIR = Path(os.environ.get("FIT_FILES_DIR", "data/fit_files")).resolve()
 
 
 DEFAULT_TEMPLATE_SLOTS: Tuple[Tuple[str, str, str, Optional[str]], ...] = (
@@ -1150,6 +1153,12 @@ def update_workout_notification_settings(reminder_hours: int) -> bool:
     return True
 
 
+def ensure_fit_files_dir() -> Path:
+    """Ensure directory for archived FIT files exists."""
+    FIT_FILES_DIR.mkdir(parents=True, exist_ok=True)
+    return FIT_FILES_DIR
+
+
 def ensure_activity_ids_table() -> None:
     """Create table to track seen activity IDs."""
     with db_connection() as conn, dict_cursor(conn) as cur:
@@ -1166,6 +1175,13 @@ def ensure_activity_ids_table() -> None:
                 sent_clientbot BOOLEAN DEFAULT FALSE,
                 sent_strava BOOLEAN DEFAULT FALSE,
                 sent_intervals BOOLEAN DEFAULT FALSE,
+                distance DOUBLE PRECISION,
+                elapsed_time INTEGER,
+                elevation_gain DOUBLE PRECISION,
+                average_power DOUBLE PRECISION,
+                average_cadence DOUBLE PRECISION,
+                average_heartrate DOUBLE PRECISION,
+                fit_path TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE(account_id, activity_id)
             )
@@ -1211,6 +1227,20 @@ def ensure_activity_ids_table() -> None:
             cur.execute(
                 "ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS sent_intervals BOOLEAN DEFAULT FALSE"
             )
+        if "distance" not in existing:
+            cur.execute("ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS distance DOUBLE PRECISION")
+        if "elapsed_time" not in existing:
+            cur.execute("ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS elapsed_time INTEGER")
+        if "elevation_gain" not in existing:
+            cur.execute("ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS elevation_gain DOUBLE PRECISION")
+        if "average_power" not in existing:
+            cur.execute("ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS average_power DOUBLE PRECISION")
+        if "average_cadence" not in existing:
+            cur.execute("ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS average_cadence DOUBLE PRECISION")
+        if "average_heartrate" not in existing:
+            cur.execute("ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS average_heartrate DOUBLE PRECISION")
+        if "fit_path" not in existing:
+            cur.execute("ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS fit_path TEXT")
         conn.commit()
 
 
@@ -1225,6 +1255,13 @@ def record_seen_activity_id(
     sent_clientbot: bool = False,
     sent_strava: bool = False,
     sent_intervals: bool = False,
+    distance: Optional[float] = None,
+    elapsed_time: Optional[int] = None,
+    elevation_gain: Optional[float] = None,
+    average_power: Optional[float] = None,
+    average_cadence: Optional[float] = None,
+    average_heartrate: Optional[float] = None,
+    fit_path: Optional[str] = None,
 ) -> bool:
     """Record that an activity ID has been seen for an account, with optional ownership metadata."""
     ensure_activity_ids_table()
@@ -1241,7 +1278,14 @@ def record_seen_activity_id(
                     profile_name,
                     sent_clientbot,
                     sent_strava,
-                    sent_intervals
+                    sent_intervals,
+                    distance,
+                    elapsed_time,
+                    elevation_gain,
+                    average_power,
+                    average_cadence,
+                    average_heartrate,
+                    fit_path
                 )
                 VALUES (
                     %(account_id)s,
@@ -1252,7 +1296,14 @@ def record_seen_activity_id(
                     %(profile_name)s,
                     %(sent_clientbot)s,
                     %(sent_strava)s,
-                    %(sent_intervals)s
+                    %(sent_intervals)s,
+                    %(distance)s,
+                    %(elapsed_time)s,
+                    %(elevation_gain)s,
+                    %(average_power)s,
+                    %(average_cadence)s,
+                    %(average_heartrate)s,
+                    %(fit_path)s
                 )
                 ON CONFLICT (account_id, activity_id) DO UPDATE
                 SET client_id = COALESCE(EXCLUDED.client_id, seen_activity_ids.client_id),
@@ -1261,7 +1312,14 @@ def record_seen_activity_id(
                     profile_name = COALESCE(EXCLUDED.profile_name, seen_activity_ids.profile_name),
                     sent_clientbot = seen_activity_ids.sent_clientbot OR COALESCE(EXCLUDED.sent_clientbot, FALSE),
                     sent_strava = seen_activity_ids.sent_strava OR COALESCE(EXCLUDED.sent_strava, FALSE),
-                    sent_intervals = seen_activity_ids.sent_intervals OR COALESCE(EXCLUDED.sent_intervals, FALSE)
+                    sent_intervals = seen_activity_ids.sent_intervals OR COALESCE(EXCLUDED.sent_intervals, FALSE),
+                    distance = COALESCE(EXCLUDED.distance, seen_activity_ids.distance),
+                    elapsed_time = COALESCE(EXCLUDED.elapsed_time, seen_activity_ids.elapsed_time),
+                    elevation_gain = COALESCE(EXCLUDED.elevation_gain, seen_activity_ids.elevation_gain),
+                    average_power = COALESCE(EXCLUDED.average_power, seen_activity_ids.average_power),
+                    average_cadence = COALESCE(EXCLUDED.average_cadence, seen_activity_ids.average_cadence),
+                    average_heartrate = COALESCE(EXCLUDED.average_heartrate, seen_activity_ids.average_heartrate),
+                    fit_path = COALESCE(EXCLUDED.fit_path, seen_activity_ids.fit_path)
                 RETURNING id
                 """,
                 {
@@ -1274,6 +1332,13 @@ def record_seen_activity_id(
                     "sent_clientbot": sent_clientbot,
                     "sent_strava": sent_strava,
                     "sent_intervals": sent_intervals,
+                    "distance": distance,
+                    "elapsed_time": elapsed_time,
+                    "elevation_gain": elevation_gain,
+                    "average_power": average_power,
+                    "average_cadence": average_cadence,
+                    "average_heartrate": average_heartrate,
+                    "fit_path": fit_path,
                 },
             )
             row = cur.fetchone()
@@ -1392,6 +1457,99 @@ def find_reservation_for_activity(
             slot_end = slot_end.replace(tzinfo=target_dt.tzinfo)
 
         if slot_start - grace_delta <= target_dt <= slot_end + grace_delta:
+            distance = abs(target_dt - slot_start)
+            if distance < best_distance:
+                best_distance = distance
+                matched_row = row
+
+    return matched_row
+
+
+def find_reservation_by_client_name(
+    target_dt: datetime,
+    athlete_name: str,
+    *,
+    grace_minutes: int = 30,
+) -> Optional[Dict]:
+    """
+    Find a reservation near target_dt where client name matches athlete_name.
+
+    Used when the athlete on WattAttack differs from the scheduled stand to
+    catch swaps inside the same time window.
+    """
+
+    if not athlete_name:
+        return None
+
+    ensure_schedule_tables()
+    target_date = target_dt.date()
+    grace_delta = timedelta(minutes=max(0, grace_minutes))
+    athlete_lower = athlete_name.lower().strip()
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                r.*,
+                s.slot_date,
+                s.start_time,
+                s.end_time,
+                s.label,
+                s.session_kind,
+                t.code AS stand_code,
+                t.display_name AS stand_display_name,
+                t.title AS stand_title,
+                c.first_name AS client_first_name,
+                c.last_name AS client_last_name,
+                c.full_name AS client_full_name
+            FROM schedule_reservations AS r
+            JOIN schedule_slots AS s ON s.id = r.slot_id
+            LEFT JOIN trainers AS t ON t.id = r.stand_id
+            LEFT JOIN clients AS c ON c.id = r.client_id
+            WHERE r.client_id IS NOT NULL
+              AND r.status = 'booked'
+              AND s.slot_date = %(target_date)s
+            """,
+            {"target_date": target_date},
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        return None
+
+    matched_row: Optional[Dict] = None
+    best_distance = timedelta.max
+
+    for row in rows:
+        start_time: Optional[time] = row.get("start_time")
+        end_time: Optional[time] = row.get("end_time")
+
+        slot_start = datetime.combine(
+            row.get("slot_date") or target_date,
+            start_time or time.min,
+        )
+        slot_end = datetime.combine(
+            row.get("slot_date") or target_date,
+            end_time or time.max,
+        )
+        if target_dt.tzinfo:
+            slot_start = slot_start.replace(tzinfo=target_dt.tzinfo)
+            slot_end = slot_end.replace(tzinfo=target_dt.tzinfo)
+
+        if not (slot_start - grace_delta <= target_dt <= slot_end + grace_delta):
+            continue
+
+        candidate_names = [
+            row.get("client_full_name"),
+            " ".join(
+                part
+                for part in [row.get("client_first_name"), row.get("client_last_name")]
+                if part
+            ).strip(),
+            (row.get("client_first_name") or "").strip(),
+            (row.get("client_last_name") or "").strip(),
+        ]
+        if any(name and name.lower() == athlete_lower for name in candidate_names):
             distance = abs(target_dt - slot_start)
             if distance < best_distance:
                 best_distance = distance

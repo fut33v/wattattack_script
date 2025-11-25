@@ -21,6 +21,8 @@ import NotificationSettingsPage from "./pages/NotificationSettingsPage";
 import MessagingPage from "./pages/MessagingPage";
 import MessagesPage from "./pages/MessagesPage";
 import ActivitiesPage from "./pages/ActivitiesPage";
+import ActivityDetailPage from "./pages/ActivityDetailPage";
+import SyncPage from "./pages/SyncPage";
 import RacesPage from "./pages/RacesPage";
 import RaceSummaryPage from "./pages/RaceSummaryPage";
 import SlotSeatingPage from "./pages/SlotSeatingPage";
@@ -68,6 +70,7 @@ export default function App() {
           <Route path="/schedule/manage" element={<SchedulePage />} />
           <Route path="/schedule/slot/:id" element={<SlotSeatingPage />} />
           <Route path="/schedule/notifications" element={<NotificationsPage />} />
+          <Route path="/activities/:accountId/:activityId" element={<ActivityDetailPage />} />
           <Route path="/activities" element={<ActivitiesPage />} />
           <Route path="/races" element={<RacesPage />} />
           <Route path="/race/summary/:id" element={<RaceSummaryPage />} />
@@ -78,6 +81,7 @@ export default function App() {
           <Route path="/bikes" element={<BikesPage />} />
           <Route path="/trainers" element={<TrainersPage />} />
           <Route path="/links" element={<ClientLinksPage />} />
+          <Route path="/sync" element={<SyncPage />} />
           <Route path="/admins" element={<AdminsPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

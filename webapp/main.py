@@ -40,8 +40,8 @@ from repositories import (
     layout_repository,
     message_repository,
     race_repository,
-    schedule_repository,
     trainers_repository,
+    schedule_repository,
 )
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import PlainTextResponse
@@ -60,6 +60,7 @@ from .routes.messaging import ensure_uploads_dir, router as messaging_router, UP
 from .routes.vk_client_links import router as vk_client_links_router
 from .routes.intervals_links import router as intervals_links_router
 from .routes.races import router as races_router, _format_race_date_label
+from .routes.sync import router as sync_router
 from .utils.parsing import (
     parse_iso_date as _parse_iso_date,
     parse_iso_time as _parse_iso_time,
@@ -111,6 +112,7 @@ def _store_uploaded_image(image_upload: UploadFile, *, request: Request, image_b
 
 api = APIRouter(prefix="/api", tags=["api"])
 api.include_router(activities_router)
+api.include_router(sync_router)
 api.include_router(vk_client_links_router, dependencies=[Depends(require_admin)])
 api.include_router(intervals_links_router, dependencies=[Depends(require_admin)])
 api.include_router(races_router)
@@ -1737,17 +1739,6 @@ def strava_authorize(state: str = None, user=Depends(require_admin)):
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to generate Strava authorization URL") from exc
 
 
-@api.get("/activities/accounts")
-def api_list_accounts(user=Depends(require_admin)):
-    """Get list of all accounts that have activity IDs."""
-    try:
-        accounts = schedule_repository.list_all_accounts()
-        return {"accounts": accounts}
-    except Exception as exc:
-        log.exception("Failed to fetch accounts")
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch accounts") from exc
-
-
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -2108,6 +2099,12 @@ def create_app() -> FastAPI:
 
     if MESSAGING_UPLOADS_DIR.exists():
         app.mount("/uploads", StaticFiles(directory=str(MESSAGING_UPLOADS_DIR), html=False), name="uploads")
+    try:
+        fit_dir = schedule_repository.ensure_fit_files_dir()
+        if fit_dir.exists():
+            app.mount("/fitfiles", StaticFiles(directory=str(fit_dir), html=False), name="fitfiles")
+    except Exception:
+        log.exception("Failed to mount FIT files directory")
 
     index_file = dist_root / "index.html"
 

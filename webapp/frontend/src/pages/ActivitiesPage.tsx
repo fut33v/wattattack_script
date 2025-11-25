@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import dayjs from "dayjs";
 
@@ -201,7 +202,13 @@ export default function ActivitiesPage() {
               {
                 key: "activity_id",
                 title: "Activity ID",
-                render: (item) => item.activity_id
+                render: (item) => (
+                  <Link
+                    to={`/activities/${encodeURIComponent(item.account_id)}/${encodeURIComponent(item.activity_id)}`}
+                  >
+                    {item.activity_id}
+                  </Link>
+                )
               },
               {
                 key: "start_time",

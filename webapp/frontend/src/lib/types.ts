@@ -255,13 +255,20 @@ export interface ActivityIdRecord {
   account_id: string;
   activity_id: string;
   created_at: string;
+  start_time?: string | null;
   client_id?: number | null;
   scheduled_name?: string | null;
-  start_time?: string | null;
   profile_name?: string | null;
   sent_clientbot?: boolean | null;
   sent_strava?: boolean | null;
   sent_intervals?: boolean | null;
+  distance?: number | null;
+  elapsed_time?: number | null;
+  elevation_gain?: number | null;
+  average_power?: number | null;
+  average_cadence?: number | null;
+  average_heartrate?: number | null;
+  fit_path?: string | null;
 }
 
 export interface ActivityIdListResponse {
@@ -271,6 +278,10 @@ export interface ActivityIdListResponse {
 
 export interface AccountListResponse {
   accounts: string[];
+}
+
+export interface ActivityDetailResponse {
+  item: ActivityIdRecord;
 }
 
 export interface RaceCluster {
