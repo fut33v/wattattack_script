@@ -192,6 +192,13 @@ export interface ScheduleStandSummary {
   code?: string | null;
   display_name?: string | null;
   title?: string | null;
+  bike_id?: number | null;
+  bike_title?: string | null;
+  bike_owner?: string | null;
+  bike_size_label?: string | null;
+  bike_frame_size_cm?: string | null;
+  bike_height_min_cm?: number | null;
+  bike_height_max_cm?: number | null;
 }
 
 export interface ScheduleWeekDetailResponse {
@@ -206,6 +213,37 @@ export interface ScheduleSlotDetailResponse {
   slot: ScheduleSlot;
   stands: ScheduleStandSummary[];
   instructors: InstructorRow[];
+}
+
+export interface SlotCopyTarget {
+  id: number;
+  week_id: number;
+  week_start_date: string;
+  slot_date: string;
+  start_time: string;
+  end_time: string;
+  label?: string | null;
+  session_kind: string;
+  instructorId?: number | null;
+  instructorName?: string | null;
+  is_cancelled?: boolean;
+}
+
+export interface SlotCopyTargetsResponse {
+  items: SlotCopyTarget[];
+}
+
+export interface SlotCopyResult {
+  target_slot_id: number;
+  week_id?: number | null;
+  updated: number;
+  cleared: number;
+  missing_stands: number[];
+}
+
+export interface SlotCopyResponse {
+  results: SlotCopyResult[];
+  updated_slots: ScheduleSlot[];
 }
 
 export interface InstructorRow {

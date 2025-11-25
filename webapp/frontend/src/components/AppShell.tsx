@@ -17,30 +17,31 @@ interface NavLinkConfig {
 }
 
 const PRIMARY_NAV_LINKS: readonly NavLinkConfig[] = [
-  { to: "/dashboard", label: "Панель", adminOnly: false },
-  { to: "/clients", label: "Клиенты", adminOnly: false },
-  { to: "/schedule/manage", label: "Расписание", adminOnly: true },
-  { to: "/races", label: "Гонки", adminOnly: true },
-  { to: "/schedule/settings", label: "Настройки", adminOnly: true },
-  { to: "/instructors", label: "Инструкторы", adminOnly: true },
-  { to: "/admins", label: "Админы", adminOnly: true }
+  { to: "/dashboard", label: "🏠 Панель", adminOnly: false },
+  { to: "/clients", label: "👥 Клиенты", adminOnly: false },
+  { to: "/schedule", label: "📅 Расписание", adminOnly: true },
+  { to: "/schedule/manage", label: "🗂 Недели", adminOnly: true },
+  { to: "/races", label: "🏁 Гонки", adminOnly: true },
+  { to: "/schedule/settings", label: "⚙️ Настройки", adminOnly: true },
+  { to: "/instructors", label: "🧑‍🏫 Инструкторы", adminOnly: true },
+  { to: "/admins", label: "🔑 Админы", adminOnly: true }
 ] as const;
 
 const MESSAGE_NAV_LINKS: readonly NavLinkConfig[] = [
-  { to: "/messaging", label: "Рассылка", adminOnly: true },
-  { to: "/messages", label: "Сообщения", adminOnly: true }
+  { to: "/messaging", label: "📨 Рассылка", adminOnly: true },
+  { to: "/messages", label: "✉️ Сообщения", adminOnly: true }
 ] as const;
 
 const SERVICE_NAV_LINKS: readonly NavLinkConfig[] = [
-  { to: "/schedule/notifications", label: "Уведомления", adminOnly: true },
-  { to: "/activities", label: "Активности", adminOnly: true },
-  { to: "/sync", label: "Синхронизация", adminOnly: true },
-  { to: "/links", label: "Связки", adminOnly: true }
+  { to: "/schedule/notifications", label: "🔔 Уведомления", adminOnly: true },
+  { to: "/activities", label: "🚴 Активности", adminOnly: true },
+  { to: "/sync", label: "🔄 Синхронизация", adminOnly: true },
+  { to: "/links", label: "🧩 Связки", adminOnly: true }
 ] as const;
 
 const TECH_NAV_LINKS: readonly NavLinkConfig[] = [
-  { to: "/bikes", label: "Велосипеды", adminOnly: false },
-  { to: "/trainers", label: "Тренажеры", adminOnly: false }
+  { to: "/bikes", label: "🚲 Велосипеды", adminOnly: false },
+  { to: "/trainers", label: "💺 Тренажеры", adminOnly: false }
 ] as const;
 
 export default function AppShell({ session, children, hideSidebar = false }: AppShellProps) {

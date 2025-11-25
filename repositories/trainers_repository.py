@@ -49,7 +49,11 @@ def get_trainer(trainer_id: int) -> Dict | None:
                 t.notes,
                 bl.bike_id,
                 b.title AS bike_title,
-                b.owner AS bike_owner
+                b.owner AS bike_owner,
+                b.size_label AS bike_size_label,
+                b.frame_size_cm AS bike_frame_size_cm,
+                b.height_min_cm AS bike_height_min_cm,
+                b.height_max_cm AS bike_height_max_cm
             FROM trainers AS t
             LEFT JOIN bike_layout AS bl ON bl.stand_id = t.id
             LEFT JOIN bikes AS b ON b.id = bl.bike_id
@@ -136,7 +140,11 @@ def list_trainers(limit: int | None = None, offset: int = 0) -> List[Dict]:
         "t.notes, "
         "bl.bike_id, "
         "b.title AS bike_title, "
-        "b.owner AS bike_owner "
+        "b.owner AS bike_owner, "
+        "b.size_label AS bike_size_label, "
+        "b.frame_size_cm AS bike_frame_size_cm, "
+        "b.height_min_cm AS bike_height_min_cm, "
+        "b.height_max_cm AS bike_height_max_cm "
         "FROM trainers AS t "
         "LEFT JOIN bike_layout AS bl ON bl.stand_id = t.id "
         "LEFT JOIN bikes AS b ON b.id = bl.bike_id "

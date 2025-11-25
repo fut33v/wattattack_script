@@ -737,6 +737,125 @@ def copy_slots_from_week(source_week_id: int, target_week_id: int) -> Tuple[int,
     return created_slots, copied_placeholders
 
 
+def list_future_slots_for_copy(
+    slot_date: date,
+    start_time: time,
+    exclude_slot_id: Optional[int] = None,
+) -> List[Dict]:
+    """Return slots on or after the given datetime (excluding the current slot)."""
+
+    ensure_schedule_tables()
+    params: List[object] = [slot_date, slot_date, start_time]
+    exclude_clause = ""
+    if exclude_slot_id is not None:
+        exclude_clause = " AND s.id <> %s"
+        params.append(exclude_slot_id)
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            f"""
+            SELECT s.*, w.week_start_date, instr.full_name AS instructor_name
+            FROM schedule_slots AS s
+            JOIN schedule_weeks AS w ON w.id = s.week_id
+            LEFT JOIN schedule_instructors AS instr ON instr.id = s.instructor_id
+            WHERE (s.slot_date > %s OR (s.slot_date = %s AND s.start_time >= %s))
+            {exclude_clause}
+            ORDER BY s.slot_date, s.start_time, s.id
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+    return rows
+
+
+def copy_slot_seating(source_slot_id: int, target_slot_id: int) -> Dict[str, Any]:
+    """Copy seating (stand assignments) from one slot to another."""
+
+    ensure_schedule_tables()
+    if source_slot_id == target_slot_id:
+        raise ValueError("Source and target slots must differ")
+
+    source_slot = get_slot(source_slot_id)
+    target_slot = get_slot(target_slot_id)
+    if not source_slot or not target_slot:
+        raise ValueError("Source or target slot not found")
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        _ensure_slot_capacity(conn, target_slot_id)
+
+        cur.execute("SELECT * FROM schedule_reservations WHERE slot_id = %s", (source_slot_id,))
+        source_reservations = cur.fetchall()
+        cur.execute("SELECT * FROM schedule_reservations WHERE slot_id = %s", (target_slot_id,))
+        target_reservations = cur.fetchall()
+
+        source_map = {
+            res.get("stand_id"): res for res in source_reservations if res.get("stand_id") is not None
+        }
+        target_map = {
+            res.get("stand_id"): res for res in target_reservations if res.get("stand_id") is not None
+        }
+
+        updated = 0
+        cleared = 0
+        missing_stands: List[int] = []
+
+        for stand_id, target_reservation in target_map.items():
+            source_reservation = source_map.get(stand_id)
+            if source_reservation:
+                cur.execute(
+                    """
+                    UPDATE schedule_reservations
+                    SET client_id = %s,
+                        client_name = %s,
+                        status = %s,
+                        notes = %s,
+                        source = COALESCE(%s, 'copy'),
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (
+                        source_reservation.get("client_id"),
+                        source_reservation.get("client_name"),
+                        source_reservation.get("status"),
+                        source_reservation.get("notes"),
+                        source_reservation.get("source"),
+                        target_reservation["id"],
+                    ),
+                )
+                cur.fetchone()
+                updated += 1
+            else:
+                cur.execute(
+                    """
+                    UPDATE schedule_reservations
+                    SET client_id = NULL,
+                        client_name = NULL,
+                        status = 'available',
+                        notes = NULL,
+                        source = 'copy',
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (target_reservation["id"],),
+                )
+                cur.fetchone()
+                cleared += 1
+
+        for stand_id in source_map.keys():
+            if stand_id not in target_map and stand_id is not None:
+                missing_stands.append(int(stand_id))
+
+        conn.commit()
+
+    return {
+        "updated": updated,
+        "cleared": cleared,
+        "missing_stands": missing_stands,
+    }
+
+
 def reservations_for_slots(slot_ids: Iterable[int]) -> Dict[int, List[Dict]]:
     """Return reservations grouped by slot id."""
 

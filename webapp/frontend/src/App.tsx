@@ -26,6 +26,7 @@ import SyncPage from "./pages/SyncPage";
 import RacesPage from "./pages/RacesPage";
 import RaceSummaryPage from "./pages/RaceSummaryPage";
 import SlotSeatingPage from "./pages/SlotSeatingPage";
+import ScheduleViewPage from "./pages/ScheduleViewPage";
 
 import "./styles/layout.css";
 import "./styles/messaging.css";
@@ -67,6 +68,8 @@ export default function App() {
           <Route path="/clients" element={<ClientsPage />} />
           <Route path="/clients/new" element={<ClientCreatePage />} />
           <Route path="/clients/:id" element={<ClientEditPage />} />
+          <Route path="/schedule" element={<ScheduleViewPage />} />
+          <Route path="/schedule/:slug" element={<ScheduleViewPage />} />
           <Route path="/schedule/manage" element={<SchedulePage />} />
           <Route path="/schedule/slot/:id" element={<SlotSeatingPage />} />
           <Route path="/schedule/notifications" element={<NotificationsPage />} />
