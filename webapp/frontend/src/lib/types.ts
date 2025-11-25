@@ -284,6 +284,30 @@ export interface ActivityDetailResponse {
   item: ActivityIdRecord;
 }
 
+export interface ClientActivitiesStats {
+  count: number;
+  distance: number;
+  elevation_gain: number;
+  elapsed_time: number;
+}
+
+export interface ClientActivityItem {
+  account_id: string;
+  activity_id: string;
+  start_time?: string | null;
+  scheduled_name?: string | null;
+  profile_name?: string | null;
+  distance?: number | null;
+  elapsed_time?: number | null;
+  elevation_gain?: number | null;
+  created_at?: string | null;
+}
+
+export interface ClientActivitiesResponse {
+  items: ClientActivityItem[];
+  stats: ClientActivitiesStats;
+}
+
 export interface RaceCluster {
   code?: string | null;
   label: string;

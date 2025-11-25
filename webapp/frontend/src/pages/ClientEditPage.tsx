@@ -5,7 +5,13 @@ import dayjs from "dayjs";
 
 import Panel from "../components/Panel";
 import { apiFetch, ApiError } from "../lib/api";
-import type { BikeListResponse, BikeRow, ClientRow } from "../lib/types";
+import type {
+  BikeListResponse,
+  BikeRow,
+  ClientRow,
+  ClientActivitiesResponse,
+  ClientActivityItem,
+} from "../lib/types";
 import StateScreen from "../components/StateScreen";
 
 const PEDAL_OPTIONS = [
@@ -33,6 +39,26 @@ function formatGender(value: string | null | undefined): string {
   return GENDER_LABELS[key] ?? value;
 }
 
+function formatDistance(meters?: number | null): string {
+  if (meters === undefined || meters === null) return "—";
+  const km = meters / 1000;
+  return `${km.toFixed(1)} км`;
+}
+
+function formatElevation(meters?: number | null): string {
+  if (meters === undefined || meters === null) return "—";
+  return `${Math.round(meters)} м`;
+}
+
+function formatDuration(seconds?: number | null): string {
+  if (seconds === undefined || seconds === null) return "—";
+  const total = Number(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (hours > 0) return `${hours}ч ${minutes.toString().padStart(2, "0")}м`;
+  return `${minutes}м`;
+}
+
 interface ClientResponse {
   item: ClientRow;
 }
@@ -48,6 +74,12 @@ export default function ClientEditPage() {
   const clientQuery = useQuery<ClientResponse>({
     queryKey: ["client", clientId],
     queryFn: () => apiFetch<ClientResponse>(`/api/clients/${clientId}`),
+    enabled: isIdValid
+  });
+
+  const activitiesQuery = useQuery<ClientActivitiesResponse>({
+    queryKey: ["client-activities", clientId],
+    queryFn: () => apiFetch<ClientActivitiesResponse>(`/api/clients/${clientId}/activities`),
     enabled: isIdValid
   });
 
@@ -250,6 +282,74 @@ export default function ClientEditPage() {
           </form>
         </section>
       </div>
+
+      <section className="detail-card">
+        <div className="detail-card__header">
+          <h3>Активности WattAttack</h3>
+          {activitiesQuery.isLoading && <span className="meta-hint">Загружаем…</span>}
+          {activitiesQuery.isError && <span className="form-error">Не удалось загрузить активности.</span>}
+        </div>
+        {activitiesQuery.data?.stats && (
+          <div className="activity-stats-grid">
+            <div className="stat-card">
+              <div className="stat-label">Дистанция</div>
+              <div className="stat-value">{formatDistance(activitiesQuery.data.stats.distance)}</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">Набор высоты</div>
+              <div className="stat-value">{formatElevation(activitiesQuery.data.stats.elevation_gain)}</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">Время</div>
+              <div className="stat-value">{formatDuration(activitiesQuery.data.stats.elapsed_time)}</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">Количество</div>
+              <div className="stat-value">{activitiesQuery.data.stats.count}</div>
+            </div>
+          </div>
+        )}
+        <div className="table-container compact-table">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Account</th>
+                <th>Activity</th>
+                <th>Дата</th>
+                <th>Имя по расписанию</th>
+                <th>Имя в WattAttack</th>
+                <th>Дистанция</th>
+                <th>Набор</th>
+                <th>Время</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(activitiesQuery.data?.items ?? []).length === 0 ? (
+                <tr>
+                  <td colSpan={8}>{activitiesQuery.isLoading ? "Загрузка…" : "Активностей пока нет."}</td>
+                </tr>
+              ) : (
+                (activitiesQuery.data?.items ?? []).map((item: ClientActivityItem) => (
+                  <tr key={`${item.account_id}-${item.activity_id}`}>
+                    <td>{item.account_id}</td>
+                    <td>
+                      <Link to={`/activities/${encodeURIComponent(item.account_id)}/${encodeURIComponent(item.activity_id)}`}>
+                        {item.activity_id}
+                      </Link>
+                    </td>
+                    <td>{item.start_time ? dayjs(item.start_time).format("DD.MM.YYYY HH:mm") : "—"}</td>
+                    <td>{item.scheduled_name || "—"}</td>
+                    <td>{item.profile_name || "—"}</td>
+                    <td>{formatDistance(item.distance)}</td>
+                    <td>{formatElevation(item.elevation_gain)}</td>
+                    <td>{formatDuration(item.elapsed_time)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </Panel>
   );
 }

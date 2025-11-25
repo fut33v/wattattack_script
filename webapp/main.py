@@ -489,6 +489,65 @@ def api_get_client(client_id: int, user=Depends(require_user)):
     return {"item": jsonable_encoder(record)}
 
 
+def _serialize_activity_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    serialized = dict(row)
+    for ts_field in ("created_at", "start_time"):
+        value = serialized.get(ts_field)
+        if hasattr(value, "isoformat"):
+            serialized[ts_field] = value.isoformat()
+    return serialized
+
+
+@api.get("/clients/{client_id}/activities")
+def api_get_client_activities(client_id: int, user=Depends(require_user)):
+    """Return activities linked to the given client with basic stats."""
+    schedule_repository.ensure_activity_ids_table()
+    with schedule_repository.db_connection() as conn, schedule_repository.dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                account_id,
+                activity_id,
+                start_time,
+                scheduled_name,
+                profile_name,
+                distance,
+                elapsed_time,
+                elevation_gain,
+                created_at
+            FROM seen_activity_ids
+            WHERE client_id = %s
+            ORDER BY start_time DESC NULLS LAST, created_at DESC
+            LIMIT 200
+            """,
+            (client_id,),
+        )
+        rows = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS cnt,
+                COALESCE(SUM(distance), 0) AS distance,
+                COALESCE(SUM(elevation_gain), 0) AS elevation_gain,
+                COALESCE(SUM(elapsed_time), 0) AS elapsed_time
+            FROM seen_activity_ids
+            WHERE client_id = %s
+            """,
+            (client_id,),
+        )
+        stats_row = cur.fetchone() or {}
+
+    items = [_serialize_activity_row(row) for row in rows]
+    stats = {
+        "count": stats_row.get("cnt", 0),
+        "distance": stats_row.get("distance", 0) or 0,
+        "elevation_gain": stats_row.get("elevation_gain", 0) or 0,
+        "elapsed_time": stats_row.get("elapsed_time", 0) or 0,
+    }
+    return {"items": items, "stats": stats}
+
+
 @api.patch("/clients/{client_id}")
 async def api_update_client(client_id: int, request: Request, user=Depends(require_admin)):
     payload = await request.json()
