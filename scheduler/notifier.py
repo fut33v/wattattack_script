@@ -9,7 +9,7 @@ import os
 import tempfile
 from datetime import datetime, timedelta, date, time, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 from zoneinfo import ZoneInfo
@@ -36,7 +36,14 @@ from repositories.client_link_repository import get_link_by_client
 from repositories.client_repository import get_client, search_clients
 
 # Import the send_to_matching_clients function from notifier_client
-from scheduler.notifier_client import send_to_matching_clients
+from scheduler.notifier_client import (
+    FIT_WAIT_SECONDS,
+    MATCH_GRACE_MINUTES,
+    parse_activity_start_dt,
+    resolve_scheduled_client,
+    send_to_matching_clients,
+    should_wait_for_fit_file,
+)
 from scheduler import intervals_plan
 from scheduler import intervals_upload
 from wattattack_profiles import apply_client_profile as apply_wattattack_profile
@@ -314,6 +321,7 @@ def format_activity_meta(
     activity: Dict[str, Any],
     account_name: Optional[str],
     profile: Optional[Dict[str, Any]],
+    scheduled_name: Optional[str] = None,
 ) -> str:
     name = activity.get("mapNameRu") or activity.get("name") or "Без названия"
     date_str = format_start_time(activity)
@@ -332,10 +340,14 @@ def format_activity_meta(
     if account_name:
         lines.append(f"<b>{account_name}</b>")
     lines.append(f"<b>{name}</b>")
+    athlete_name = None
+    if scheduled_name:
+        athlete_name = scheduled_name
+        lines.append(f"Атлет: {scheduled_name} (по расписанию)")
     if profile:
-        athlete_name = extract_athlete_name(profile)
-        if athlete_name:
-            lines.append(f"Атлет: {athlete_name}")
+        profile_name = extract_athlete_name(profile)
+        if profile_name and profile_name != athlete_name:
+            lines.append(f"Атлет (профиль): {profile_name}")
         gender = extract_athlete_field(profile, "gender")
         if gender:
             lines.append(f"Пол: {'М' if gender.upper().startswith('M') else 'Ж'}")
@@ -792,18 +804,34 @@ def send_activity_fit(
     client: WattAttackClient,
     activity: Dict[str, Any],
     account_name: str,
+    account: Dict[str, Any],
     profile: Dict[str, Any],
     token: str,
     admin_ids: Sequence[int],
     timeout: float,
-) -> None:
+) -> Tuple[bool, Optional[int], Optional[str], Optional[datetime], Optional[str]]:
     fit_id = activity.get("fitFileId")
-    caption = format_activity_meta(activity, account_name, profile)
+    scheduled_match = resolve_scheduled_client(account, activity)
+    matched_client_id = scheduled_match.get("client_id") if scheduled_match else None
+    matched_client_name = scheduled_match.get("client_name") if scheduled_match else None
+    start_dt = parse_activity_start_dt(activity)
+    profile_name = extract_athlete_name(profile) if profile else None
+    caption = format_activity_meta(activity, account_name, profile, matched_client_name)
     
     # Get clientbot token for sending to clients
     krutilkavn_token = os.environ.get(KRUTILKAVN_BOT_TOKEN_ENV)
     
     if not fit_id:
+        should_wait, age_seconds = should_wait_for_fit_file(activity)
+        if should_wait:
+            LOGGER.info(
+                "Activity %s has no FIT yet (age=%.0fs < %ss), will retry later",
+                activity.get("id"),
+                age_seconds or 0,
+                FIT_WAIT_SECONDS,
+            )
+            return False, None, None, start_dt, profile_name
+
         LOGGER.info("Activity %s has no FIT file", activity.get("id"))
         # Send to admins
         for chat_id in admin_ids:
@@ -819,8 +847,18 @@ def send_activity_fit(
         
         # Send to matching clients if clientbot token is available
         if krutilkavn_token:
-            send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, None, None)
-        return
+            send_to_matching_clients(
+                activity,
+                profile,
+                caption,
+                krutilkavn_token,
+                timeout,
+                None,
+                account_name,
+                matched_client_id,
+                matched_client_name,
+            )
+        return True, matched_client_id, matched_client_name, start_dt, profile_name
 
     temp_file = None
     try:
@@ -845,7 +883,17 @@ def send_activity_fit(
                 
         # Send to matching clients if clientbot token is available
         if krutilkavn_token:
-            send_to_matching_clients(activity, profile, caption, krutilkavn_token, timeout, temp_file, None)
+            send_to_matching_clients(
+                activity,
+                profile,
+                caption,
+                krutilkavn_token,
+                timeout,
+                temp_file,
+                account_name,
+                matched_client_id,
+                matched_client_name,
+            )
     except Exception:
         LOGGER.exception("Failed to download/send FIT %s", fit_id)
         # Send error message to admins
@@ -862,13 +910,24 @@ def send_activity_fit(
         # Send error message to matching clients if clientbot token is available
         if krutilkavn_token:
             error_caption = f"Не удалось отправить FIT для активности {activity.get('id')}"
-            send_to_matching_clients(activity, profile, error_caption, krutilkavn_token, timeout, None, None)
+            send_to_matching_clients(
+                activity,
+                profile,
+                error_caption,
+                krutilkavn_token,
+                timeout,
+                None,
+                account_name,
+                matched_client_id,
+                matched_client_name,
+            )
     finally:
         if temp_file and temp_file.exists():
             try:
                 temp_file.unlink()
             except OSError:
                 LOGGER.debug("Failed to remove temp file %s", temp_file)
+    return True, matched_client_id, matched_client_name, start_dt, profile_name
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
@@ -937,6 +996,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Failed to fetch profile for %s: %s", account_id, exc)
             profile = {}
+        profile_name = extract_athlete_name(profile) if profile else None
 
         try:
             auth_info = client.auth_check(timeout=args.timeout)
@@ -950,32 +1010,51 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             activity_id = str(activity.get("id"))
             if activity_id and not was_activity_id_seen(account_id, activity_id):
                 new_items.append(activity)
-                # Record the activity ID immediately after checking
-                record_seen_activity_id(account_id, activity_id)
 
         if new_items:
             any_changes = True
             LOGGER.info("Found %d new activities for %s", len(new_items), account_id)
             if not args.dry_run:
                 for activity in new_items:
-                    send_activity_fit(
+                    (
+                        processed,
+                        matched_client_id,
+                        matched_client_name,
+                        start_dt,
+                        profile_name,
+                        sent_clientbot,
+                        sent_strava,
+                        sent_intervals,
+                    ) = send_activity_fit(
                         client=client,
                         activity=activity,
                         account_name=account.get("name", account_id),
+                        account=account,
                         profile=profile,
                         token=args.token,
                         admin_ids=admin_ids,
                         timeout=args.timeout,
                     )
+                    if processed:
+                        record_seen_activity_id(
+                            account_id,
+                            str(activity.get("id")),
+                            client_id=matched_client_id,
+                            scheduled_name=matched_client_name,
+                            start_time=start_dt,
+                            profile_name=profile_name,
+                            sent_clientbot=sent_clientbot,
+                            sent_strava=sent_strava,
+                            sent_intervals=sent_intervals,
+                        )
+                    else:
+                        LOGGER.info(
+                            "Deferring activity %s for account %s until FIT appears",
+                            activity.get("id"),
+                            account_id,
+                        )
         else:
             LOGGER.info("No new activities for %s", account_id)
-
-        # Update known IDs in database (this is now redundant but kept for completeness)
-        # We're recording each ID immediately after checking, so this is just for consistency
-        for activity in activities:
-            activity_id = str(activity.get("id"))
-            if activity_id:
-                record_seen_activity_id(account_id, activity_id)
 
     # Note: We're not saving state to JSON file anymore
     # if any_changes:

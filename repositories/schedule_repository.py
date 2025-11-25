@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, time, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .db_utils import db_connection, dict_cursor
 from . import trainers_repository, instructors_repository
@@ -1159,6 +1159,13 @@ def ensure_activity_ids_table() -> None:
                 id SERIAL PRIMARY KEY,
                 account_id TEXT NOT NULL,
                 activity_id TEXT NOT NULL,
+                client_id INTEGER,
+                scheduled_name TEXT,
+                start_time TIMESTAMPTZ,
+                profile_name TEXT,
+                sent_clientbot BOOLEAN DEFAULT FALSE,
+                sent_strava BOOLEAN DEFAULT FALSE,
+                sent_intervals BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 UNIQUE(account_id, activity_id)
             )
@@ -1170,22 +1177,104 @@ def ensure_activity_ids_table() -> None:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS seen_activity_ids_activity_idx ON seen_activity_ids (activity_id)"
         )
+        cur.execute(
+            """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'seen_activity_ids'
+            """
+        )
+        existing = {row["column_name"] for row in cur.fetchall()}
+        if "client_id" not in existing:
+            cur.execute("ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS client_id INTEGER")
+        if "scheduled_name" not in existing:
+            cur.execute(
+                "ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS scheduled_name TEXT"
+            )
+        if "start_time" not in existing:
+            cur.execute(
+                "ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS start_time TIMESTAMPTZ"
+            )
+        if "profile_name" not in existing:
+            cur.execute(
+                "ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS profile_name TEXT"
+            )
+        if "sent_clientbot" not in existing:
+            cur.execute(
+                "ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS sent_clientbot BOOLEAN DEFAULT FALSE"
+            )
+        if "sent_strava" not in existing:
+            cur.execute(
+                "ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS sent_strava BOOLEAN DEFAULT FALSE"
+            )
+        if "sent_intervals" not in existing:
+            cur.execute(
+                "ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS sent_intervals BOOLEAN DEFAULT FALSE"
+            )
         conn.commit()
 
 
-def record_seen_activity_id(account_id: str, activity_id: str) -> bool:
-    """Record that an activity ID has been seen for an account."""
+def record_seen_activity_id(
+    account_id: str,
+    activity_id: str,
+    *,
+    client_id: Optional[int] = None,
+    scheduled_name: Optional[str] = None,
+    start_time: Optional[datetime] = None,
+    profile_name: Optional[str] = None,
+    sent_clientbot: bool = False,
+    sent_strava: bool = False,
+    sent_intervals: bool = False,
+) -> bool:
+    """Record that an activity ID has been seen for an account, with optional ownership metadata."""
     ensure_activity_ids_table()
     with db_connection() as conn, dict_cursor(conn) as cur:
         try:
             cur.execute(
                 """
-                INSERT INTO seen_activity_ids (account_id, activity_id)
-                VALUES (%s, %s)
-                ON CONFLICT (account_id, activity_id) DO NOTHING
+                INSERT INTO seen_activity_ids (
+                    account_id,
+                    activity_id,
+                    client_id,
+                    scheduled_name,
+                    start_time,
+                    profile_name,
+                    sent_clientbot,
+                    sent_strava,
+                    sent_intervals
+                )
+                VALUES (
+                    %(account_id)s,
+                    %(activity_id)s,
+                    %(client_id)s,
+                    %(scheduled_name)s,
+                    %(start_time)s,
+                    %(profile_name)s,
+                    %(sent_clientbot)s,
+                    %(sent_strava)s,
+                    %(sent_intervals)s
+                )
+                ON CONFLICT (account_id, activity_id) DO UPDATE
+                SET client_id = COALESCE(EXCLUDED.client_id, seen_activity_ids.client_id),
+                    scheduled_name = COALESCE(EXCLUDED.scheduled_name, seen_activity_ids.scheduled_name),
+                    start_time = COALESCE(EXCLUDED.start_time, seen_activity_ids.start_time),
+                    profile_name = COALESCE(EXCLUDED.profile_name, seen_activity_ids.profile_name),
+                    sent_clientbot = seen_activity_ids.sent_clientbot OR COALESCE(EXCLUDED.sent_clientbot, FALSE),
+                    sent_strava = seen_activity_ids.sent_strava OR COALESCE(EXCLUDED.sent_strava, FALSE),
+                    sent_intervals = seen_activity_ids.sent_intervals OR COALESCE(EXCLUDED.sent_intervals, FALSE)
                 RETURNING id
                 """,
-                (account_id, activity_id)
+                {
+                    "account_id": account_id,
+                    "activity_id": activity_id,
+                    "client_id": client_id,
+                    "scheduled_name": scheduled_name,
+                    "start_time": start_time,
+                    "profile_name": profile_name,
+                    "sent_clientbot": sent_clientbot,
+                    "sent_strava": sent_strava,
+                    "sent_intervals": sent_intervals,
+                },
             )
             row = cur.fetchone()
             conn.commit()
@@ -1222,6 +1311,93 @@ def get_seen_activity_ids_for_account(account_id: str, limit: int = 200) -> List
         )
         rows = cur.fetchall()
     return [row["activity_id"] for row in rows]
+
+
+def find_reservation_for_activity(
+    stand_ids: Sequence[int],
+    target_dt: datetime,
+    *,
+    grace_minutes: int = 30,
+) -> Optional[Dict]:
+    """
+    Return the reservation that matches the activity time and stand assignment.
+
+    A small grace window before/after slot times is used to catch activities that
+    start slightly earlier or end slightly later than the booked window.
+    """
+
+    if not stand_ids:
+        return None
+
+    ensure_schedule_tables()
+    target_date = target_dt.date()
+    grace_delta = timedelta(minutes=max(0, grace_minutes))
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                r.*,
+                s.slot_date,
+                s.start_time,
+                s.end_time,
+                s.label,
+                s.session_kind,
+                s.instructor_id,
+                i.full_name AS instructor_name,
+                t.code AS stand_code,
+                t.display_name AS stand_display_name,
+                t.title AS stand_title,
+                c.first_name AS client_first_name,
+                c.last_name AS client_last_name,
+                c.full_name AS client_full_name
+            FROM schedule_reservations AS r
+            JOIN schedule_slots AS s ON s.id = r.slot_id
+            LEFT JOIN schedule_instructors AS i ON i.id = s.instructor_id
+            LEFT JOIN trainers AS t ON t.id = r.stand_id
+            LEFT JOIN clients AS c ON c.id = r.client_id
+            WHERE r.client_id IS NOT NULL
+              AND r.status = 'booked'
+              AND r.stand_id = ANY(%(stand_ids)s)
+              AND s.slot_date = %(target_date)s
+            ORDER BY s.start_time DESC NULLS LAST, r.id DESC
+            """,
+            {
+                "stand_ids": list(stand_ids),
+                "target_date": target_date,
+            },
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        return None
+
+    matched_row: Optional[Dict] = None
+    best_distance = timedelta.max
+
+    for row in rows:
+        start_time: Optional[time] = row.get("start_time")
+        end_time: Optional[time] = row.get("end_time")
+
+        slot_start = datetime.combine(
+            row.get("slot_date") or target_date,
+            start_time or time.min,
+        )
+        slot_end = datetime.combine(
+            row.get("slot_date") or target_date,
+            end_time or time.max,
+        )
+        if target_dt.tzinfo:
+            slot_start = slot_start.replace(tzinfo=target_dt.tzinfo)
+            slot_end = slot_end.replace(tzinfo=target_dt.tzinfo)
+
+        if slot_start - grace_delta <= target_dt <= slot_end + grace_delta:
+            distance = abs(target_dt - slot_start)
+            if distance < best_distance:
+                best_distance = distance
+                matched_row = row
+
+    return matched_row
 
 
 def delete_activity_id(account_id: str, activity_id: str) -> bool:

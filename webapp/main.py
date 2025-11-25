@@ -55,6 +55,7 @@ from .dependencies import (
     require_admin,
     require_user,
 )
+from .routes.activities import router as activities_router
 from .routes.messaging import ensure_uploads_dir, router as messaging_router, UPLOADS_DIR as MESSAGING_UPLOADS_DIR
 from .routes.vk_client_links import router as vk_client_links_router
 from .routes.intervals_links import router as intervals_links_router
@@ -109,6 +110,7 @@ def _store_uploaded_image(image_upload: UploadFile, *, request: Request, image_b
 
 
 api = APIRouter(prefix="/api", tags=["api"])
+api.include_router(activities_router)
 api.include_router(vk_client_links_router, dependencies=[Depends(require_admin)])
 api.include_router(intervals_links_router, dependencies=[Depends(require_admin)])
 api.include_router(races_router)
@@ -198,15 +200,6 @@ def _serialize_reservation(reservation: dict, client_lookup: Optional[dict[int, 
         client_row = client_lookup.get(client_id)
         if client_row and client_row.get("height") is not None:
             serialized["client_height"] = client_row.get("height")
-    return serialized
-
-
-def _serialize_activity_id(activity_record: dict) -> dict:
-    """Serialize an activity ID record for API response."""
-    serialized = dict(activity_record)
-    created_at = serialized.get("created_at")
-    if hasattr(created_at, "isoformat"):
-        serialized["created_at"] = created_at.isoformat()
     return serialized
 
 
@@ -1728,88 +1721,6 @@ async def api_update_client_link(client_id: int, request: Request, user=Depends(
 def api_delete_client_link(client_id: int, user=Depends(require_admin)):
     client_link_repository.remove_link(client_id=client_id)
     return {"status": "ok"}
-
-
-@api.get("/activities")
-def api_get_activity_ids(
-    account_id: Optional[str] = None,
-    page: int = 1,
-    page_size: int = 50,
-    user=Depends(require_admin)
-):
-    """Get list of activity IDs."""
-    try:
-        # Validate pagination parameters
-        if page < 1:
-            page = 1
-        if page_size < 1 or page_size > 100:
-            page_size = 50
-            
-        offset = (page - 1) * page_size
-        
-        if account_id:
-            # Get activity IDs for a specific account
-            activity_ids = schedule_repository.get_seen_activity_ids_for_account(account_id, page_size + offset)
-            # Since the function returns all IDs, we need to slice for pagination
-            paginated_ids = activity_ids[offset:offset + page_size]
-            total_count = len(activity_ids)
-            
-            # Format for response
-            items = [{"id": i, "account_id": account_id, "activity_id": aid, "created_at": None} for i, aid in enumerate(paginated_ids)]
-        else:
-            # Get all activity IDs from the database
-            with schedule_repository.db_connection() as conn, schedule_repository.dict_cursor(conn) as cur:
-                # Get total count
-                cur.execute("SELECT COUNT(*) as count FROM seen_activity_ids")
-                total_count = cur.fetchone()["count"]
-                
-                # Get paginated results
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM seen_activity_ids
-                    ORDER BY created_at DESC
-                    LIMIT %s OFFSET %s
-                    """,
-                    (page_size, offset)
-                )
-                rows = cur.fetchall()
-                items = [_serialize_activity_id(row) for row in rows]
-        
-        total_pages = (total_count + page_size - 1) // page_size
-        
-        return {
-            "items": items,
-            "pagination": {
-                "page": page,
-                "pageSize": page_size,
-                "total": total_count,
-                "totalPages": total_pages
-            }
-        }
-    except Exception as exc:
-        log.exception("Failed to fetch activity IDs")
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch activity IDs") from exc
-
-
-@api.delete("/activities/{account_id}/{activity_id}")
-def api_delete_activity_id(
-    account_id: str,
-    activity_id: str,
-    user=Depends(require_admin)
-):
-    """Delete a specific activity ID for an account."""
-    try:
-        success = schedule_repository.delete_activity_id(account_id, activity_id)
-        if success:
-            return {"status": "ok", "message": "Activity ID deleted successfully"}
-        else:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Activity ID not found")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        log.exception("Failed to delete activity ID %s for account %s", activity_id, account_id)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to delete activity ID") from exc
 
 
 @api.get("/strava/authorize")

@@ -255,6 +255,13 @@ export interface ActivityIdRecord {
   account_id: string;
   activity_id: string;
   created_at: string;
+  client_id?: number | null;
+  scheduled_name?: string | null;
+  start_time?: string | null;
+  profile_name?: string | null;
+  sent_clientbot?: boolean | null;
+  sent_strava?: boolean | null;
+  sent_intervals?: boolean | null;
 }
 
 export interface ActivityIdListResponse {
