@@ -547,6 +547,24 @@ def list_slots_with_reservations(week_id: int) -> List[Dict]:
     return slots
 
 
+def list_reservations_by_date(target_date: date) -> List[Dict]:
+    """Return all reservations for a specific date with client_id filled."""
+
+    ensure_schedule_tables()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT r.*, s.slot_date, s.start_time, s.end_time
+            FROM schedule_reservations AS r
+            JOIN schedule_slots AS s ON s.id = r.slot_id
+            WHERE s.slot_date = %s
+            """,
+            (target_date,),
+        )
+        rows = cur.fetchall()
+    return rows
+
+
 def clear_reservations_for_slot(slot_id: int) -> None:
     ensure_schedule_tables()
     with db_connection() as conn:

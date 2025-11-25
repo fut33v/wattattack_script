@@ -214,6 +214,40 @@
   font-size: 14px;
 }
 
+.filter-buttons {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0 12px;
+}
+
+.button.toggle {
+  background: rgba(10, 15, 30, 0.6);
+  color: #e0e4ff;
+  border: 1px solid rgba(79, 155, 255, 0.3);
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s, box-shadow 0.2s;
+}
+
+.button.toggle.active {
+  background: rgba(79, 155, 255, 0.15);
+  border-color: rgba(79, 155, 255, 0.7);
+  color: #ffffff;
+  box-shadow: 0 0 0 2px rgba(79, 155, 255, 0.15);
+}
+
+.button.toggle:hover:not(:disabled) {
+  border-color: #4f9bff;
+  color: #4f9bff;
+}
+
+.button.toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .recipient-buttons {
   display: flex;
   gap: 8px;
@@ -296,6 +330,22 @@
   padding: 16px;
   text-align: center;
   color: #a0a8c8;
+}
+
+.filter-badges {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.filter-badge {
+  background: rgba(79, 155, 255, 0.15);
+  border: 1px solid rgba(79, 155, 255, 0.35);
+  color: #e0e4ff;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
 }
 
 .messaging-info {

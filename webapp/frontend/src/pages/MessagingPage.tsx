@@ -19,6 +19,20 @@ interface BroadcastResponse {
   message: string;
 }
 
+interface MessagingFilters {
+  sendAt?: string;
+  clientIds?: number[];
+  raceId?: number;
+  imageUrl?: string;
+  filterNoBookingToday?: boolean;
+  filterNoBookingTomorrow?: boolean;
+}
+
+interface BookingFilterResponse {
+  todayIds: number[];
+  tomorrowIds: number[];
+}
+
 export default function MessagingPage() {
   const [message, setMessage] = useState("");
   const [isScheduled, setIsScheduled] = useState(false);
@@ -30,9 +44,12 @@ export default function MessagingPage() {
   const [clientSearch, setClientSearch] = useState("");
   const [selectedRaceId, setSelectedRaceId] = useState<number | null>(null);
   const [raceFilterOpen, setRaceFilterOpen] = useState(false);
+  const [bookingFilterOpen, setBookingFilterOpen] = useState(false);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState("");
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [filterNoBookingToday, setFilterNoBookingToday] = useState(false);
+  const [filterNoBookingTomorrow, setFilterNoBookingTomorrow] = useState(false);
 
   const linksQuery = useQuery({
     queryKey: ["client-links"],
@@ -51,6 +68,12 @@ export default function MessagingPage() {
     queryFn: () => apiFetch<RaceDetailResponse>(`/api/races/${selectedRaceId}`),
     enabled: Boolean(selectedRaceId),
     staleTime: 30000
+  });
+
+  const bookingFiltersQuery = useQuery({
+    queryKey: ["booking-filters"],
+    queryFn: () => apiFetch<BookingFilterResponse>("/api/messages/booking-filters"),
+    staleTime: 60000
   });
 
   const broadcastMutation = useMutation({
@@ -93,7 +116,7 @@ export default function MessagingPage() {
     setSendResult(null);
     setSendError(null);
 
-    const data: { message: string; sendAt?: string; clientIds?: number[]; raceId?: number; imageUrl?: string } = {
+    const data: MessagingFilters & { message: string } = {
       message: message.trim()
     };
 
@@ -107,6 +130,13 @@ export default function MessagingPage() {
 
     if (selectedRaceId) {
       data.raceId = selectedRaceId;
+    }
+
+    if (filterNoBookingToday) {
+      data.filterNoBookingToday = true;
+    }
+    if (filterNoBookingTomorrow) {
+      data.filterNoBookingTomorrow = true;
     }
 
     const shouldSendAsForm = Boolean(imageFile || imageUrl);
@@ -251,17 +281,58 @@ export default function MessagingPage() {
     );
   }, [raceDetailQuery.data]);
 
+  const bookedToday = useMemo(() => new Set(bookingFiltersQuery.data?.todayIds ?? []), [bookingFiltersQuery.data]);
+  const bookedTomorrow = useMemo(() => new Set(bookingFiltersQuery.data?.tomorrowIds ?? []), [bookingFiltersQuery.data]);
+
   const filteredLinks = useMemo(() => {
     let scoped = links;
     const applyRaceFilter = raceFilterActive && raceFilterLoaded && raceParticipantIds.size > 0;
     if (applyRaceFilter) {
       scoped = scoped.filter((link) => raceParticipantIds.has(link.client_id));
     }
+
+    if (filterNoBookingToday || filterNoBookingTomorrow) {
+      scoped = scoped.filter((link) => {
+        const id = link.client_id;
+        if (filterNoBookingToday && bookedToday.has(id)) return false;
+        if (filterNoBookingTomorrow && bookedTomorrow.has(id)) return false;
+        return true;
+      });
+    }
+
     if (!normalizedSearch) return scoped;
     return scoped.filter((link) => matchesSearch(link, normalizedSearch));
-  }, [links, normalizedSearch, raceFilterActive, raceFilterLoaded, raceParticipantIds]);
+  }, [
+    links,
+    normalizedSearch,
+    raceFilterActive,
+    raceFilterLoaded,
+    raceParticipantIds,
+    filterNoBookingToday,
+    filterNoBookingTomorrow,
+    bookedToday,
+    bookedTomorrow
+  ]);
 
   const selectedCount = selectedClientIds.length > 0 ? selectedClientIds.length : filteredLinks.length;
+
+  const activeRecipientFilters = useMemo(() => {
+    const filters: string[] = [];
+    if (raceFilterActive && selectedRace) {
+      filters.push(`гонка: ${formatRaceLabel(selectedRace.title, selectedRace.race_date)}`);
+    }
+    if (filterNoBookingToday) {
+      filters.push("без брони сегодня");
+    }
+    if (filterNoBookingTomorrow) {
+      filters.push("без брони завтра");
+    }
+    return filters;
+  }, [raceFilterActive, selectedRace, filterNoBookingToday, filterNoBookingTomorrow]);
+
+  useEffect(() => {
+    setSelectedClientIds((prev) => prev.filter((id) => filteredLinks.some((link) => link.client_id === id)));
+  }, [filteredLinks]);
 
   return (
     <Panel title="Рассылка сообщений" subtitle="Отправка сообщений всем пользователям через clientbot">
@@ -310,6 +381,51 @@ export default function MessagingPage() {
             </div>
           </details>
 
+          <details
+            className="form-group collapsible"
+            open={bookingFilterOpen}
+            onToggle={(e) => setBookingFilterOpen(e.currentTarget.open)}
+          >
+            <summary>
+              Фильтр по брони
+              <span className="summary-hint">
+                {filterNoBookingToday || filterNoBookingTomorrow
+                  ? [
+                      filterNoBookingToday ? "без брони сегодня" : null,
+                      filterNoBookingTomorrow ? "без брони завтра" : null
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")
+                  : "(опционально)"}
+              </span>
+            </summary>
+            <div className="collapsible-content">
+              <div className="form-hint">
+                Исключаем клиентов, у которых уже есть брони в расписании на выбранные дни.
+              </div>
+              <div className="filter-buttons">
+                <button
+                  type="button"
+                  className={`button toggle ${filterNoBookingToday ? "active" : ""}`}
+                  onClick={() => setFilterNoBookingToday((prev) => !prev)}
+                  aria-pressed={filterNoBookingToday}
+                  disabled={isSending}
+                >
+                  Без брони сегодня
+                </button>
+                <button
+                  type="button"
+                  className={`button toggle ${filterNoBookingTomorrow ? "active" : ""}`}
+                  onClick={() => setFilterNoBookingTomorrow((prev) => !prev)}
+                  aria-pressed={filterNoBookingTomorrow}
+                  disabled={isSending}
+                >
+                  Без брони завтра
+                </button>
+              </div>
+            </div>
+          </details>
+
           <div className="form-group">
             <label>Получатели</label>
             <div className="recipient-actions">
@@ -321,6 +437,13 @@ export default function MessagingPage() {
                     : `Без выбора — всем ${filteredLinks.length} пользователям`}
                 {raceFilterActive && selectedRace ? ` · Гонка: ${formatRaceLabel(selectedRace.title, selectedRace.race_date)}` : ""}
               </div>
+              {activeRecipientFilters.length > 0 && (
+                <div className="filter-badges">
+                  {activeRecipientFilters.map((label) => (
+                    <span className="filter-badge" key={label}>{label}</span>
+                  ))}
+                </div>
+              )}
               <div className="recipient-buttons">
                 <button
                   type="button"
@@ -372,7 +495,7 @@ export default function MessagingPage() {
                   );
                 })
               )}
-            </div>
+          </div>
             <div className="form-hint">
               Если ничего не выбрано, сообщение получат все показанные ниже получатели.
               {" "}
@@ -449,7 +572,7 @@ export default function MessagingPage() {
                 type="checkbox"
                 checked={isScheduled}
                 onChange={(e) => setIsScheduled(e.target.checked)}
-                disabled={isSending}
+                disabled
               />
               Отправить по расписанию
             </label>
@@ -497,15 +620,15 @@ export default function MessagingPage() {
           </div>
         </form>
 
-        <div className="messaging-info">
-          <h3>Информация</h3>
-          <ul>
-            <li>Сообщения отправляются через бот <strong>clientbot</strong></li>
+          <div className="messaging-info">
+            <h3>Информация</h3>
+            <ul>
+            <li>Сообщения отправляются через бота для записи в Крутилку</li>
             <li>Пользователи получают сообщения как личные сообщения в Telegram</li>
             <li>Отправка по расписанию будет реализована в следующих версиях</li>
-          </ul>
+            </ul>
+          </div>
         </div>
-      </div>
     </Panel>
   );
 }

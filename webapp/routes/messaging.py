@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
@@ -11,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, stat
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from repositories import client_link_repository, message_repository, race_repository
+from repositories import client_link_repository, message_repository, race_repository, schedule_repository
 
 from ..config import get_settings
 from ..dependencies import require_admin
@@ -22,6 +23,8 @@ router = APIRouter(prefix="/messages", tags=["messages"], dependencies=[Depends(
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOADS_DIR = BASE_DIR / "uploads"
+
+FilterClientSet = Tuple[Set[int], str]
 
 
 def ensure_uploads_dir() -> None:
@@ -100,6 +103,28 @@ def _parse_id_list(raw_value: object, field_name: str) -> set[int] | None:
     return result
 
 
+def _collect_clients_without_bookings(target_date: date) -> FilterClientSet:
+    """Return client IDs that HAVE bookings on a specific date (to exclude them)."""
+    reservations = schedule_repository.list_reservations_by_date(target_date)
+    booked_ids = {int(res["client_id"]) for res in reservations or [] if res.get("client_id")}
+    if not booked_ids:
+        return set(), "Нет броней в расписании"
+    return booked_ids, f"Исключены клиенты с бронью на {target_date.isoformat()}"
+
+
+@router.get("/booking-filters")
+def api_booking_filters():
+    """Return client IDs that already have bookings today/tomorrow."""
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    today_ids, _ = _collect_clients_without_bookings(today)
+    tomorrow_ids, _ = _collect_clients_without_bookings(tomorrow)
+    return {
+        "todayIds": sorted(today_ids),
+        "tomorrowIds": sorted(tomorrow_ids),
+    }
+
+
 def _store_uploaded_image(image_upload: UploadFile, *, request: Request, image_bytes: bytes) -> str:
     """Persist uploaded image and return absolute URL for Telegram."""
     target_dir = UPLOADS_DIR / "messaging"
@@ -127,19 +152,45 @@ async def api_broadcast_message(request: Request):
         )
         payload, image_upload = await _parse_broadcast_payload(request)
         log.debug("broadcast: payload keys=%s", list(payload.keys()))
-        message_text = payload.get("message")
+        raw_message = (
+            payload.get("message")
+            or payload.get("text")
+            or payload.get("caption")
+        )
+        if isinstance(raw_message, str):
+            message_text = raw_message.strip()
+        elif raw_message is None:
+            message_text = ""
+        else:
+            # Gracefully coerce non-str payloads (e.g., form field objects) to string
+            message_text = str(raw_message).strip()
+
+        if len(message_text) == 0:
+            # Fallback: try to read raw body (e.g., text/plain without JSON wrapper)
+            try:
+                body_bytes = await request.body()
+                if body_bytes:
+                    message_text = body_bytes.decode(errors="ignore").strip()
+            except Exception:  # pylint: disable=broad-except
+                message_text = message_text
         send_at = payload.get("sendAt") or payload.get("send_at")  # ISO datetime string or None for immediate
         client_ids_raw = payload.get("clientIds") or payload.get("client_ids")
         race_id_raw = payload.get("raceId") or payload.get("race_id")
+        filter_no_booking_today = payload.get("filterNoBookingToday")
+        filter_no_booking_tomorrow = payload.get("filterNoBookingTomorrow")
         image_url = payload.get("imageUrl") or payload.get("image_url")
+        log.info(
+            "broadcast: parsed message_len=%s image_upload=%s image_url=%s",
+            len(message_text),
+            bool(image_upload),
+            bool(image_url),
+        )
 
-        if (not message_text or not isinstance(message_text, str) or len(message_text.strip()) == 0) and not (
-            image_upload or image_url
-        ):
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Message text or image is required")
-
-        if message_text and not isinstance(message_text, str):
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Message text must be a string")
+        if len(message_text.strip()) == 0 and not (image_upload or image_url):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Добавьте текст сообщения или изображение",
+            )
 
         client_id_filter: set[int] | None = None
         if client_ids_raw is not None:
@@ -195,6 +246,25 @@ async def api_broadcast_message(request: Request):
             links = [link for link in links if int(link.get("client_id") or 0) in race_client_ids]
             if not links:
                 return {"sent": 0, "message": "Нет получателей среди участников гонки"}
+
+        # Exclude clients who already have bookings on the selected dates
+        exclusion_ids: set[int] = set()
+        exclusion_notes: list[str] = []
+
+        if filter_no_booking_today:
+            today_ids, note = _collect_clients_without_bookings(date.today())
+            exclusion_ids.update(today_ids)
+            exclusion_notes.append(note)
+
+        if filter_no_booking_tomorrow:
+            tomorrow_ids, note = _collect_clients_without_bookings(date.today() + timedelta(days=1))
+            exclusion_ids.update(tomorrow_ids)
+            exclusion_notes.append(note)
+
+        if exclusion_ids:
+            links = [link for link in links if int(link.get("client_id") or 0) not in exclusion_ids]
+            if not links:
+                return {"sent": 0, "message": "Нет получателей без броней на выбранные дни"}
 
         settings = get_settings()
         bot_token = settings.krutilkavn_bot_token

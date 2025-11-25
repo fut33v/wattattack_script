@@ -1859,11 +1859,6 @@ def create_app() -> FastAPI:
         except Exception as exc:  # pylint: disable=broad-except
             log.warning("Failed to ensure instructors table on startup: %s", exc)
 
-        try:
-            UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:  # pylint: disable=broad-except
-            log.warning("Failed to create uploads dir: %s", exc)
-
     @app.get("/")
     def root():
         return RedirectResponse(url="/app", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
