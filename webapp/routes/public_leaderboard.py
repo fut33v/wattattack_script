@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from fastapi import APIRouter, Request, status
 from fastapi.responses import HTMLResponse
@@ -35,12 +35,15 @@ def _decorate_leaderboard_items(items: List[Dict[str, Any]]) -> List[Dict[str, A
 
         distance_value = float(item.get("distance_km") or item.get("distance") or 0)
         distance_label = f"{distance_value:,.1f}".replace(",", " ")
+        elevation_value = float(item.get("elevation_m") or 0)
+        elevation_label = f"{elevation_value:,.0f}".replace(",", " ")
 
         decorated.append(
             {
                 **item,
                 "rank": idx,
                 "distance_label": distance_label,
+                "elevation_label": elevation_label,
                 "last_activity_label": last_label,
             }
         )
@@ -49,18 +52,27 @@ def _decorate_leaderboard_items(items: List[Dict[str, Any]]) -> List[Dict[str, A
 
 def _build_summary(summary_raw: Dict[str, Any]) -> Dict[str, Any]:
     total_distance_value = float(summary_raw.get("total_distance_km") or summary_raw.get("total_distance") or 0)
+    total_elevation_value = float(summary_raw.get("total_elevation_m") or summary_raw.get("total_elevation") or 0)
     return {
         "total_distance": total_distance_value,
+        "total_elevation": total_elevation_value,
         "athletes": int(summary_raw.get("athletes") or 0),
         "rides_with_distance": int(summary_raw.get("rides_with_distance") or 0),
         "total_distance_label": f"{total_distance_value:,.0f}".replace(",", " "),
+        "total_elevation_label": f"{total_elevation_value:,.0f}".replace(",", " "),
     }
+
+
+def _clean_sort_params(request: Request) -> Tuple[str, str]:
+    return "distance", "desc"
 
 
 @router.get("/leaderboard", response_class=HTMLResponse)
 def public_leaderboard_page(request: Request, limit: int = 100):
+    sort_by, sort_dir = _clean_sort_params(request)
+
     try:
-        data = schedule_repository.get_distance_leaderboard(limit=limit)
+        data = schedule_repository.get_distance_leaderboard(limit=limit, sort_by=sort_by, direction=sort_dir)
         items = data.get("items") or []
         summary_raw = data.get("summary") or {}
     except Exception:
@@ -91,8 +103,9 @@ def public_leaderboard_page(request: Request, limit: int = 100):
         "items": decorated_items,
         "summary": summary_payload,
         "top_entry": top_entry,
-        "share_url": str(request.url),
         "error_message": None,
+        "sort_by": sort_by,
+        "sort_dir": sort_dir,
     }
 
     response = templates.TemplateResponse("public_leaderboard.html", context)

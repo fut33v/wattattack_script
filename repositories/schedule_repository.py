@@ -1711,15 +1711,27 @@ def list_all_accounts() -> List[str]:
     return [row["account_id"] for row in rows]
 
 
-def get_distance_leaderboard(limit: int = 100) -> Dict[str, object]:
-    """Return clients ordered by total recorded distance."""
+def get_distance_leaderboard(
+    limit: int = 100,
+    *,
+    sort_by: str = "distance",
+    direction: str = "desc",
+) -> Dict[str, object]:
+    """Return clients ordered by aggregated ride stats for public leaderboard."""
 
     ensure_activity_ids_table()
     safe_limit = max(1, min(limit, 500))
 
+    order_field_map = {
+        "distance": "total_distance",
+        "elevation": "total_elevation",
+    }
+    order_column = order_field_map.get(sort_by.lower(), "total_distance")
+    order_dir_display = "ASC" if str(direction).lower() == "asc" else "DESC"
+
     with db_connection() as conn, dict_cursor(conn) as cur:
         cur.execute(
-            """
+            f"""
             SELECT
                 sai.client_id,
                 COALESCE(
@@ -1730,12 +1742,13 @@ def get_distance_leaderboard(limit: int = 100) -> Dict[str, object]:
                 COUNT(*) AS rides_total,
                 COUNT(*) FILTER (WHERE sai.distance IS NOT NULL) AS rides_with_distance,
                 COALESCE(SUM(sai.distance), 0) AS total_distance,
+                COALESCE(SUM(sai.elevation_gain), 0) AS total_elevation,
                 MAX(COALESCE(sai.start_time, sai.created_at)) AS last_activity_at
             FROM seen_activity_ids AS sai
             JOIN clients AS c ON c.id = sai.client_id
             GROUP BY sai.client_id, c.full_name, c.first_name, c.last_name
             HAVING COALESCE(SUM(sai.distance), 0) > 0
-            ORDER BY total_distance DESC, rides_with_distance DESC, client_name ASC
+            ORDER BY {order_column} DESC, rides_with_distance DESC, client_name ASC
             LIMIT %s
             """,
             (safe_limit,),
@@ -1747,6 +1760,7 @@ def get_distance_leaderboard(limit: int = 100) -> Dict[str, object]:
             SELECT
                 COUNT(DISTINCT client_id) FILTER (WHERE client_id IS NOT NULL) AS athletes,
                 COALESCE(SUM(distance), 0) AS total_distance,
+                COALESCE(SUM(elevation_gain), 0) AS total_elevation,
                 COUNT(*) FILTER (WHERE distance IS NOT NULL) AS rides_with_distance
             FROM seen_activity_ids
             WHERE client_id IS NOT NULL
@@ -1759,6 +1773,7 @@ def get_distance_leaderboard(limit: int = 100) -> Dict[str, object]:
         last_activity = row.get("last_activity_at")
         distance_meters = float(row.get("total_distance") or 0)
         distance_km = distance_meters / 1000.0
+        elevation_m = float(row.get("total_elevation") or 0)
 
         leaderboard.append(
             {
@@ -1768,15 +1783,32 @@ def get_distance_leaderboard(limit: int = 100) -> Dict[str, object]:
                 "rides_with_distance": int(row.get("rides_with_distance") or 0),
                 "distance_meters": distance_meters,
                 "distance_km": distance_km,
+                "elevation_m": elevation_m,
                 "last_activity_at": last_activity.isoformat() if hasattr(last_activity, "isoformat") else None,
             }
         )
 
+    # Rank always computed in DESC order for consistency
+    base_sorted = sorted(
+        leaderboard,
+        key=lambda item: (
+            item.get("distance_meters", 0.0) if order_column == "total_distance" else item.get("elevation_m", 0.0),
+            item.get("elevation_m", 0.0),
+            (item.get("name") or "").lower(),
+        ),
+        reverse=True,
+    )
+    for idx, item in enumerate(base_sorted, start=1):
+        item["rank"] = idx
+    leaderboard = base_sorted if order_dir_display == "DESC" else list(reversed(base_sorted))
+
     total_distance_meters = float(totals_row.get("total_distance") or 0)
+    total_elevation_m = float(totals_row.get("total_elevation") or 0)
     summary = {
         "athletes": int(totals_row.get("athletes") or 0),
         "total_distance_meters": total_distance_meters,
         "total_distance_km": total_distance_meters / 1000.0,
+        "total_elevation_m": total_elevation_m,
         "rides_with_distance": int(totals_row.get("rides_with_distance") or 0),
     }
 

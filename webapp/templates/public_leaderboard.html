@@ -200,7 +200,7 @@
         padding: 16px 18px;
         border-bottom: 1px solid #e5e7eb;
         display: grid;
-        grid-template-columns: 80px 1.4fr 0.8fr 0.8fr 0.8fr;
+        grid-template-columns: 80px 1.35fr 0.95fr 0.95fr 0.9fr;
         gap: 12px;
         font-size: 13px;
         letter-spacing: 0.05em;
@@ -216,7 +216,7 @@
 
       .leader {
         display: grid;
-        grid-template-columns: 80px 1.4fr 0.8fr 0.8fr 0.8fr;
+        grid-template-columns: 80px 1.35fr 0.95fr 0.95fr 0.9fr;
         gap: 12px;
         align-items: center;
         padding: 14px 18px;
@@ -278,6 +278,16 @@
         color: #0ea5e9;
       }
 
+      .elevation {
+        font-weight: 700;
+        font-size: 16px;
+        color: #22c55e;
+      }
+
+      .duration {
+        display: none;
+      }
+
       .rides {
         font-weight: 600;
         font-size: 15px;
@@ -298,8 +308,8 @@
       @media (max-width: 820px) {
         .leaderboard-head,
         .leader {
-          grid-template-columns: 60px 1.2fr 0.7fr 0.7fr;
-          grid-template-areas: "rank name distance rides" "rank name last last";
+          grid-template-columns: 60px 1.15fr 0.9fr 0.9fr 0.9fr;
+          grid-template-areas: "rank name distance elevation rides" "rank name last last last";
         }
 
         .leaderboard-head div:nth-child(5),
@@ -319,8 +329,8 @@
 
         .leaderboard-head,
         .leader {
-          grid-template-columns: 52px 1fr 0.8fr;
-          grid-template-areas: "rank name distance" "rank name rides";
+          grid-template-columns: 52px 1fr 1fr;
+          grid-template-areas: "rank name distance" "rank name elevation" "rank name rides" "rank name last";
           column-gap: 18px;
           row-gap: 6px;
           align-items: start;
@@ -337,9 +347,13 @@
           justify-self: start;
         }
 
-        .rides {
-          grid-area: rides;
-        }
+      .rides {
+        grid-area: rides;
+      }
+
+      .elevation {
+        grid-area: elevation;
+      }
 
         .leader-name {
           margin-top: 2px;
@@ -366,6 +380,11 @@
           <span>Километров в базе</span>
           <strong>{{ summary.total_distance_label }} км</strong>
           <p>Сумма всех сопоставленных поездок</p>
+        </div>
+        <div class="stat-card">
+          <span>Набор высоты</span>
+          <strong>{{ summary.total_elevation_label }} м</strong>
+          <p>Подъёмы по всем зафиксированным сессиям</p>
         </div>
         <div class="stat-card">
           <span>Активных райдеров</span>
@@ -397,6 +416,7 @@
           <div>Место</div>
           <div>Участник</div>
           <div>Километры</div>
+          <div>Набор</div>
           <div>Поездок</div>
           <div>Последняя</div>
         </div>
@@ -410,6 +430,7 @@
                   <div class="leader-meta">{{ item.rides_with_distance }} поездок с дистанцией</div>
                 </div>
                 <div class="distance">{{ item.distance_label }} км</div>
+                <div class="elevation">{{ item.elevation_label }} м</div>
                 <div class="rides">{{ item.rides }} шт.</div>
                 <div class="last-ride">{{ item.last_activity_label or "—" }}</div>
               </li>
