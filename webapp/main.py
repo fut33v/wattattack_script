@@ -58,6 +58,7 @@ from .dependencies import (
 from .routes.activities import router as activities_router
 from .routes.clients import router as clients_router
 from .routes.messaging import ensure_uploads_dir, router as messaging_router, UPLOADS_DIR as MESSAGING_UPLOADS_DIR
+from .routes.client_links import router as client_links_router
 from .routes.vk_client_links import router as vk_client_links_router
 from .routes.intervals_links import router as intervals_links_router
 from .routes.races import router as races_router, _format_race_date_label
@@ -120,6 +121,7 @@ api.include_router(activities_router)
 api.include_router(clients_router)
 api.include_router(sync_router)
 api.include_router(leaderboard_router)
+api.include_router(client_links_router, dependencies=[Depends(require_admin)])
 api.include_router(vk_client_links_router, dependencies=[Depends(require_admin)])
 api.include_router(intervals_links_router, dependencies=[Depends(require_admin)])
 api.include_router(races_router)
@@ -1149,118 +1151,6 @@ def api_remove_admin(
                 username = row.get("username")
                 break
     admin_repository.remove_admin(tg_id=tg_id, username=username)
-    return {"status": "ok"}
-
-
-@api.get("/client-links")
-def api_client_links(user=Depends(require_admin)):
-    rows = client_link_repository.list_links()
-
-    straver_statuses = {}
-    try:
-        straver = StraverClient()
-        if straver.is_configured():
-            tg_ids = [row["tg_user_id"] for row in rows if row.get("tg_user_id")]
-            straver_statuses = straver.connection_status(tg_ids)
-    except Exception:
-        log.exception("Failed to fetch Straver statuses")
-
-    enriched = []
-    for row in rows:
-        status = straver_statuses.get(int(row["tg_user_id"])) if row.get("tg_user_id") else None
-        merged = dict(row)
-        merged["strava_connected"] = bool(status and status.get("connected"))
-        merged["strava_athlete_name"] = status.get("athlete_name") if status else None
-        if status and status.get("athlete_id") and not merged.get("strava_athlete_id"):
-            merged["strava_athlete_id"] = status.get("athlete_id")
-        enriched.append(merged)
-
-    return _json_success({"items": jsonable_encoder(enriched)})
-
-
-def _parse_client_link_payload(payload: dict) -> tuple[int, str | None, str | None]:
-    tg_user_id = payload.get("tg_user_id")
-    if tg_user_id is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "tg_user_id required")
-
-    try:
-        tg_user_id_int = int(tg_user_id)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid tg_user_id") from exc
-    if tg_user_id_int <= 0:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "tg_user_id must be positive")
-
-    tg_username = payload.get("tg_username")
-    if tg_username is not None and not isinstance(tg_username, str):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "tg_username must be a string")
-    if isinstance(tg_username, str):
-        tg_username = tg_username.strip() or None
-
-    tg_full_name = payload.get("tg_full_name")
-    if tg_full_name is not None and not isinstance(tg_full_name, str):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "tg_full_name must be a string")
-    if isinstance(tg_full_name, str):
-        tg_full_name = tg_full_name.strip() or None
-
-    return tg_user_id_int, tg_username, tg_full_name
-
-
-@api.post("/client-links")
-async def api_create_client_link(request: Request, user=Depends(require_admin)):
-    payload = await request.json()
-    client_id_raw = payload.get("client_id")
-    if client_id_raw is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "client_id required")
-    try:
-        client_id = int(client_id_raw)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid client_id") from exc
-    if client_id <= 0:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "client_id must be positive")
-
-    client = client_repository.get_client(client_id)
-    if not client:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
-
-    tg_user_id_int, tg_username, tg_full_name = _parse_client_link_payload(payload)
-    try:
-        record = client_link_repository.link_user_to_client(
-            tg_user_id=tg_user_id_int,
-            client_id=client_id,
-            tg_username=tg_username,
-            tg_full_name=tg_full_name,
-        )
-    except Exception:
-        log.exception("Failed to create client link for client %s", client_id)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to create link")
-
-    return {"item": jsonable_encoder(record)}
-
-
-@api.patch("/client-links/{client_id}")
-async def api_update_client_link(client_id: int, request: Request, user=Depends(require_admin)):
-    payload = await request.json()
-    if not client_repository.get_client(client_id):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
-
-    tg_user_id_int, tg_username, tg_full_name = _parse_client_link_payload(payload)
-    try:
-        record = client_link_repository.link_user_to_client(
-            tg_user_id=tg_user_id_int,
-            client_id=client_id,
-            tg_username=tg_username,
-            tg_full_name=tg_full_name,
-        )
-    except Exception:
-        log.exception("Failed to update client link for client %s", client_id)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to update link")
-
-    return {"item": jsonable_encoder(record)}
-
-
-@api.delete("/client-links/{client_id}")
-def api_delete_client_link(client_id: int, user=Depends(require_admin)):
-    client_link_repository.remove_link(client_id=client_id)
     return {"status": "ok"}
 
 
