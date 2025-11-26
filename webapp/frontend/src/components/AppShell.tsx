@@ -14,6 +14,7 @@ interface NavLinkConfig {
   to: string;
   label: string;
   adminOnly: boolean;
+  external?: boolean;
 }
 
 const PRIMARY_NAV_LINKS: readonly NavLinkConfig[] = [
@@ -39,6 +40,10 @@ const SERVICE_NAV_LINKS: readonly NavLinkConfig[] = [
   { to: "/links", label: "🧩 Связки", adminOnly: true }
 ] as const;
 
+const PUBLIC_NAV_LINKS: readonly NavLinkConfig[] = [
+  { to: "/leaderboard", label: "🌐 Лидерборд", adminOnly: false, external: true }
+] as const;
+
 const TECH_NAV_LINKS: readonly NavLinkConfig[] = [
   { to: "/bikes", label: "🚲 Велосипеды", adminOnly: false },
   { to: "/trainers", label: "💺 Тренажеры", adminOnly: false }
@@ -52,6 +57,7 @@ export default function AppShell({ session, children, hideSidebar = false }: App
   const filteredMessageLinks = MESSAGE_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
   const filteredServiceLinks = SERVICE_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
   const filteredTechLinks = TECH_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
+  const filteredPublicLinks = PUBLIC_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
 
   async function handleLogout() {
     await fetch("/api/logout", { method: "GET", credentials: "include" });
@@ -138,6 +144,30 @@ export default function AppShell({ session, children, hideSidebar = false }: App
                     {link.label}
                   </NavLink>
                 ))}
+              </div>
+            )}
+            {filteredPublicLinks.length > 0 && (
+              <div className="nav-section">
+                <div className="nav-section-title">Публично</div>
+                {filteredPublicLinks.map((link) =>
+                  link.external ? (
+                    <a key={link.to} href={link.to} target="_blank" rel="noreferrer" className="nav-link">
+                      {link.label}
+                    </a>
+                  ) : (
+                    <NavLink
+                      key={link.to}
+                      to={link.to}
+                      className={({ isActive }) =>
+                        classNames("nav-link", {
+                          active: isActive || location.pathname === link.to
+                        })
+                      }
+                    >
+                      {link.label}
+                    </NavLink>
+                  )
+                )}
               </div>
             )}
           </nav>

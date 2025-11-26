@@ -60,6 +60,8 @@ from .routes.messaging import ensure_uploads_dir, router as messaging_router, UP
 from .routes.vk_client_links import router as vk_client_links_router
 from .routes.intervals_links import router as intervals_links_router
 from .routes.races import router as races_router, _format_race_date_label
+from .routes.leaderboard import router as leaderboard_router
+from .routes.public_leaderboard import router as public_leaderboard_router
 from .routes.sync import router as sync_router
 from .routes.schedule_slots import router as schedule_slots_router
 from .routes.schedule_utils import _serialize_slot, _serialize_reservation, _load_schedule_week_payload
@@ -115,6 +117,7 @@ def _store_uploaded_image(image_upload: UploadFile, *, request: Request, image_b
 api = APIRouter(prefix="/api", tags=["api"])
 api.include_router(activities_router)
 api.include_router(sync_router)
+api.include_router(leaderboard_router)
 api.include_router(vk_client_links_router, dependencies=[Depends(require_admin)])
 api.include_router(intervals_links_router, dependencies=[Depends(require_admin)])
 api.include_router(races_router)
@@ -1549,6 +1552,7 @@ def create_app() -> FastAPI:
         https_only=False,
     )
     app.include_router(api)
+    app.include_router(public_leaderboard_router)
 
     @app.on_event("startup")
     def _startup_seed_instructors() -> None:

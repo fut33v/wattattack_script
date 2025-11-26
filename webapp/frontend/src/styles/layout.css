@@ -1557,6 +1557,27 @@ button.danger {
 
   .nav {
     width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.35rem;
+  }
+
+  .nav-section {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+    gap: 0.25rem;
+    display: contents;
+  }
+
+  .nav-section-title {
+    display: none;
+  }
+
+  .nav-link {
+    width: 100%;
+    padding: 0.65rem 0.8rem;
+    text-align: left;
   }
 
   .sidebar-footer {

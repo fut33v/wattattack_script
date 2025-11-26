@@ -1711,6 +1711,78 @@ def list_all_accounts() -> List[str]:
     return [row["account_id"] for row in rows]
 
 
+def get_distance_leaderboard(limit: int = 100) -> Dict[str, object]:
+    """Return clients ordered by total recorded distance."""
+
+    ensure_activity_ids_table()
+    safe_limit = max(1, min(limit, 500))
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                sai.client_id,
+                COALESCE(
+                    NULLIF(TRIM(c.full_name), ''),
+                    CONCAT_WS(' ', NULLIF(TRIM(c.first_name), ''), NULLIF(TRIM(c.last_name), '')),
+                    'Без имени'
+                ) AS client_name,
+                COUNT(*) AS rides_total,
+                COUNT(*) FILTER (WHERE sai.distance IS NOT NULL) AS rides_with_distance,
+                COALESCE(SUM(sai.distance), 0) AS total_distance,
+                MAX(COALESCE(sai.start_time, sai.created_at)) AS last_activity_at
+            FROM seen_activity_ids AS sai
+            JOIN clients AS c ON c.id = sai.client_id
+            GROUP BY sai.client_id, c.full_name, c.first_name, c.last_name
+            HAVING COALESCE(SUM(sai.distance), 0) > 0
+            ORDER BY total_distance DESC, rides_with_distance DESC, client_name ASC
+            LIMIT %s
+            """,
+            (safe_limit,),
+        )
+        rows = cur.fetchall()
+
+        cur.execute(
+            """
+            SELECT
+                COUNT(DISTINCT client_id) FILTER (WHERE client_id IS NOT NULL) AS athletes,
+                COALESCE(SUM(distance), 0) AS total_distance,
+                COUNT(*) FILTER (WHERE distance IS NOT NULL) AS rides_with_distance
+            FROM seen_activity_ids
+            WHERE client_id IS NOT NULL
+            """
+        )
+        totals_row = cur.fetchone() or {}
+
+    leaderboard: List[Dict[str, object]] = []
+    for row in rows:
+        last_activity = row.get("last_activity_at")
+        distance_meters = float(row.get("total_distance") or 0)
+        distance_km = distance_meters / 1000.0
+
+        leaderboard.append(
+            {
+                "client_id": row.get("client_id"),
+                "name": (row.get("client_name") or "").strip() or "Без имени",
+                "rides": int(row.get("rides_total") or 0),
+                "rides_with_distance": int(row.get("rides_with_distance") or 0),
+                "distance_meters": distance_meters,
+                "distance_km": distance_km,
+                "last_activity_at": last_activity.isoformat() if hasattr(last_activity, "isoformat") else None,
+            }
+        )
+
+    total_distance_meters = float(totals_row.get("total_distance") or 0)
+    summary = {
+        "athletes": int(totals_row.get("athletes") or 0),
+        "total_distance_meters": total_distance_meters,
+        "total_distance_km": total_distance_meters / 1000.0,
+        "rides_with_distance": int(totals_row.get("rides_with_distance") or 0),
+    }
+
+    return {"items": leaderboard, "summary": summary}
+
+
 def list_upcoming_reservations(since: datetime, until: datetime) -> List[Dict]:
     """Return all upcoming reservations within a time window."""
 
