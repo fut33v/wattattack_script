@@ -23,7 +23,9 @@ async function parseJson(response: Response) {
   }
 }
 
-export async function apiFetch<T>(input: RequestInfo, init: RequestInit = {}): Promise<T> {
+type ApiRequestInit = Omit<RequestInit, "body"> & { body?: any };
+
+export async function apiFetch<T>(input: RequestInfo, init: ApiRequestInit = {}): Promise<T> {
   const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
   const shouldSendJson =
     !isFormData &&

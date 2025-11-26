@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import psycopg2
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
 
 from repositories import (
     bikes_repository,
@@ -31,6 +33,7 @@ from ..utils.parsing import (
 )
 
 router = APIRouter(prefix="/races", tags=["races"], dependencies=[Depends(require_admin)])
+public_router = APIRouter()
 log = logging.getLogger(__name__)
 
 RACE_REGISTRATION_STATUSES = {
@@ -43,6 +46,11 @@ RACE_REGISTRATION_MODES = {"offline", "online"}
 
 def _json_success(payload: dict) -> JSONResponse:
     return JSONResponse(payload)
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
 def _send_telegram_message(chat_id: int, text: str, *, parse_mode: str | None = None) -> bool:
@@ -1172,3 +1180,183 @@ def api_delete_race_registration(race_id: int, registration_id: int):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Registration not found")
 
     return {"status": "ok"}
+
+
+@public_router.get("/race/{slug}", response_class=HTMLResponse)
+def public_race_page(slug: str, request: Request):
+    context = {"request": request}
+    race = race_repository.get_race_by_slug(slug)
+    if not race:
+        context["error"] = "Гонка не найдена или ещё не опубликована."
+        return templates.TemplateResponse("public_race.html", context)
+
+    race_date_raw = race.get("race_date")
+    if isinstance(race_date_raw, date):
+        race_date = race_date_raw
+    elif isinstance(race_date_raw, str):
+        try:
+            race_date = datetime.strptime(race_date_raw, "%Y-%m-%d").date()
+        except ValueError:
+            race_date = None
+    else:
+        race_date = None
+
+    registrations = race_repository.list_registrations(race["id"])
+    participants: list[dict] = []
+    pending_count = 0
+    clusters_meta = race.get("clusters") or []
+    cluster_times: dict[str, dict[str, Optional[str]]] = {}
+    cluster_order_keys: list[tuple] = []
+    for cluster in clusters_meta:
+        label = (cluster.get("label") or cluster.get("code") or "").strip()
+        start_time_val = (cluster.get("start_time") or "").strip() or None
+        end_time_val = (cluster.get("end_time") or "").strip() or None
+        if label:
+            cluster_times[label] = {
+                "start_time": start_time_val,
+                "end_time": end_time_val,
+            }
+            try:
+                start_key = datetime.strptime(start_time_val, "%H:%M").time() if start_time_val else None
+            except ValueError:
+                start_key = None
+            cluster_order_keys.append((start_key is None, start_key, label.lower(), label))
+
+    ordered_cluster_labels = [item[3] for item in sorted(cluster_order_keys, key=lambda entry: entry)]
+
+    client_stand_map: dict[int, str] = {}
+    if race_date:
+        week = schedule_repository.get_week_by_start(race_date)
+        if week:
+            slots = schedule_repository.list_slots_with_reservations(week["id"])
+            trainers = trainers_repository.list_trainers()
+            trainers_map = {row["id"]: row for row in trainers if isinstance(row.get("id"), int)}
+
+            for slot in slots:
+                slot_date = slot.get("slot_date")
+                if slot_date and str(slot_date) != race_date.isoformat():
+                    continue
+                if slot.get("session_kind") != "race":
+                    continue
+                for res in slot.get("reservations") or []:
+                    if res.get("status") != "booked":
+                        continue
+                    client_id = res.get("client_id")
+                    if not isinstance(client_id, int):
+                        continue
+                    label_parts: list[str] = []
+                    stand_id = res.get("stand_id")
+                    trainer = trainers_map.get(stand_id)
+                    stand_code = (res.get("stand_code") or "").strip()
+                    if trainer:
+                        code = (trainer.get("code") or "").strip()
+                        if code:
+                            label_parts.append(code)
+                    if not label_parts and stand_code:
+                        label_parts.append(stand_code)
+                    if not label_parts and stand_id is not None:
+                        label_parts.append(f"Станок {stand_id}")
+                    if label_parts:
+                        client_stand_map[client_id] = " · ".join(label_parts)
+
+    for entry in registrations:
+        status_value = (entry.get("status") or "").lower()
+        stand_label = None
+        client_id = entry.get("client_id")
+        if isinstance(client_id, int):
+            stand_label = client_stand_map.get(client_id)
+        payload = {
+            "name": entry.get("client_name")
+            or entry.get("tg_full_name")
+            or (f"@{entry.get('tg_username')}" if entry.get("tg_username") else f"ID {entry.get('client_id')}"),
+            "cluster": entry.get("cluster_label"),
+            "notes": entry.get("notes"),
+            "is_pending": False,
+            "race_mode": entry.get("race_mode"),
+            "stand_label": stand_label,
+        }
+        submitted = entry.get("payment_submitted_at")
+        if hasattr(submitted, "isoformat"):
+            payload["submitted"] = submitted.isoformat()
+        elif submitted:
+            payload["submitted"] = str(submitted)
+        if status_value == race_repository.RACE_STATUS_APPROVED:
+            participants.append(payload)
+        elif status_value == race_repository.RACE_STATUS_PENDING:
+            payload["is_pending"] = True
+            pending_count += 1
+            participants.append(payload)
+
+    price_value = race.get("price_rub")
+    price_label = f"{int(price_value):,}".replace(",", " ") if isinstance(price_value, (int, float)) else None
+
+    description_raw = (race.get("description") or "").strip()
+    if description_raw:
+        description_formatted = "<br>".join(description_raw.splitlines())
+    else:
+        description_formatted = None
+
+    grouped_participants_offline: list[dict] = []
+    grouped_participants_online: list[dict] = []
+    groups_map_offline: dict[str, list] = {}
+    groups_map_online: dict[str, list] = {}
+    unassigned_label = "Кластер не назначен"
+    for item in participants:
+        mode_key = (item.get("race_mode") or "").strip().lower()
+        target_map = groups_map_offline if mode_key != "online" else groups_map_online
+        label = (item.get("cluster") or "").strip() or unassigned_label
+        target_map.setdefault(label, []).append(item)
+
+    for label in ordered_cluster_labels:
+        if label in groups_map_offline:
+            members = groups_map_offline.pop(label)
+            members.sort(key=lambda x: ((x.get("stand_label") or "станокzzz").lower(), x.get("name") or ""))
+            grouped_participants_offline.append({"label": label, "participants": members})
+    for label in sorted(groups_map_offline.keys()):
+        members = groups_map_offline[label]
+        members.sort(key=lambda x: ((x.get("stand_label") or "станокzzz").lower(), x.get("name") or ""))
+        grouped_participants_offline.append({"label": label, "participants": members})
+
+    for label in ordered_cluster_labels:
+        if label in groups_map_online:
+            members = groups_map_online.pop(label)
+            members.sort(key=lambda x: (x.get("name") or ""))
+            grouped_participants_online.append({"label": label, "participants": members})
+    for label in sorted(groups_map_online.keys()):
+        members = groups_map_online[label]
+        members.sort(key=lambda x: (x.get("name") or ""))
+        grouped_participants_online.append({"label": label, "participants": members})
+
+    race_payload = {
+        "title": race.get("title"),
+        "date_label": _format_race_date_label(race.get("race_date")),
+        "price_label": price_label,
+        "sbp_phone": race.get("sbp_phone"),
+        "payment_instructions": race.get("payment_instructions"),
+        "notes": race.get("notes"),
+        "description": description_formatted,
+        "slug": race.get("slug"),
+        "is_active": race.get("is_active"),
+        "clusters": race.get("clusters") or [],
+    }
+
+    share_url = f"{request.url.scheme}://{request.url.netloc}/race/{race_payload['slug']}"
+
+    context.update(
+        {
+            "race": race_payload,
+            "participants": participants,
+            "participant_groups_offline": grouped_participants_offline,
+            "participant_groups_online": grouped_participants_online,
+            "participants_count": len(participants),
+            "pending_count": pending_count,
+            "share_url": share_url,
+            "cluster_times": cluster_times,
+        }
+    )
+    return templates.TemplateResponse("public_race.html", context)
+
+
+@public_router.get("/race")
+def race_default_redirect():
+    return RedirectResponse(url="/schedule", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
