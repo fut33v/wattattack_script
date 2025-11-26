@@ -11,6 +11,8 @@ import type {
   ClientRow,
   ClientActivitiesResponse,
   ClientActivityItem,
+  ClientReservationsResponse,
+  ClientReservation
 } from "../lib/types";
 import StateScreen from "../components/StateScreen";
 
@@ -83,6 +85,12 @@ export default function ClientEditPage() {
     enabled: isIdValid
   });
 
+  const reservationsQuery = useQuery<ClientReservationsResponse>({
+    queryKey: ["client-reservations", clientId],
+    queryFn: () => apiFetch<ClientReservationsResponse>(`/api/clients/${clientId}/reservations`),
+    enabled: isIdValid
+  });
+
   const bikesQuery = useQuery<BikeListResponse>({
     queryKey: ["bikes"],
     queryFn: () => apiFetch<BikeListResponse>("/api/bikes")
@@ -151,8 +159,8 @@ export default function ClientEditPage() {
 
   return (
     <Panel
-      title={`Клиент #${client.id}`}
-      subtitle={client.full_name || [client.first_name, client.last_name].filter(Boolean).join(" ") || "Без имени"}
+      title={client.full_name || [client.first_name, client.last_name].filter(Boolean).join(" ") || "Без имени"}
+      subtitle={`Клиент #${client.id}`}
       headerExtra={
         <button className="button" type="button" onClick={() => navigate(-1)}>
           ← Назад
@@ -285,6 +293,40 @@ export default function ClientEditPage() {
 
       <section className="detail-card">
         <div className="detail-card__header">
+          <h3>Бронирования</h3>
+          {reservationsQuery.isLoading && <span className="meta-hint">Загружаем…</span>}
+          {reservationsQuery.isError && <span className="form-error">Не удалось загрузить бронирования.</span>}
+        </div>
+        {reservationsQuery.data?.stats && (
+          <div className="reservations-stats">
+            <div className="reservations-stat">
+              <div className="meta-label">Всего</div>
+              <div className="meta-value">{reservationsQuery.data.stats.total}</div>
+            </div>
+            <div className="reservations-stat">
+              <div className="meta-label">Будущие</div>
+              <div className="meta-value">{reservationsQuery.data.stats.upcoming}</div>
+            </div>
+            <div className="reservations-stat">
+              <div className="meta-label">Прошедшие</div>
+              <div className="meta-value">{reservationsQuery.data.stats.past}</div>
+            </div>
+          </div>
+        )}
+        <div className="reservations-grid">
+          <div>
+            <div className="meta-label">Будущие</div>
+            {renderReservationsList(reservationsQuery.data?.upcoming ?? [], "upcoming")}
+          </div>
+          <div>
+            <div className="meta-label">Прошедшие</div>
+            {renderReservationsList(reservationsQuery.data?.past ?? [], "past")}
+          </div>
+        </div>
+      </section>
+
+      <section className="detail-card">
+        <div className="detail-card__header">
           <h3>Активности WattAttack</h3>
           {activitiesQuery.isLoading && <span className="meta-hint">Загружаем…</span>}
           {activitiesQuery.isError && <span className="form-error">Не удалось загрузить активности.</span>}
@@ -350,6 +392,45 @@ export default function ClientEditPage() {
           </table>
         </div>
       </section>
+
     </Panel>
+  );
+}
+
+function renderReservationsList(items: ClientReservation[], keyPrefix: string) {
+  if (!items.length) {
+    return <div className="empty-state">Нет записей.</div>;
+  }
+  return (
+    <div className="reservations-list">
+      {items.map((item) => {
+        const slotDate = item.slot_date ? dayjs(item.slot_date).format("DD.MM.YYYY") : "—";
+        const slotTime = item.start_time ? item.start_time : "—";
+        const stand = item.stand_display_name || item.stand_title || item.stand_code || "—";
+        const status = (item.status || "").toLowerCase();
+        const sessionKind = item.session_kind || "";
+        return (
+          <div className="reservation-row" key={`${keyPrefix}-${item.id}`}>
+            <div className="reservation-row__meta">
+              <div className="reservation-row__primary">{slotDate}</div>
+              <div className="reservation-row__secondary">{slotTime}</div>
+            </div>
+            <div className="reservation-row__body">
+              <div className="reservation-row__title">{item.label || "Слот"}</div>
+              <div className="reservation-row__info">
+                <span className="pill pill-muted">{stand}</span>
+                {sessionKind && <span className="pill">{sessionKind}</span>}
+                {status && <span className="pill pill-muted">{status}</span>}
+              </div>
+              <div className="reservation-row__secondary">
+                {item.instructor_name && <span className="muted">Инструктор: {item.instructor_name}</span>}
+                {item.bike_title && <span className="muted"> · Велосипед: {item.bike_title}</span>}
+              </div>
+              {item.notes && <div className="reservation-row__notes">{item.notes}</div>}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }

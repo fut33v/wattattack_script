@@ -29,6 +29,9 @@ interface DataGridProps<T> {
     direction: "asc" | "desc";
     onSort: (key: string) => void;
   };
+  stickyHeader?: boolean;
+  onRowClick?: (item: T) => void;
+  rowClassName?: string | ((item: T) => string | undefined);
 }
 
 export function DataGrid<T>({
@@ -40,11 +43,14 @@ export function DataGrid<T>({
   tableClassName,
   selection,
   sortState,
+  stickyHeader,
+  onRowClick,
+  rowClassName
 }: DataGridProps<T>) {
   return (
-    <div className="table-container">
+    <div className={classNames("table-container", stickyHeader && "table-container--sticky")}>
       <table className={classNames("data-table", tableClassName)}>
-        <thead>
+        <thead className={classNames(stickyHeader && "data-table__head--sticky")}>
           <tr>
             {selection && (
               <th className="selection-col">
@@ -86,7 +92,28 @@ export function DataGrid<T>({
             </tr>
           ) : (
             items.map((item) => (
-              <tr key={getRowKey(item)}>
+              <tr
+                key={getRowKey(item)}
+                className={classNames(
+                  onRowClick && "data-table__row--clickable",
+                  typeof rowClassName === "function"
+                    ? rowClassName(item)
+                    : rowClassName
+                )}
+                onClick={onRowClick ? () => onRowClick(item) : undefined}
+                tabIndex={onRowClick ? 0 : undefined}
+                role={onRowClick ? "button" : undefined}
+                onKeyDown={
+                  onRowClick
+                    ? (event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          onRowClick(item);
+                        }
+                      }
+                    : undefined
+                }
+              >
                 {selection && (
                   <td className="selection-cell">
                     <input

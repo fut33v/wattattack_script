@@ -346,6 +346,41 @@ export interface ClientActivitiesResponse {
   stats: ClientActivitiesStats;
 }
 
+export interface ClientReservation {
+  id: number;
+  slot_id: number;
+  slot_date?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  label?: string | null;
+  session_kind?: string | null;
+  instructor_id?: number | null;
+  instructor_name?: string | null;
+  stand_id?: number | null;
+  stand_code?: string | null;
+  stand_display_name?: string | null;
+  stand_title?: string | null;
+  bike_title?: string | null;
+  bike_owner?: string | null;
+  client_id?: number | null;
+  client_name?: string | null;
+  status?: string | null;
+  notes?: string | null;
+  source?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ClientReservationsResponse {
+  upcoming: ClientReservation[];
+  past: ClientReservation[];
+  stats?: {
+    upcoming: number;
+    past: number;
+    total: number;
+  };
+}
+
 export interface RaceCluster {
   code?: string | null;
   label: string;

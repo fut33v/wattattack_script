@@ -25,13 +25,13 @@ class Settings:
     public_url: Optional[str] = None
     straver_base_url: Optional[str] = None
     straver_internal_secret: Optional[str] = None
-    clients_page_size: int = 25
+    clients_page_size: int = 150
 
 
 @lru_cache()
 def get_settings() -> Settings:
     """Return cached application settings."""
-    default_page_size = int(os.environ.get("WEBAPP_CLIENTS_PAGE_SIZE", os.environ.get("CLIENTS_PAGE_SIZE", "100")))
+    default_page_size = int(os.environ.get("WEBAPP_CLIENTS_PAGE_SIZE", os.environ.get("CLIENTS_PAGE_SIZE", "150")))
     telegram_bot_token = _env("TELEGRAM_BOT_TOKEN", required=True)
     login_token = (
         os.environ.get("TELEGRAM_LOGIN_BOT_TOKEN")
