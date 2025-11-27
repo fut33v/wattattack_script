@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import logging
+import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from repositories import schedule_repository
+from repositories import client_link_repository, schedule_repository, intervals_link_repository, client_repository
 from ..dependencies import require_admin
+from scheduler import intervals_sync
+from scheduler.notifier_client import (
+    format_activity_meta,
+    format_strava_activity_description,
+    telegram_send_document,
+    telegram_send_message,
+)
+from straver_client import StraverClient
+from .sync import _build_strava_payload, _resolve_fit_file_path
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/activities", tags=["activities"], dependencies=[Depends(require_admin)])
 
@@ -24,9 +37,15 @@ def _serialize_activity_id(activity_record: dict) -> dict:
 def _serialize_activity_id_enriched(activity_record: dict) -> dict:
     serialized = _serialize_activity_id(activity_record)
     client_id = activity_record.get("client_id")
+    manual_client_id = activity_record.get("manual_client_id")
+    manual_client_name = activity_record.get("manual_client_name")
     scheduled_name = activity_record.get("scheduled_name")
     if client_id is not None:
         serialized["client_id"] = client_id
+    if manual_client_id is not None:
+        serialized["manual_client_id"] = manual_client_id
+    if manual_client_name is not None:
+        serialized["manual_client_name"] = manual_client_name
     if scheduled_name is not None:
         serialized["scheduled_name"] = scheduled_name
     for flag in (
@@ -145,6 +164,272 @@ def api_get_activity_id(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch activity"
+        ) from exc
+
+
+def _load_activity_row(account_id: str, activity_id: str) -> dict:
+    schedule_repository.ensure_activity_ids_table()
+    with schedule_repository.db_connection() as conn, schedule_repository.dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM seen_activity_ids
+            WHERE account_id = %s AND activity_id = %s
+            """,
+            (account_id, activity_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Activity not found")
+    return row
+
+
+def _build_activity_payload(row: dict) -> dict:
+    start_dt = row.get("start_time") or row.get("created_at")
+    start_iso = start_dt.isoformat() if hasattr(start_dt, "isoformat") else None
+    name = (
+        row.get("manual_client_name")
+        or row.get("scheduled_name")
+        or row.get("profile_name")
+        or str(row.get("activity_id"))
+    )
+    return {
+        "id": row.get("activity_id"),
+        "mapNameRu": name,
+        "name": name,
+        "startTime": start_iso,
+        "distance": row.get("distance"),
+        "elapsedTime": row.get("elapsed_time"),
+        "totalElevationGain": row.get("elevation_gain"),
+        "averageWatts": row.get("average_power"),
+        "averageCadence": row.get("average_cadence"),
+        "averageHeartrate": row.get("average_heartrate"),
+    }
+
+
+@router.post("/{account_id}/{activity_id}/strava")
+def api_upload_activity_to_strava(
+    account_id: str,
+    activity_id: str,
+):
+    """Upload a single activity to Strava for the linked user."""
+    try:
+        activity_row = _load_activity_row(account_id, activity_id)
+
+        client_id = activity_row.get("manual_client_id") or activity_row.get("client_id")
+        if not client_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Strava не привязана: клиент не найден")
+
+        link = client_link_repository.get_link_by_client(int(client_id))
+        tg_user_id = link.get("tg_user_id") if link else None
+        if not tg_user_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Strava не привязана у клиента")
+
+        straver = StraverClient()
+        if not straver.is_configured():
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Straver сервис не настроен")
+
+        statuses = straver.connection_status([int(tg_user_id)])
+        status_row = statuses.get(int(tg_user_id))
+        if not status_row or not status_row.get("connected"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Strava не привязана у пользователя")
+
+        file_path = _resolve_fit_file_path(activity_row)
+        if not file_path:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "FIT-файл не найден, загрузка невозможна")
+
+        upload_name, description = _build_strava_payload(activity_row)
+        try:
+            straver.upload_activity(
+                tg_user_id=int(tg_user_id),
+                file_path=file_path,
+                name=upload_name,
+                description=description,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Failed to upload activity %s/%s to Strava", account_id, activity_id)
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Не удалось загрузить в Strava: {exc}") from exc
+
+        schedule_repository.record_seen_activity_id(
+            str(account_id),
+            str(activity_id),
+            sent_strava=True,
+        )
+
+        return {"status": "uploaded", "message": "Активность отправлена в Strava"}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Unexpected error while uploading activity %s/%s to Strava", account_id, activity_id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Не удалось отправить активность в Strava"
+        ) from exc
+
+
+@router.post("/{account_id}/{activity_id}/clientbot")
+def api_send_activity_to_clientbot(
+    account_id: str,
+    activity_id: str,
+):
+    """Send a single activity to the linked Telegram client bot."""
+    try:
+        activity_row = _load_activity_row(account_id, activity_id)
+        client_id = activity_row.get("manual_client_id") or activity_row.get("client_id")
+        if not client_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Бот не привязан: клиент не найден")
+
+        link = client_link_repository.get_link_by_client(int(client_id))
+        tg_user_id = link.get("tg_user_id") if link else None
+        if not tg_user_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Бот не привязан у клиента")
+
+        token = os.environ.get("KRUTILKAVN_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
+        if not token:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "KRUTILKAVN_BOT_TOKEN не настроен")
+
+        file_path = _resolve_fit_file_path(activity_row)
+        if not file_path:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "FIT-файл не найден, отправка в бота невозможна")
+        activity_payload = _build_activity_payload(activity_row)
+        caption = format_activity_meta(
+            activity_payload,
+            account_id,
+            profile=None,
+            scheduled_name=activity_row.get("scheduled_name"),
+        )
+        telegram_send_document(
+            token=token,
+            chat_id=str(tg_user_id),
+            file_path=file_path,
+            filename=file_path.name,
+            caption=caption,
+            timeout=30,
+        )
+
+        schedule_repository.record_seen_activity_id(
+            str(account_id),
+            str(activity_id),
+            sent_clientbot=True,
+        )
+        return {"status": "sent", "message": "Отправлено в бота"}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Unexpected error while sending activity %s/%s to bot", account_id, activity_id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Не удалось отправить в бота"
+        ) from exc
+
+
+@router.post("/{account_id}/{activity_id}/intervals")
+def api_send_activity_to_intervals(
+    account_id: str,
+    activity_id: str,
+):
+    """Upload a single activity to Intervals.icu for the linked user."""
+    try:
+        activity_row = _load_activity_row(account_id, activity_id)
+        client_id = activity_row.get("manual_client_id") or activity_row.get("client_id")
+        if not client_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Intervals не привязан: клиент не найден")
+
+        link = client_link_repository.get_link_by_client(int(client_id))
+        tg_user_id = link.get("tg_user_id") if link else None
+        if not tg_user_id:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Intervals не привязан у клиента")
+
+        intervals_link = intervals_link_repository.get_link(int(tg_user_id))
+        if not intervals_link or not intervals_link.get("intervals_api_key"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Intervals не привязан у пользователя")
+
+        file_path = _resolve_fit_file_path(activity_row)
+        if not file_path:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "FIT-файл не найден, загрузка невозможна")
+
+        activity_payload = _build_activity_payload(activity_row)
+        description = format_strava_activity_description(
+            activity_payload,
+            account_id,
+            profile=None,
+            scheduled_name=activity_row.get("scheduled_name"),
+        )
+
+        uploaded = intervals_sync.upload_activity(
+            tg_user_id=int(tg_user_id),
+            temp_file=file_path,
+            description=description,
+            activity_id=activity_id,
+            timeout=30.0,
+            activity_name=activity_payload.get("name") or "Крутилка",
+        )
+        if not uploaded:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Не удалось загрузить в Intervals")
+
+        schedule_repository.record_seen_activity_id(
+            str(account_id),
+            str(activity_id),
+            sent_intervals=True,
+        )
+        return {"status": "sent", "message": "Отправлено в Intervals"}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception(
+            "Unexpected error while sending activity %s/%s to Intervals", account_id, activity_id
+        )
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Не удалось отправить в Intervals"
+        ) from exc
+
+
+@router.patch("/{account_id}/{activity_id}/client")
+async def api_update_activity_client(account_id: str, activity_id: str, payload: dict):
+    """Update linked client for an activity."""
+    try:
+        activity_row = _load_activity_row(account_id, activity_id)
+        client_id_raw = payload.get("client_id") if isinstance(payload, dict) else None
+        new_client_id: Optional[int] = None
+        new_client_name: Optional[str] = None
+        if client_id_raw not in (None, ""):
+            try:
+                new_client_id = int(client_id_raw)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "Некорректный client_id") from exc
+            if new_client_id <= 0:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "client_id должен быть > 0")
+            client_row = client_repository.get_client(new_client_id)
+            if not client_row:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Клиент не найден")
+            new_client_name = client_row.get("full_name") or (
+                f"{client_row.get('first_name') or ''} {client_row.get('last_name') or ''}".strip()
+            )
+
+        schedule_repository.ensure_activity_ids_table()
+        with schedule_repository.db_connection() as conn, schedule_repository.dict_cursor(conn) as cur:
+            cur.execute(
+                """
+                UPDATE seen_activity_ids
+                SET client_id = %s,
+                    manual_client_id = %s,
+                    manual_client_name = %s
+                WHERE account_id = %s AND activity_id = %s
+                RETURNING *
+                """,
+                (new_client_id, new_client_id, new_client_name, account_id, activity_id),
+            )
+            updated = cur.fetchone()
+            conn.commit()
+
+        if not updated:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Activity not found")
+
+        return {"item": _serialize_activity_id_enriched(updated)}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Failed to update client for activity %s/%s", account_id, activity_id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Не удалось обновить клиента"
         ) from exc
 
 

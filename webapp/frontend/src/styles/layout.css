@@ -1606,6 +1606,102 @@ button.secondary:hover {
   gap: 1.2rem;
 }
 
+.activity-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.action-hint {
+  font-size: 0.9rem;
+  color: #cbd5ff;
+}
+
+.action-hint--success {
+  color: #b7f9c0;
+}
+
+.action-hint--error {
+  color: #ffc6c6;
+}
+
+.activity-client-edit {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.activity-client-edit label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  color: rgba(190, 200, 230, 0.85);
+}
+
+.activity-client-edit input {
+  border: 1px solid rgba(129, 140, 248, 0.35);
+  border-radius: 10px;
+  padding: 0.5rem 0.75rem;
+  background: rgba(15, 20, 38, 0.9);
+  color: #f3f6ff;
+  min-width: 160px;
+}
+
+.activity-client-search {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.activity-client-search input {
+  border: 1px solid rgba(129, 140, 248, 0.35);
+  border-radius: 10px;
+  padding: 0.5rem 0.75rem;
+  background: rgba(15, 20, 38, 0.9);
+  color: #f3f6ff;
+}
+
+.activity-client-search-results {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.client-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid rgba(129, 140, 248, 0.35);
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  background: rgba(15, 20, 38, 0.8);
+  color: #f3f6ff;
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.client-chip:hover {
+  border-color: rgba(129, 140, 248, 0.8);
+  transform: translateY(-1px);
+}
+
+.client-chip-name {
+  font-weight: 600;
+}
+
+.client-chip-id {
+  opacity: 0.7;
+  font-size: 0.85rem;
+}
+
 .activity-meta-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));

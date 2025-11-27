@@ -1322,6 +1322,10 @@ def ensure_activity_ids_table() -> None:
         existing = {row["column_name"] for row in cur.fetchall()}
         if "client_id" not in existing:
             cur.execute("ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS client_id INTEGER")
+        if "manual_client_id" not in existing:
+            cur.execute("ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS manual_client_id INTEGER")
+        if "manual_client_name" not in existing:
+            cur.execute("ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS manual_client_name TEXT")
         if "scheduled_name" not in existing:
             cur.execute(
                 "ALTER TABLE seen_activity_ids ADD COLUMN IF NOT EXISTS scheduled_name TEXT"

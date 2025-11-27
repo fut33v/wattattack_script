@@ -1,10 +1,17 @@
 import { Link, useParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import dayjs from "dayjs";
 
 import Panel from "../components/Panel";
-import { apiFetch } from "../lib/api";
-import type { ActivityDetailResponse, ActivityIdRecord } from "../lib/types";
+import { ApiError, apiFetch } from "../lib/api";
+import type {
+  ActivityDetailResponse,
+  ActivityIdRecord,
+  ActivityStravaUploadResponse,
+  ClientListResponse,
+  ClientRow,
+} from "../lib/types";
 
 function formatDateTime(value?: string | null) {
   if (!value) return "—";
@@ -53,26 +60,32 @@ function Flag({ label, value }: { label: string; value?: boolean | null }) {
 }
 
 function ClientLink({ activity }: { activity: ActivityIdRecord }) {
-  const { client_id, scheduled_name, profile_name } = activity;
+  const { client_id, manual_client_id, manual_client_name, scheduled_name, profile_name } = activity;
+  const preferredId = manual_client_id || client_id;
   const displayName =
-    scheduled_name || profile_name || (client_id ? `Клиент #${client_id}` : "Не найден");
+    manual_client_name ||
+    scheduled_name ||
+    profile_name ||
+    (preferredId ? `Клиент #${preferredId}` : "Не найден");
 
   return (
     <div className="client-link-block">
       <div className="meta-label">Клиент</div>
-      {client_id ? (
-        <Link className="client-link" to={`/clients/${client_id}`}>
+      {preferredId ? (
+        <Link className="client-link" to={`/clients/${preferredId}`}>
           {displayName}
         </Link>
       ) : (
         <div className="meta-value">{displayName}</div>
       )}
       <div className="meta-hint">
-        {scheduled_name
-          ? "Определен по расписанию"
-          : profile_name
-            ? "Определен по имени в WattAttack"
-            : "Клиент не сопоставлен"}
+        {manual_client_id
+          ? "Выбран вручную"
+          : scheduled_name
+            ? "Определен по расписанию"
+            : profile_name
+              ? "Определен по имени в WattAttack"
+              : "Клиент не сопоставлен"}
       </div>
     </div>
   );
@@ -89,6 +102,11 @@ function MetaField({ label, value }: { label: string; value: string | number }) 
 
 export default function ActivityDetailPage() {
   const { accountId = "", activityId = "" } = useParams();
+  const queryClient = useQueryClient();
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [actionStatus, setActionStatus] = useState<"success" | "error" | null>(null);
+  const [clientInput, setClientInput] = useState<string>("");
+  const [clientSearch, setClientSearch] = useState<string>("");
 
   const detailQuery = useQuery<ActivityDetailResponse>({
     queryKey: ["activity-detail", accountId, activityId],
@@ -98,6 +116,103 @@ export default function ActivityDetailPage() {
   });
 
   const activity: ActivityIdRecord | undefined = detailQuery.data?.item;
+
+  useEffect(() => {
+    setActionMessage(null);
+    setActionStatus(null);
+  }, [accountId, activityId]);
+
+  useEffect(() => {
+    setClientInput(activity?.client_id ? String(activity.client_id) : "");
+  }, [activity?.client_id]);
+
+  const handleSuccess = (message?: string | null) => {
+    setActionStatus("success");
+    setActionMessage(message || "Готово");
+    queryClient.invalidateQueries({ queryKey: ["activity-detail", accountId, activityId] });
+  };
+
+  const handleError = (error: unknown, fallback: string) => {
+    const message =
+      error instanceof ApiError ? error.message || fallback : fallback;
+    setActionStatus("error");
+    setActionMessage(message);
+  };
+
+  const stravaUpload = useMutation({
+    mutationFn: () =>
+      apiFetch<ActivityStravaUploadResponse>(
+        `/api/activities/${accountId}/${activityId}/strava`,
+        { method: "POST" },
+      ),
+    onSuccess: (data) => {
+      handleSuccess(data?.message || "Активность отправлена в Strava");
+    },
+    onError: (error: unknown) => {
+      handleError(error, "Не удалось отправить в Strava");
+    },
+  });
+
+  const sendToBot = useMutation({
+    mutationFn: () =>
+      apiFetch<ActivityStravaUploadResponse>(
+        `/api/activities/${accountId}/${activityId}/clientbot`,
+        { method: "POST" },
+      ),
+    onSuccess: (data) => {
+      handleSuccess(data?.message || "Отправлено в бота");
+    },
+    onError: (error: unknown) => {
+      handleError(error, "Не удалось отправить в бота");
+    },
+  });
+
+  const sendToIntervals = useMutation({
+    mutationFn: () =>
+      apiFetch<ActivityStravaUploadResponse>(
+        `/api/activities/${accountId}/${activityId}/intervals`,
+        { method: "POST" },
+      ),
+    onSuccess: (data) => {
+      handleSuccess(data?.message || "Отправлено в Intervals");
+    },
+    onError: (error: unknown) => {
+      handleError(error, "Не удалось отправить в Intervals");
+    },
+  });
+
+  const updateClient = useMutation({
+    mutationFn: () =>
+      apiFetch<ActivityDetailResponse>(`/api/activities/${accountId}/${activityId}/client`, {
+        method: "PATCH",
+        body: { client_id: clientInput.trim() || null },
+      }),
+    onSuccess: () => {
+      handleSuccess("Клиент обновлен");
+      detailQuery.refetch();
+    },
+    onError: (error: unknown) => {
+      handleError(error, "Не удалось обновить клиента");
+    },
+  });
+
+  const anyPending =
+    stravaUpload.isPending || sendToBot.isPending || sendToIntervals.isPending || updateClient.isPending;
+
+  const clientsQuery = useQuery<ClientListResponse>({
+    queryKey: ["client-search", clientSearch],
+    enabled: clientSearch.trim().length >= 2,
+    queryFn: () =>
+      apiFetch<ClientListResponse>(
+        `/api/clients?search=${encodeURIComponent(clientSearch.trim())}&page=1&sort=last_name&direction=asc`,
+      ),
+    staleTime: 30_000,
+  });
+
+  const formatClientName = (client: ClientRow) =>
+    client.full_name?.trim() ||
+    [client.first_name, client.last_name].filter(Boolean).join(" ").trim() ||
+    `Клиент #${client.id}`;
 
   return (
     <Panel
@@ -118,14 +233,13 @@ export default function ActivityDetailPage() {
       )}
       {activity && (
         <div className="activity-detail">
-          <ClientLink activity={activity} />
-
           <div className="activity-meta-grid">
             <MetaField label="Account ID" value={activity.account_id} />
             <MetaField label="Activity ID" value={activity.activity_id} />
             <MetaField label="Дата активности" value={formatDateTime(activity.start_time)} />
             <MetaField label="Дата добавления" value={formatDateTime(activity.created_at)} />
             <MetaField label="Клиент ID" value={activity.client_id ?? "—"} />
+            <MetaField label="Ручной клиент ID" value={activity.manual_client_id ?? "—"} />
             <MetaField label="Имя по расписанию" value={activity.scheduled_name || "—"} />
             <MetaField label="Имя в WattAttack" value={activity.profile_name || "—"} />
           </div>
@@ -173,6 +287,103 @@ export default function ActivityDetailPage() {
                 )}
               </div>
             </div>
+          </div>
+
+          <ClientLink activity={activity} />
+
+          <div className="activity-actions">
+            <button
+              type="button"
+              className="button primary action-button"
+              onClick={() => stravaUpload.mutate()}
+              disabled={!activity || anyPending}
+            >
+              {stravaUpload.isPending ? "⏳ Загрузка…" : "🚴‍♂️ Загрузить в Strava"}
+            </button>
+            <button
+              type="button"
+              className="button action-button"
+              onClick={() => sendToBot.mutate()}
+              disabled={!activity || anyPending}
+            >
+              {sendToBot.isPending ? "⏳ Отправляем…" : "🤖 Отправить в бота"}
+            </button>
+            <button
+              type="button"
+              className="button action-button"
+              onClick={() => sendToIntervals.mutate()}
+              disabled={!activity || anyPending}
+            >
+              {sendToIntervals.isPending ? "⏳ Отправляем…" : "📊 Отправить в Intervals"}
+            </button>
+            {actionMessage && (
+              <span
+                className={`action-hint ${
+                  actionStatus === "error" ? "action-hint--error" : "action-hint--success"
+                }`}
+              >
+                {actionMessage}
+              </span>
+            )}
+          </div>
+
+          <div className="activity-client-edit">
+            <label>
+              Client ID
+              <input
+                type="number"
+                min="1"
+                value={clientInput}
+                onChange={(e) => setClientInput(e.target.value)}
+                placeholder="ID клиента"
+              />
+            </label>
+            <button
+              type="button"
+              className="button"
+              onClick={() => updateClient.mutate()}
+              disabled={updateClient.isPending || !accountId || !activityId}
+            >
+              {updateClient.isPending ? "Сохраняем…" : "Обновить клиента"}
+            </button>
+          </div>
+          <div className="activity-client-search">
+            <label>
+              Поиск клиента
+              <input
+                type="text"
+                value={clientSearch}
+                onChange={(e) => setClientSearch(e.target.value)}
+                placeholder="ФИО или часть имени"
+              />
+            </label>
+            {clientSearch.trim().length >= 2 && (
+              <div className="activity-client-search-results">
+                {clientsQuery.isLoading && <div className="meta-hint">Ищем…</div>}
+                {clientsQuery.isError && <div className="form-error">Ошибка поиска.</div>}
+                {!clientsQuery.isLoading && !clientsQuery.isError && (
+                  <>
+                    {(clientsQuery.data?.items.length ?? 0) === 0 && (
+                      <div className="meta-hint">Ничего не найдено.</div>
+                    )}
+                    {(clientsQuery.data?.items ?? []).map((item) => (
+                      <button
+                        type="button"
+                        key={item.id}
+                        className="client-chip"
+                        onClick={() => {
+                          setClientInput(String(item.id));
+                          setClientSearch(formatClientName(item));
+                        }}
+                      >
+                        <span className="client-chip-name">{formatClientName(item)}</span>
+                        <span className="client-chip-id">#{item.id}</span>
+                      </button>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}

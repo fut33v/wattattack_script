@@ -295,6 +295,8 @@ export interface ActivityIdRecord {
   created_at: string;
   start_time?: string | null;
   client_id?: number | null;
+  manual_client_id?: number | null;
+  manual_client_name?: string | null;
   scheduled_name?: string | null;
   profile_name?: string | null;
   sent_clientbot?: boolean | null;
@@ -320,6 +322,11 @@ export interface AccountListResponse {
 
 export interface ActivityDetailResponse {
   item: ActivityIdRecord;
+}
+
+export interface ActivityStravaUploadResponse {
+  status: string;
+  message?: string;
 }
 
 export interface ClientActivitiesStats {

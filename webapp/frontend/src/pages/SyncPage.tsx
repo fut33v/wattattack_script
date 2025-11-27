@@ -104,6 +104,7 @@ export default function SyncPage() {
   const [legacySummary, setLegacySummary] = useState<string>("");
   const [legacyErrors, setLegacyErrors] = useState<string[]>([]);
   const [legacyLog, setLegacyLog] = useState<string>("");
+  const [legacyOpen, setLegacyOpen] = useState(false);
   const [normalizeSummary, setNormalizeSummary] = useState<string>("");
   const [normalizeErrors, setNormalizeErrors] = useState<string[]>([]);
   const [normalizeStatus, setNormalizeStatus] = useState<"idle" | "running" | "done" | "error">("idle");
@@ -337,61 +338,6 @@ export default function SyncPage() {
       </Panel>
 
       <Panel
-        title="Импорт legacy истории"
-        subtitle="Загрузите history_legacy.json (экспорт или массив объектов), чтобы добавить старые активности в расписание"
-        headerExtra={
-          <button
-            type="button"
-            className="button"
-            onClick={startLegacyImport}
-            disabled={!legacyFile || legacyImport.isPending}
-          >
-            {legacyImport.isPending ? "Импортируем…" : "Импортировать файл"}
-          </button>
-        }
-      >
-        <div className="sync-content">
-          <p>
-            Берём сообщения с файлами <code>activity_*.fit</code> из экспорта Telegram, вытаскиваем дату, атлета и
-            метрики, а затем пытаемся привязать к клиенту по имени и времени тренировки.
-          </p>
-          <div className="sync-row">
-            <input type="file" accept=".json" onChange={handleLegacyFileChange} />
-            <div className={`sync-status sync-status--${legacyStatus}`}>
-              {legacyStatus === "idle" && "Файл не выбран"}
-              {legacyStatus === "running" && "Импорт…"}
-              {legacyStatus === "done" && "Готово"}
-              {legacyStatus === "error" && "Ошибка"}
-            </div>
-          </div>
-          {legacySummary && <div className="meta-hint">{legacySummary}</div>}
-          {legacyLog ? <pre className="sync-log">{legacyLog}</pre> : <div className="empty-state">Лог появится тут.</div>}
-          {legacyErrors.length > 0 ? (
-            <pre className="sync-log">{legacyErrors.join("\n")}</pre>
-          ) : (
-            <div className="empty-state">Ошибки появятся тут.</div>
-          )}
-          <div className="sync-row">
-            <button type="button" className="button" onClick={runNormalizeAccounts} disabled={normalizeAccounts.isPending}>
-              {normalizeAccounts.isPending ? "Переименовываем…" : "Нормализовать аккаунты krutilkavn → krutilka_"}
-            </button>
-            <div className={`sync-status sync-status--${normalizeStatus}`}>
-              {normalizeStatus === "idle" && "Готово"}
-              {normalizeStatus === "running" && "В работе…"}
-              {normalizeStatus === "done" && "Готово"}
-              {normalizeStatus === "error" && "Ошибка"}
-            </div>
-          </div>
-          {normalizeSummary && <div className="meta-hint">{normalizeSummary}</div>}
-          {normalizeErrors.length > 0 ? (
-            <pre className="sync-log">{normalizeErrors.join("\n")}</pre>
-          ) : (
-            <div className="empty-state">Ошибки нормализации появятся тут.</div>
-          )}
-        </div>
-      </Panel>
-
-      <Panel
         title="Дозагрузка в Strava"
         subtitle="Выберите пользователей со Strava, чтобы отправить им архивные FIT-файлы"
         headerExtra={
@@ -464,6 +410,68 @@ export default function SyncPage() {
           {stravaLastRun && <div className="meta-hint">Последняя дозагрузка: {stravaLastRun}</div>}
           {stravaLog ? <pre className="sync-log">{stravaLog}</pre> : <div className="empty-state">Лог появится тут.</div>}
         </div>
+      </Panel>
+
+      <Panel
+        title="Импорт legacy истории"
+        subtitle="Загрузите history_legacy.json (экспорт или массив объектов), чтобы добавить старые активности в расписание"
+        headerExtra={
+          <button type="button" className="button" onClick={() => setLegacyOpen((v) => !v)}>
+            {legacyOpen ? "Скрыть" : "Показать"}
+          </button>
+        }
+      >
+        {legacyOpen ? (
+          <div className="sync-content">
+            <p>
+              Берём сообщения с файлами <code>activity_*.fit</code> из экспорта Telegram, вытаскиваем дату, атлета и
+              метрики, а затем пытаемся привязать к клиенту по имени и времени тренировки.
+            </p>
+            <div className="sync-row">
+              <input type="file" accept=".json" onChange={handleLegacyFileChange} />
+              <button
+                type="button"
+                className="button"
+                onClick={startLegacyImport}
+                disabled={!legacyFile || legacyImport.isPending}
+              >
+                {legacyImport.isPending ? "Импортируем…" : "Импортировать файл"}
+              </button>
+              <div className={`sync-status sync-status--${legacyStatus}`}>
+                {legacyStatus === "idle" && "Файл не выбран"}
+                {legacyStatus === "running" && "Импорт…"}
+                {legacyStatus === "done" && "Готово"}
+                {legacyStatus === "error" && "Ошибка"}
+              </div>
+            </div>
+            {legacySummary && <div className="meta-hint">{legacySummary}</div>}
+            {legacyLog ? <pre className="sync-log">{legacyLog}</pre> : <div className="empty-state">Лог появится тут.</div>}
+            {legacyErrors.length > 0 ? (
+              <pre className="sync-log">{legacyErrors.join("\n")}</pre>
+            ) : (
+              <div className="empty-state">Ошибки появятся тут.</div>
+            )}
+            <div className="sync-row">
+              <button type="button" className="button" onClick={runNormalizeAccounts} disabled={normalizeAccounts.isPending}>
+                {normalizeAccounts.isPending ? "Переименовываем…" : "Нормализовать аккаунты krutilkavn → krutilka_"}
+              </button>
+              <div className={`sync-status sync-status--${normalizeStatus}`}>
+                {normalizeStatus === "idle" && "Готово"}
+                {normalizeStatus === "running" && "В работе…"}
+                {normalizeStatus === "done" && "Готово"}
+                {normalizeStatus === "error" && "Ошибка"}
+              </div>
+            </div>
+            {normalizeSummary && <div className="meta-hint">{normalizeSummary}</div>}
+            {normalizeErrors.length > 0 ? (
+              <pre className="sync-log">{normalizeErrors.join("\n")}</pre>
+            ) : (
+              <div className="empty-state">Ошибки нормализации появятся тут.</div>
+            )}
+          </div>
+        ) : (
+          <div className="empty-state">Legacy импорт свернут.</div>
+        )}
       </Panel>
     </>
   );
