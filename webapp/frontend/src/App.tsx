@@ -27,6 +27,7 @@ import RacesPage from "./pages/RacesPage";
 import RaceSummaryPage from "./pages/RaceSummaryPage";
 import SlotSeatingPage from "./pages/SlotSeatingPage";
 import ScheduleViewPage from "./pages/ScheduleViewPage";
+import ImportPage from "./pages/ImportPage";
 
 import "./styles/layout.css";
 import "./styles/messaging.css";
@@ -84,6 +85,7 @@ export default function App() {
           <Route path="/bikes" element={<BikesPage />} />
           <Route path="/trainers" element={<TrainersPage />} />
           <Route path="/links" element={<ClientLinksPage />} />
+          <Route path="/import" element={<ImportPage />} />
           <Route path="/sync" element={<SyncPage />} />
           <Route path="/admins" element={<AdminsPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />

@@ -37,7 +37,8 @@ const SERVICE_NAV_LINKS: readonly NavLinkConfig[] = [
   { to: "/schedule/notifications", label: "🔔 Уведомления", adminOnly: true },
   { to: "/activities", label: "🚴 Активности", adminOnly: true },
   { to: "/sync", label: "🔄 Синхронизация", adminOnly: true },
-  { to: "/links", label: "🧩 Связки", adminOnly: true }
+  { to: "/links", label: "🧩 Связки", adminOnly: true },
+  { to: "/import", label: "📥 Импорт", adminOnly: true }
 ] as const;
 
 const PUBLIC_NAV_LINKS: readonly NavLinkConfig[] = [

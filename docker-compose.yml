@@ -90,5 +90,29 @@ services:
       - ./data/fit_files:/app/data/fit_files
     restart: unless-stopped
 
+  backup:
+    build:
+      context: .
+      dockerfile: docker/backup/Dockerfile
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-5432}
+      DB_NAME: ${DB_NAME:-wattattack}
+      DB_USER: ${DB_USER:-wattattack}
+      DB_PASSWORD: ${DB_PASSWORD:-wattattack}
+      BACKUP_TG_BOT_TOKEN: ${BACKUP_TG_BOT_TOKEN:-}
+      KRUTILKAFIT_BOT_TOKEN: ${KRUTILKAFIT_BOT_TOKEN:-}
+      BACKUP_TG_CHAT_ID: ${BACKUP_TG_CHAT_ID:-}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_TG_CAPTION: ${BACKUP_TG_CAPTION:-Fitbot DB backup}
+      BACKUP_CRON_SCHEDULE: ${BACKUP_CRON_SCHEDULE:-0 3 * * *}
+      TZ: ${TZ:-Europe/Moscow}
+    depends_on:
+      - db
+    volumes:
+      - ./backups:/backups
+    restart: unless-stopped
+
 volumes:
   postgres_data:

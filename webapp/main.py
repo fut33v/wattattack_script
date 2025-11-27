@@ -37,6 +37,7 @@ from .routes.public_leaderboard import router as public_leaderboard_router
 from .routes.sync import router as sync_router
 from .routes.schedule import router as schedule_router, public_router as public_schedule_router
 from .routes.schedule_slots import router as schedule_slots_router
+from .routes.backup import router as backup_router
 
 
 BASE_DIR = Path(__file__).parent
@@ -86,6 +87,7 @@ api.include_router(messaging_router)
 api.include_router(schedule_router)
 api.include_router(schedule_slots_router)
 api.include_router(strava_router)
+api.include_router(backup_router)
 
 
 def create_app() -> FastAPI:
