@@ -1557,6 +1557,62 @@ def list_strava_backfill_activities(client_id: int, limit: int = 200) -> List[Di
     return [dict(row) for row in rows]
 
 
+def list_intervals_backfill_stats(client_ids: Sequence[int] | None = None) -> List[Dict]:
+    """Return aggregate stats for Intervals uploads per client."""
+    ensure_activity_ids_table()
+    base_query = """
+        SELECT
+            client_id,
+            COUNT(*) FILTER (WHERE fit_path IS NOT NULL) AS with_fit,
+            COUNT(*) FILTER (WHERE fit_path IS NOT NULL AND sent_intervals IS FALSE) AS pending,
+            MAX(COALESCE(start_time, created_at)) AS last_activity_at
+        FROM seen_activity_ids
+        WHERE client_id IS NOT NULL
+    """
+    params: Dict[str, object] = {}
+    if client_ids:
+        base_query += " AND client_id = ANY(%(client_ids)s)"
+        params["client_ids"] = list(client_ids)
+    base_query += " GROUP BY client_id"
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(base_query, params)
+        rows = cur.fetchall()
+    results: List[Dict] = []
+    for row in rows:
+        last_activity_at = row.get("last_activity_at")
+        results.append(
+            {
+                "client_id": row.get("client_id"),
+                "with_fit": int(row.get("with_fit") or 0),
+                "pending": int(row.get("pending") or 0),
+                "last_activity_at": last_activity_at.isoformat() if hasattr(last_activity_at, "isoformat") else None,
+            }
+        )
+    return results
+
+
+def list_intervals_backfill_activities(client_id: int, limit: int = 200) -> List[Dict]:
+    """Return activities for a client that haven't been uploaded to Intervals yet."""
+    ensure_activity_ids_table()
+    safe_limit = max(1, min(limit, 500))
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM seen_activity_ids
+            WHERE client_id = %s
+              AND sent_intervals IS FALSE
+              AND fit_path IS NOT NULL
+            ORDER BY COALESCE(start_time, created_at) ASC
+            LIMIT %s
+            """,
+            (client_id, safe_limit),
+        )
+        rows = cur.fetchall()
+    return [dict(row) for row in rows]
+
+
 def find_reservation_for_activity(
     stand_ids: Sequence[int],
     target_dt: datetime,

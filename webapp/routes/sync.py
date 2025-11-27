@@ -20,13 +20,15 @@ from scheduler.notifier_client import (  # type: ignore
     format_strava_activity_description,
 )
 from wattattack_activities import WattAttackClient, DEFAULT_BASE_URL
-from repositories import client_link_repository, schedule_repository, client_repository
+from repositories import client_link_repository, schedule_repository, client_repository, intervals_link_repository
+from scheduler import intervals_sync
 from straver_client import StraverClient
 from ..dependencies import require_admin
 
 router = APIRouter(prefix="/sync", tags=["sync"], dependencies=[Depends(require_admin)])
 log = logging.getLogger(__name__)
 LOCAL_TZ = ZoneInfo(os.environ.get("WATTATTACK_LOCAL_TZ", "Europe/Moscow"))
+STRAVER_HTTP_TIMEOUT = float(os.environ.get("STRAVER_HTTP_TIMEOUT", "15"))
 
 
 class SyncState:
@@ -161,6 +163,69 @@ class StravaBackfillState:
 
 
 STRAVA_STATE = StravaBackfillState()
+class IntervalsBackfillState:
+    MAX_LOG_LINES = 400
+
+    def __init__(self) -> None:
+        self.running = False
+        self.started_at: Optional[datetime] = None
+        self.finished_at: Optional[datetime] = None
+        self.users_total: int = 0
+        self.users_done: int = 0
+        self.current_user: Optional[str] = None
+        self.log: list[str] = []
+        self.summary: dict[str, dict] = {}
+        self.uploaded: int = 0
+        self.skipped: int = 0
+        self.error: Optional[str] = None
+        self._lock = threading.Lock()
+
+    def start(self, total_users: int) -> None:
+        with self._lock:
+            self.running = True
+            self.started_at = datetime.utcnow()
+            self.finished_at = None
+            self.users_total = total_users
+            self.users_done = 0
+            self.current_user = None
+            self.log = ["Старт загрузки в Intervals…"]
+            self.summary = {}
+            self.uploaded = 0
+            self.skipped = 0
+            self.error = None
+
+    def append_log(self, message: str) -> None:
+        with self._lock:
+            self.log.append(message)
+            if len(self.log) > self.MAX_LOG_LINES:
+                overflow = len(self.log) - self.MAX_LOG_LINES
+                if overflow > 0:
+                    self.log = self.log[overflow:]
+
+    def to_dict(self) -> Dict:
+        with self._lock:
+            return {
+                "running": self.running,
+                "started_at": self.started_at.isoformat() if self.started_at else None,
+                "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+                "users_total": self.users_total,
+                "users_done": self.users_done,
+                "current_user": self.current_user,
+                "log": list(self.log),
+                "summary": dict(self.summary),
+                "uploaded": self.uploaded,
+                "skipped": self.skipped,
+                "error": self.error,
+            }
+
+    def finish(self, error: Optional[str] = None) -> None:
+        with self._lock:
+            self.running = False
+            self.finished_at = datetime.utcnow()
+            self.error = error
+
+
+INTERVALS_STATE = IntervalsBackfillState()
 
 
 def _fit_storage_path(account_id: str, activity_id: str) -> Path:
@@ -914,6 +979,94 @@ def _backfill_strava(tg_user_ids: Sequence[int], max_per_user: int) -> None:
     STRAVA_STATE.finish()
 
 
+def _backfill_intervals(tg_user_ids: Sequence[int], max_per_user: int) -> None:
+    """Upload archived FIT files to Intervals.icu for selected Telegram users."""
+    INTERVALS_STATE.start(len(tg_user_ids))
+
+    for tg_user_id in tg_user_ids:
+        summary_key = str(tg_user_id)
+        INTERVALS_STATE.current_user = summary_key
+        uploaded = 0
+        skipped = 0
+
+        try:
+            link = client_link_repository.get_link_by_user(int(tg_user_id))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Intervals: failed to load client link for %s", tg_user_id)
+            INTERVALS_STATE.append_log(f"{tg_user_id}: ошибка чтения связки ({exc})")
+            INTERVALS_STATE.summary[summary_key] = {"uploaded": uploaded, "skipped": skipped, "error": 1}
+            INTERVALS_STATE.users_done += 1
+            continue
+
+        if not link:
+            INTERVALS_STATE.append_log(f"{tg_user_id}: нет связанного клиента, пропускаем")
+            INTERVALS_STATE.summary[summary_key] = {"uploaded": uploaded, "skipped": skipped, "error": 1}
+            INTERVALS_STATE.users_done += 1
+            continue
+
+        intervals_link = intervals_link_repository.get_link(int(tg_user_id))
+        if not intervals_link or not intervals_link.get("intervals_api_key"):
+            INTERVALS_STATE.append_log(f"{tg_user_id}: Intervals не подключен, пропускаем")
+            INTERVALS_STATE.summary[summary_key] = {"uploaded": uploaded, "skipped": skipped, "error": 1}
+            INTERVALS_STATE.users_done += 1
+            continue
+
+        activities = schedule_repository.list_intervals_backfill_activities(
+            link["client_id"],
+            limit=max_per_user,
+        )
+        INTERVALS_STATE.append_log(f"{tg_user_id}: найдено {len(activities)} активностей для загрузки")
+
+        for activity in activities:
+            file_path = _resolve_fit_file_path(activity)
+            if not file_path:
+                INTERVALS_STATE.append_log(
+                    f"{tg_user_id}: {activity.get('activity_id')} — нет FIT-файла, пропускаем"
+                )
+                skipped += 1
+                INTERVALS_STATE.skipped += 1
+                continue
+
+            upload_name, description = _build_strava_payload(activity)
+            try:
+                intervals_sync.upload_activity(
+                    tg_user_id=int(tg_user_id),
+                    temp_file=file_path,
+                    description=description,
+                    activity_id=activity.get("activity_id"),
+                    timeout=STRAVER_HTTP_TIMEOUT,
+                    activity_name=upload_name,
+                )
+                account_id = activity.get("account_id")
+                activity_id = activity.get("activity_id")
+                if account_id and activity_id:
+                    schedule_repository.record_seen_activity_id(
+                        str(account_id),
+                        str(activity_id),
+                        sent_intervals=True,
+                    )
+                uploaded += 1
+                INTERVALS_STATE.uploaded += 1
+                INTERVALS_STATE.append_log(f"{tg_user_id}: загружено {activity.get('activity_id')}")
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Failed to upload activity %s for user %s to Intervals", activity.get("activity_id"), tg_user_id)
+                INTERVALS_STATE.append_log(
+                    f"{tg_user_id}: ошибка загрузки {activity.get('activity_id')} ({exc})"
+                )
+                skipped += 1
+                INTERVALS_STATE.skipped += 1
+
+        INTERVALS_STATE.summary[summary_key] = {
+            "pending": len(activities),
+            "uploaded": uploaded,
+            "skipped": skipped,
+        }
+        INTERVALS_STATE.users_done += 1
+
+    INTERVALS_STATE.current_user = None
+    INTERVALS_STATE.finish()
+
+
 @router.post("/activities")
 def api_sync_activities():
     """Kick off background sync of historical WattAttack activities."""
@@ -933,6 +1086,19 @@ def api_sync_activities():
 def api_sync_status():
     """Return current sync progress/state."""
     return SYNC_STATE.to_dict()
+
+
+@router.post("/status/clear")
+def api_sync_clear_logs():
+    """Clear sync logs and cached state."""
+    try:
+        SYNC_STATE.log = []
+        STRAVA_STATE.log = []
+        INTERVALS_STATE.log = []
+        return {"status": "cleared"}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to clear logs") from exc
+
 
 
 @router.post("/legacy/import")
@@ -1062,3 +1228,81 @@ def api_strava_backfill(payload: dict = Body(...)):
 def api_strava_backfill_status():
     """Return current Strava backfill state."""
     return STRAVA_STATE.to_dict()
+
+
+@router.get("/intervals/candidates")
+def api_intervals_candidates():
+    """Return Intervals.icu backfill candidates."""
+    try:
+        intervals_links = intervals_link_repository.list_links()
+        client_links = client_link_repository.list_links()
+        link_by_tg = {row["tg_user_id"]: row for row in client_links if row.get("tg_user_id")}
+        stats = schedule_repository.list_intervals_backfill_stats(
+            [row.get("client_id") for row in client_links if row.get("client_id")]
+        )
+        stats_map = {row["client_id"]: row for row in stats}
+
+        items: list[dict] = []
+        for link in intervals_links:
+            tg_user_id = link.get("tg_user_id")
+            cl = link_by_tg.get(tg_user_id) or {}
+            stats_row = stats_map.get(cl.get("client_id")) if cl.get("client_id") else {}
+            items.append(
+                {
+                    "client_id": cl.get("client_id"),
+                    "client_name": cl.get("client_name"),
+                    "tg_user_id": tg_user_id,
+                    "pending": int(stats_row.get("pending") or 0),
+                    "with_fit": int(stats_row.get("with_fit") or 0),
+                    "last_activity_at": stats_row.get("last_activity_at"),
+                }
+            )
+        return {"items": items}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Failed to list Intervals candidates")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to list Intervals candidates") from exc
+
+
+@router.post("/intervals/backfill")
+def api_intervals_backfill(payload: dict = Body(...)):
+    """Kick off Intervals backfill for selected Telegram users."""
+    if INTERVALS_STATE.running:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Intervals backfill already running")
+
+    tg_ids_raw = payload.get("tg_user_ids")
+    if not isinstance(tg_ids_raw, list):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "tg_user_ids must be a list")
+
+    tg_user_ids: List[int] = []
+    for value in tg_ids_raw:
+        try:
+            uid = int(value)
+        except (TypeError, ValueError) as exc:  # noqa: BLE001
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "tg_user_ids must contain integers") from exc
+        if uid > 0:
+            tg_user_ids.append(uid)
+
+    if not tg_user_ids:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No valid tg_user_ids provided")
+
+    max_per_user_raw = payload.get("max_per_user")
+    try:
+        max_per_user = int(max_per_user_raw) if max_per_user_raw is not None else 50
+    except (TypeError, ValueError):
+        max_per_user = 50
+    max_per_user = max(1, min(max_per_user, 500))
+
+    thread = threading.Thread(
+        target=_backfill_intervals,
+        args=(tg_user_ids, max_per_user),
+        daemon=True,
+    )
+    thread.start()
+
+    return {"status": "started", "users": len(tg_user_ids)}
+
+
+@router.get("/intervals/status")
+def api_intervals_backfill_status():
+    """Return current Intervals backfill state."""
+    return INTERVALS_STATE.to_dict()

@@ -74,6 +74,33 @@ interface LegacyNormalizeResponse {
   errors?: string[];
 }
 
+interface IntervalsCandidate {
+  client_id: number;
+  client_name?: string | null;
+  tg_user_id: number;
+  pending: number;
+  with_fit: number;
+  last_activity_at?: string | null;
+}
+
+interface IntervalsCandidatesResponse {
+  items: IntervalsCandidate[];
+}
+
+interface IntervalsStatus {
+  running: boolean;
+  started_at?: string | null;
+  finished_at?: string | null;
+  users_total: number;
+  users_done: number;
+  current_user?: string | null;
+  log: string[];
+  summary: Record<string, Record<string, number>>;
+  uploaded: number;
+  skipped: number;
+  error?: string | null;
+}
+
 function formatDateTime(value?: string | null): string {
   if (!value) return "";
   const date = new Date(value);
@@ -99,6 +126,11 @@ export default function SyncPage() {
   const [stravaLastRun, setStravaLastRun] = useState<string>("");
   const [stravaProgress, setStravaProgress] = useState<string>("");
   const [selectedUsers, setSelectedUsers] = useState<number[]>([]);
+  const [intervalsLog, setIntervalsLog] = useState<string>("");
+  const [intervalsStatus, setIntervalsStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [intervalsLastRun, setIntervalsLastRun] = useState<string>("");
+  const [intervalsProgress, setIntervalsProgress] = useState<string>("");
+  const [intervalsSelectedUsers, setIntervalsSelectedUsers] = useState<number[]>([]);
   const [legacyFile, setLegacyFile] = useState<File | null>(null);
   const [legacyStatus, setLegacyStatus] = useState<"idle" | "running" | "done" | "error">("idle");
   const [legacySummary, setLegacySummary] = useState<string>("");
@@ -108,6 +140,17 @@ export default function SyncPage() {
   const [normalizeSummary, setNormalizeSummary] = useState<string>("");
   const [normalizeErrors, setNormalizeErrors] = useState<string[]>([]);
   const [normalizeStatus, setNormalizeStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+  const clearLogs = useMutation({
+    mutationFn: () => apiFetch<{ status: string }>("/api/sync/status/clear", { method: "POST" }),
+    onSuccess: () => {
+      setLog("");
+      setStravaLog("");
+      setProgress("");
+      setStravaProgress("");
+      setIntervalsLog("");
+      setIntervalsProgress("");
+    },
+  });
 
   const statusQuery = useQuery<SyncStatus>({
     queryKey: ["sync-status"],
@@ -145,6 +188,16 @@ export default function SyncPage() {
     refetchInterval: (query) => (query.state.data?.running ? 2000 : false),
     refetchIntervalInBackground: true,
   });
+  const intervalsCandidatesQuery = useQuery<IntervalsCandidatesResponse>({
+    queryKey: ["intervals-candidates"],
+    queryFn: () => apiFetch<IntervalsCandidatesResponse>("/api/sync/intervals/candidates"),
+  });
+  const intervalsStatusQuery = useQuery<IntervalsStatus>({
+    queryKey: ["intervals-status"],
+    queryFn: () => apiFetch<IntervalsStatus>("/api/sync/intervals/status"),
+    refetchInterval: (query) => (query.state.data?.running ? 2000 : false),
+    refetchIntervalInBackground: true,
+  });
 
   const stravaBackfill = useMutation({
     mutationFn: (payload: { tg_user_ids: number[] }) =>
@@ -159,6 +212,21 @@ export default function SyncPage() {
     onError: (error: any) => {
       setStravaStatus("error");
       setStravaLog(`Ошибка: ${error?.message ?? "неизвестно"}`);
+    },
+  });
+  const intervalsBackfill = useMutation({
+    mutationFn: (payload: { tg_user_ids: number[] }) =>
+      apiFetch("/api/sync/intervals/backfill", { method: "POST", body: payload }),
+    onMutate: () => {
+      setIntervalsStatus("running");
+      setIntervalsLog("Стартуем загрузку в Intervals…");
+    },
+    onSuccess: () => {
+      intervalsStatusQuery.refetch();
+    },
+    onError: (error: any) => {
+      setIntervalsStatus("error");
+      setIntervalsLog(`Ошибка: ${error?.message ?? "неизвестно"}`);
     },
   });
 
@@ -253,6 +321,28 @@ export default function SyncPage() {
     }
   }, [stravaStatusQuery.data, stravaCandidatesQuery.refetch]);
 
+  useEffect(() => {
+    const data = intervalsStatusQuery.data;
+    if (!data) return;
+    const lines = (data.log || []).join("\n");
+    setIntervalsLog(lines);
+    if (data.users_total > 0) {
+      setIntervalsProgress(
+        `${data.users_done}/${data.users_total}` +
+          (data.current_user ? ` · текущий: ${data.current_user}` : ""),
+      );
+    } else {
+      setIntervalsProgress("");
+    }
+    if (data.running) {
+      setIntervalsStatus("running");
+    } else if (data.finished_at) {
+      setIntervalsStatus(data.error ? "error" : "done");
+      setIntervalsLastRun(new Date().toLocaleString());
+      intervalsCandidatesQuery.refetch();
+    }
+  }, [intervalsStatusQuery.data, intervalsCandidatesQuery.refetch]);
+
   const buttonDisabled = syncMutation.isPending || statusQuery.data?.running;
   const buttonLabel = useMemo(() => {
     if (syncMutation.isPending || statusQuery.data?.running) return "Синхронизируем…";
@@ -287,6 +377,30 @@ export default function SyncPage() {
     stravaBackfill.mutate({ tg_user_ids: selectedUsers });
   }
 
+  const intervalsCandidates = intervalsCandidatesQuery.data?.items ?? [];
+  const intervalsButtonDisabled =
+    intervalsCandidates.length === 0 ||
+    intervalsSelectedUsers.length === 0 ||
+    intervalsBackfill.isPending ||
+    intervalsStatusQuery.data?.running;
+  const intervalsButtonLabel = useMemo(() => {
+    if (intervalsBackfill.isPending || intervalsStatusQuery.data?.running) return "Загружаем…";
+    return "Отправить выбранных";
+  }, [intervalsBackfill.isPending, intervalsStatusQuery.data?.running]);
+
+  function toggleIntervalsUser(userId: number) {
+    setIntervalsSelectedUsers((prev) => (prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]));
+  }
+
+  function selectAllIntervalsUsers() {
+    setIntervalsSelectedUsers(intervalsCandidates.map((item) => item.tg_user_id));
+  }
+
+  function startIntervalsBackfill() {
+    if (intervalsSelectedUsers.length === 0) return;
+    intervalsBackfill.mutate({ tg_user_ids: intervalsSelectedUsers });
+  }
+
   function handleLegacyFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
     setLegacyFile(file);
@@ -311,9 +425,14 @@ export default function SyncPage() {
         title="Синхронизация WattAttack"
         subtitle="Обновление старых активностей и архив FIT-файлов"
         headerExtra={
-          <button type="button" className="button" onClick={() => syncMutation.mutate()} disabled={buttonDisabled}>
-            {buttonLabel}
-          </button>
+          <div className="sync-row">
+            <button type="button" className="button" onClick={() => syncMutation.mutate()} disabled={buttonDisabled}>
+              {buttonLabel}
+            </button>
+            <button type="button" className="button ghost" onClick={() => clearLogs.mutate()} disabled={clearLogs.isPending}>
+              {clearLogs.isPending ? "Очищаем…" : "Очистить логи"}
+            </button>
+          </div>
         }
       >
         <div className="sync-content">
@@ -413,6 +532,82 @@ export default function SyncPage() {
       </Panel>
 
       <Panel
+        title="Дозагрузка в Intervals.icu"
+        subtitle="Отправка архива FIT-файлов подключенным Intervals пользователям"
+        headerExtra={
+          <div className="sync-row">
+            <button
+              type="button"
+              className="button"
+              onClick={selectAllIntervalsUsers}
+              disabled={intervalsCandidates.length === 0}
+            >
+              Выбрать всех
+            </button>
+            <button
+              type="button"
+              className="button"
+              onClick={startIntervalsBackfill}
+              disabled={intervalsButtonDisabled}
+            >
+              {intervalsButtonLabel}
+            </button>
+          </div>
+        }
+      >
+        <div className="sync-content">
+          <p>Берёт FIT-файлы из архива, ищет неотправленные в Intervals и загружает их выбранным пользователям.</p>
+          <div className="sync-row">
+            <div className={`sync-status sync-status--${intervalsStatus}`}>
+              {intervalsStatus === "idle" && "Готово к запуску"}
+              {intervalsStatus === "running" && "Загружаем…"}
+              {intervalsStatus === "done" && "Готово"}
+              {intervalsStatus === "error" && "Ошибка"}
+            </div>
+            {intervalsProgress && <div className="meta-hint">{intervalsProgress}</div>}
+          </div>
+          {intervalsCandidatesQuery.isLoading ? (
+            <div className="empty-state">Загружаем список Intervals-связок…</div>
+          ) : intervalsCandidates.length === 0 ? (
+            <div className="empty-state">Нет подключенных пользователей Intervals.</div>
+          ) : (
+            <div className="strava-list">
+              {intervalsCandidates.map((item) => {
+                const checked = intervalsSelectedUsers.includes(item.tg_user_id);
+                return (
+                  <div className="strava-row" key={`intervals-${item.tg_user_id}`}>
+                    <label className="strava-check">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleIntervalsUser(item.tg_user_id)}
+                        aria-label={`Выбрать ${item.client_name || item.tg_user_id}`}
+                      />
+                      <span className="id-chip">#{item.client_id}</span>
+                      <span className="strava-name">{item.client_name || "Без имени"}</span>
+                    </label>
+                    <div className="strava-meta">
+                      <span className="strava-pill">К загрузке: {item.pending}</span>
+                      <span className="strava-pill">FIT в архиве: {item.with_fit}</span>
+                      {item.last_activity_at ? (
+                        <span className="meta-hint">Последняя: {formatDateTime(item.last_activity_at)}</span>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {intervalsLastRun && <div className="meta-hint">Последняя дозагрузка: {intervalsLastRun}</div>}
+          {intervalsLog ? (
+            <pre className="sync-log">{intervalsLog}</pre>
+          ) : (
+            <div className="empty-state">Лог Intervals появится тут.</div>
+          )}
+        </div>
+      </Panel>
+
+      <Panel
         title="Импорт legacy истории"
         subtitle="Загрузите history_legacy.json (экспорт или массив объектов), чтобы добавить старые активности в расписание"
         headerExtra={
@@ -421,7 +616,7 @@ export default function SyncPage() {
           </button>
         }
       >
-        {legacyOpen ? (
+        {legacyOpen && (
           <div className="sync-content">
             <p>
               Берём сообщения с файлами <code>activity_*.fit</code> из экспорта Telegram, вытаскиваем дату, атлета и
@@ -469,8 +664,6 @@ export default function SyncPage() {
               <div className="empty-state">Ошибки нормализации появятся тут.</div>
             )}
           </div>
-        ) : (
-          <div className="empty-state">Legacy импорт свернут.</div>
         )}
       </Panel>
     </>
