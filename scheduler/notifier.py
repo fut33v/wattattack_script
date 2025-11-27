@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import tempfile
 from datetime import datetime, timedelta, date, time, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ from repositories.schedule_repository import (
     record_account_assignment,
     was_account_assignment_done,
     find_reservation_by_client_name,
+    ensure_fit_files_dir,
 )
 from repositories.client_link_repository import get_link_by_client
 from repositories.client_repository import get_client, search_clients
@@ -902,7 +904,7 @@ def send_activity_fit(
         client.download_fit_file(str(fit_id), temp_file, timeout=timeout)
         filename = f"activity_{activity.get('id')}.fit"
         try:
-            dest_dir = schedule_repository.ensure_fit_files_dir() / account_id
+            dest_dir = ensure_fit_files_dir() / account_id
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest_file = dest_dir / f"{activity.get('id')}.fit"
             if not dest_file.exists():

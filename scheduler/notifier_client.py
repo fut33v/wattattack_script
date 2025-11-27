@@ -35,6 +35,7 @@ from repositories.schedule_repository import (
     get_seen_activity_ids_for_account,
     find_reservation_for_activity,
     find_reservation_by_client_name,
+    ensure_fit_files_dir,
 )
 from repositories.client_link_repository import get_link_by_client
 from repositories.intervals_link_repository import get_link as get_intervals_link
@@ -897,7 +898,7 @@ def send_activity_fit(
         client.download_fit_file(str(fit_id), temp_file, timeout=timeout)
         filename = f"activity_{activity.get('id')}.fit"
         try:
-            dest_dir = schedule_repository.ensure_fit_files_dir() / account_id
+            dest_dir = ensure_fit_files_dir() / account_id
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest_file = dest_dir / f"{activity.get('id')}.fit"
             if not dest_file.exists():
