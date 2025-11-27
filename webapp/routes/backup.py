@@ -10,7 +10,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Tuple
+from typing import List, Tuple
 from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/backup", tags=["backup"], dependencies=[Depends(require_admin)])
 
 MAX_UPLOAD_BYTES = int(os.environ.get("BACKUP_IMPORT_MAX_BYTES", str(512 * 1024 * 1024)))  # 512 MB default
+DROP_SCHEMA = os.environ.get("BACKUP_IMPORT_DROP_SCHEMA", "true").lower() not in {"0", "false", "no"}
 
 
 def _build_db_url() -> str:
@@ -99,6 +100,28 @@ def _run_psql(sql_path: Path) -> Tuple[int, str, str]:
   return completed.returncode, completed.stdout or "", completed.stderr or ""
 
 
+def _run_psql_command(commands: List[str]) -> Tuple[int, str, str]:
+  """Run a single psql -c command list inside one connection."""
+  db_url = _build_db_url()
+  cmd = ["psql", db_url, "-v", "ON_ERROR_STOP=1"]
+  for statement in commands:
+    cmd.extend(["-c", statement])
+  try:
+    completed = subprocess.run(
+      cmd,
+      check=False,
+      capture_output=True,
+      text=True,
+      env={**os.environ},
+    )
+  except FileNotFoundError as exc:  # pragma: no cover - runtime dependency
+    raise HTTPException(
+      status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+      detail="psql is not installed in the environment; install postgresql-client inside the app container.",
+    ) from exc
+  return completed.returncode, completed.stdout or "", completed.stderr or ""
+
+
 @router.post("/import")
 def import_backup(file: UploadFile = File(...)):
   """Import a pg_dump (.sql or .sql.gz) into the configured database."""
@@ -118,6 +141,20 @@ def import_backup(file: UploadFile = File(...)):
     target_sql = _prepare_sql_file(stored_path, workdir=temp_dir)
     applied_size = target_sql.stat().st_size
     log.info("Starting DB import from %s (%s bytes)", target_sql, applied_size)
+
+    if DROP_SCHEMA:
+      drop_code, drop_out, drop_err = _run_psql_command(["DROP SCHEMA public CASCADE", "CREATE SCHEMA public"])
+      if drop_code != 0:
+        log.error("Schema reset failed (code=%s): %s", drop_code, drop_err.strip() or drop_out.strip())
+        raise HTTPException(
+          status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+          detail={
+            "message": "Не удалось очистить схему перед импортом.",
+            "stdout": drop_out[-4000:],
+            "stderr": drop_err[-4000:],
+            "exit_code": drop_code,
+          },
+        )
 
     code, stdout, stderr = _run_psql(target_sql)
     duration_ms = int((time.monotonic() - started) * 1000)
@@ -144,6 +181,7 @@ def import_backup(file: UploadFile = File(...)):
       "stderr": stderr[-4000:],
       "database_url_source": "DATABASE_URL" if os.environ.get("DATABASE_URL") else "DB_*",
       "filename": file.filename,
+      "schema_reset": DROP_SCHEMA,
     }
   finally:
     try:
