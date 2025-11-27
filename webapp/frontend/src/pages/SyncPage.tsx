@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import Panel from "../components/Panel";
@@ -55,6 +55,25 @@ interface StravaStatus {
   error?: string | null;
 }
 
+interface LegacyImportResponse {
+  processed: number;
+  stored: number;
+  matched: number;
+  skipped: number;
+  errors?: string[];
+  log?: string[];
+  created_reservations?: number;
+}
+
+interface LegacyNormalizeResponse {
+  legacy_accounts: string[];
+  updated: number;
+  migrated_rows: number;
+  moved_files: number;
+  conflicts: number;
+  errors?: string[];
+}
+
 function formatDateTime(value?: string | null): string {
   if (!value) return "";
   const date = new Date(value);
@@ -80,6 +99,14 @@ export default function SyncPage() {
   const [stravaLastRun, setStravaLastRun] = useState<string>("");
   const [stravaProgress, setStravaProgress] = useState<string>("");
   const [selectedUsers, setSelectedUsers] = useState<number[]>([]);
+  const [legacyFile, setLegacyFile] = useState<File | null>(null);
+  const [legacyStatus, setLegacyStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [legacySummary, setLegacySummary] = useState<string>("");
+  const [legacyErrors, setLegacyErrors] = useState<string[]>([]);
+  const [legacyLog, setLegacyLog] = useState<string>("");
+  const [normalizeSummary, setNormalizeSummary] = useState<string>("");
+  const [normalizeErrors, setNormalizeErrors] = useState<string[]>([]);
+  const [normalizeStatus, setNormalizeStatus] = useState<"idle" | "running" | "done" | "error">("idle");
 
   const statusQuery = useQuery<SyncStatus>({
     queryKey: ["sync-status"],
@@ -131,6 +158,53 @@ export default function SyncPage() {
     onError: (error: any) => {
       setStravaStatus("error");
       setStravaLog(`Ошибка: ${error?.message ?? "неизвестно"}`);
+    },
+  });
+
+  const legacyImport = useMutation({
+    mutationFn: (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      return apiFetch<LegacyImportResponse>("/api/sync/legacy/import", { method: "POST", body: formData });
+    },
+    onMutate: () => {
+      setLegacyStatus("running");
+      setLegacySummary("Импортируем историю…");
+      setLegacyErrors([]);
+      setLegacyLog("");
+    },
+    onSuccess: (data) => {
+      setLegacyStatus("done");
+      setLegacySummary(
+        `Обработано: ${data.processed}. Записано: ${data.stored}. По имени сопоставлено: ${data.matched}. Создано бронирований: ${data.created_reservations ?? 0}. Пропущено: ${data.skipped}.`,
+      );
+      setLegacyErrors(data.errors?.slice(0, 15) ?? []);
+      setLegacyLog((data.log || []).join("\n"));
+    },
+    onError: (error: any) => {
+      setLegacyStatus("error");
+      setLegacySummary(`Ошибка: ${error?.message ?? "неизвестно"}`);
+      setLegacyLog("");
+    },
+  });
+
+  const normalizeAccounts = useMutation({
+    mutationFn: () => apiFetch<LegacyNormalizeResponse>("/api/sync/legacy/normalize_accounts", { method: "POST" }),
+    onMutate: () => {
+      setNormalizeStatus("running");
+      setNormalizeSummary("Переименовываем аккаунты krutilkavn → krutilka_...");
+      setNormalizeErrors([]);
+    },
+    onSuccess: (data) => {
+      setNormalizeStatus("done");
+      setNormalizeSummary(
+        `Обновлено аккаунтов: ${data.updated}. Перенесено строк: ${data.migrated_rows}. FIT перемещено: ${data.moved_files}. Конфликты: ${data.conflicts}.`,
+      );
+      setNormalizeErrors(data.errors?.slice(0, 15) ?? []);
+    },
+    onError: (error: any) => {
+      setNormalizeStatus("error");
+      setNormalizeSummary(`Ошибка: ${error?.message ?? "неизвестно"}`);
     },
   });
 
@@ -212,6 +286,24 @@ export default function SyncPage() {
     stravaBackfill.mutate({ tg_user_ids: selectedUsers });
   }
 
+  function handleLegacyFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    setLegacyFile(file);
+    setLegacyStatus("idle");
+    setLegacySummary("");
+    setLegacyErrors([]);
+    setLegacyLog("");
+  }
+
+  function startLegacyImport() {
+    if (!legacyFile) return;
+    legacyImport.mutate(legacyFile);
+  }
+
+  function runNormalizeAccounts() {
+    normalizeAccounts.mutate();
+  }
+
   return (
     <>
       <Panel
@@ -241,6 +333,61 @@ export default function SyncPage() {
           </div>
           {lastRun && <div className="meta-hint">Последний запуск: {lastRun}</div>}
           {log ? <pre className="sync-log">{log}</pre> : <div className="empty-state">Лог появится тут.</div>}
+        </div>
+      </Panel>
+
+      <Panel
+        title="Импорт legacy истории"
+        subtitle="Загрузите history_legacy.json (экспорт или массив объектов), чтобы добавить старые активности в расписание"
+        headerExtra={
+          <button
+            type="button"
+            className="button"
+            onClick={startLegacyImport}
+            disabled={!legacyFile || legacyImport.isPending}
+          >
+            {legacyImport.isPending ? "Импортируем…" : "Импортировать файл"}
+          </button>
+        }
+      >
+        <div className="sync-content">
+          <p>
+            Берём сообщения с файлами <code>activity_*.fit</code> из экспорта Telegram, вытаскиваем дату, атлета и
+            метрики, а затем пытаемся привязать к клиенту по имени и времени тренировки.
+          </p>
+          <div className="sync-row">
+            <input type="file" accept=".json" onChange={handleLegacyFileChange} />
+            <div className={`sync-status sync-status--${legacyStatus}`}>
+              {legacyStatus === "idle" && "Файл не выбран"}
+              {legacyStatus === "running" && "Импорт…"}
+              {legacyStatus === "done" && "Готово"}
+              {legacyStatus === "error" && "Ошибка"}
+            </div>
+          </div>
+          {legacySummary && <div className="meta-hint">{legacySummary}</div>}
+          {legacyLog ? <pre className="sync-log">{legacyLog}</pre> : <div className="empty-state">Лог появится тут.</div>}
+          {legacyErrors.length > 0 ? (
+            <pre className="sync-log">{legacyErrors.join("\n")}</pre>
+          ) : (
+            <div className="empty-state">Ошибки появятся тут.</div>
+          )}
+          <div className="sync-row">
+            <button type="button" className="button" onClick={runNormalizeAccounts} disabled={normalizeAccounts.isPending}>
+              {normalizeAccounts.isPending ? "Переименовываем…" : "Нормализовать аккаунты krutilkavn → krutilka_"}
+            </button>
+            <div className={`sync-status sync-status--${normalizeStatus}`}>
+              {normalizeStatus === "idle" && "Готово"}
+              {normalizeStatus === "running" && "В работе…"}
+              {normalizeStatus === "done" && "Готово"}
+              {normalizeStatus === "error" && "Ошибка"}
+            </div>
+          </div>
+          {normalizeSummary && <div className="meta-hint">{normalizeSummary}</div>}
+          {normalizeErrors.length > 0 ? (
+            <pre className="sync-log">{normalizeErrors.join("\n")}</pre>
+          ) : (
+            <div className="empty-state">Ошибки нормализации появятся тут.</div>
+          )}
         </div>
       </Panel>
 

@@ -1645,6 +1645,7 @@ def find_reservation_by_client_name(
     athlete_name: str,
     *,
     grace_minutes: int = 30,
+    statuses: Sequence[str] | None = None,
 ) -> Optional[Dict]:
     """
     Find a reservation near target_dt where client name matches athlete_name.
@@ -1656,10 +1657,23 @@ def find_reservation_by_client_name(
     if not athlete_name:
         return None
 
+    def _normalize(name: Optional[str]) -> str:
+        if not name:
+            return ""
+        return " ".join(name.lower().replace("ё", "е").split())
+
+    def _tokens(name: Optional[str]) -> set[str]:
+        if not name:
+            return set()
+        normalized = _normalize(name)
+        return {part for part in normalized.split(" ") if part}
+
     ensure_schedule_tables()
     target_date = target_dt.date()
     grace_delta = timedelta(minutes=max(0, grace_minutes))
-    athlete_lower = athlete_name.lower().strip()
+    athlete_lower = _normalize(athlete_name)
+    athlete_tokens = _tokens(athlete_name)
+    status_filter = list(statuses) if statuses else ["booked"]
 
     with db_connection() as conn, dict_cursor(conn) as cur:
         cur.execute(
@@ -1682,10 +1696,10 @@ def find_reservation_by_client_name(
             LEFT JOIN trainers AS t ON t.id = r.stand_id
             LEFT JOIN clients AS c ON c.id = r.client_id
             WHERE r.client_id IS NOT NULL
-              AND r.status = 'booked'
+              AND (%(statuses)s IS NULL OR r.status = ANY(%(statuses)s))
               AND s.slot_date = %(target_date)s
             """,
-            {"target_date": target_date},
+            {"target_date": target_date, "statuses": status_filter},
         )
         rows = cur.fetchall()
 
@@ -1724,7 +1738,23 @@ def find_reservation_by_client_name(
             (row.get("client_first_name") or "").strip(),
             (row.get("client_last_name") or "").strip(),
         ]
-        if any(name and name.lower() == athlete_lower for name in candidate_names):
+        match_found = False
+        for name in candidate_names:
+            if not name:
+                continue
+            normalized = _normalize(name)
+            if normalized == athlete_lower:
+                match_found = True
+                break
+            candidate_tokens = _tokens(name)
+            if candidate_tokens and athlete_tokens and candidate_tokens == athlete_tokens:
+                match_found = True
+                break
+            if athlete_tokens and candidate_tokens and athlete_tokens.issubset(candidate_tokens):
+                match_found = True
+                break
+
+        if match_found:
             distance = abs(target_dt - slot_start)
             if distance < best_distance:
                 best_distance = distance

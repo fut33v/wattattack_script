@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile, status
+from zoneinfo import ZoneInfo
 
 from scheduler.notifier import load_accounts  # type: ignore
 from scheduler.notifier_client import (  # type: ignore
@@ -17,12 +20,13 @@ from scheduler.notifier_client import (  # type: ignore
     format_strava_activity_description,
 )
 from wattattack_activities import WattAttackClient, DEFAULT_BASE_URL
-from repositories import client_link_repository, schedule_repository
+from repositories import client_link_repository, schedule_repository, client_repository
 from straver_client import StraverClient
 from ..dependencies import require_admin
 
 router = APIRouter(prefix="/sync", tags=["sync"], dependencies=[Depends(require_admin)])
 log = logging.getLogger(__name__)
+LOCAL_TZ = ZoneInfo(os.environ.get("WATTATTACK_LOCAL_TZ", "Europe/Moscow"))
 
 
 class SyncState:
@@ -164,6 +168,482 @@ def _fit_storage_path(account_id: str, activity_id: str) -> Path:
     dest = base / account_id
     dest.mkdir(parents=True, exist_ok=True)
     return dest / f"{activity_id}.fit"
+
+
+def _normalize_account_id_value(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    text = str(raw).strip()
+    legacy_match = re.match(r"krutilkavn0*([1-9]\d*)", text, re.IGNORECASE)
+    if legacy_match:
+        num = int(legacy_match.group(1))
+        return f"krutilka_{num:03d}"
+    return text
+
+
+def _ensure_legacy_slot(start_dt: datetime, athlete_name: str, scheduled_name: Optional[str]) -> Optional[Dict]:
+    """
+    Ensure there is a slot/reservation to attach legacy activity when no reservation match was found.
+
+    Creates week/slot/reservation marked as legacy with the athlete name.
+    """
+
+    local_dt = start_dt.astimezone(LOCAL_TZ) if start_dt.tzinfo else start_dt
+    slot_date = local_dt.date()
+    duration = timedelta(seconds=90 * 60)
+    end_dt = local_dt + duration
+    label = scheduled_name or "Самокрутка"
+
+    try:
+        week = schedule_repository.get_or_create_week(week_start_date=slot_date, title="Legacy импорт")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Legacy import: failed to get/create week for %s: %s", slot_date, exc)
+        return None
+
+    slot = None
+    try:
+        slot = schedule_repository.create_slot(
+            week_id=week["id"],
+            slot_date=slot_date,
+            start_time=local_dt.time(),
+            end_time=end_dt.time(),
+            label=label,
+            session_kind="legacy",
+            notes="Создано при импорте history_legacy.json",
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.info("Legacy import: slot create conflict, try reuse: %s", exc)
+        try:
+            with schedule_repository.db_connection() as conn, schedule_repository.dict_cursor(conn) as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM schedule_slots
+                    WHERE week_id = %s AND slot_date = %s AND start_time = %s
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """,
+                    (week["id"], slot_date, local_dt.time()),
+                )
+                slot = cur.fetchone()
+        except Exception:
+            slot = None
+
+    if not slot:
+        return None
+
+    try:
+        reservation = schedule_repository.create_reservation(
+            slot_id=slot["id"],
+            stand_id=None,
+            stand_code=None,
+            client_id=None,
+            client_name=athlete_name,
+            status="legacy",
+            source="legacy_import",
+            notes="Добавлено из history_legacy.json",
+        )
+        return reservation
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Legacy import: failed to create reservation in slot %s: %s", slot.get("id"), exc)
+        return None
+
+
+def _flatten_message_text(message: Dict) -> str:
+    raw = message.get("text")
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        parts: List[str] = []
+        for item in raw:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and item.get("text"):
+                parts.append(str(item.get("text")))
+        return "".join(parts)
+    return ""
+
+
+def _normalize_account_id(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    text = str(raw).strip()
+    legacy_match = re.match(r"krutilkavn0*([1-9]\\d*)", text, re.IGNORECASE)
+    if legacy_match:
+        num = int(legacy_match.group(1))
+        return f"krutilka_{num:03d}"
+    return text
+
+
+def _extract_bold_values(message: Dict) -> List[str]:
+    values: List[str] = []
+    for item in message.get("text_entities", []) or []:
+        if isinstance(item, dict) and item.get("type") == "bold":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                values.append(text.strip())
+    return values
+
+
+def _parse_duration_seconds(raw: str) -> Optional[int]:
+    if not raw:
+        return None
+    hours = minutes = seconds = 0
+    hours_match = re.search(r"(\d+)\s*ч", raw)
+    minutes_match = re.search(r"(\d+)\s*м", raw)
+    seconds_match = re.search(r"(\d+)\s*с", raw)
+    if hours_match:
+        hours = int(hours_match.group(1))
+    if minutes_match:
+        minutes = int(minutes_match.group(1))
+    if seconds_match:
+        seconds = int(seconds_match.group(1))
+    if hours == minutes == seconds == 0:
+        return None
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _parse_legacy_message(message: Dict) -> Optional[Dict]:
+    file_name = message.get("file_name") or ""
+    match = re.search(r"activity_(\d+)", str(file_name))
+    if not match:
+        return None
+
+    activity_id = match.group(1)
+    bold_values = _extract_bold_values(message)
+    account_id = _normalize_account_id_value(bold_values[0] if bold_values else None)
+    scheduled_name = bold_values[1] if len(bold_values) > 1 else None
+
+    text_blob = _flatten_message_text(message)
+    athlete_match = re.search(r"Атлет:\s*([^\n]+)", text_blob, flags=re.IGNORECASE)
+    athlete_name = athlete_match.group(1).strip() if athlete_match else None
+
+    date_match = re.search(r"Дата:\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2})", text_blob)
+    start_time: Optional[datetime] = None
+    if date_match:
+        try:
+            start_time = datetime.strptime(date_match.group(1), "%Y-%m-%d %H:%M")
+            start_time = start_time.replace(tzinfo=LOCAL_TZ)
+        except Exception:
+            start_time = None
+
+    def _parse_metric(label: str) -> Optional[float]:
+        metric_match = re.search(rf"{label}:\s*([\d.,]+)", text_blob)
+        if metric_match:
+            try:
+                return float(metric_match.group(1).replace(",", "."))
+            except ValueError:
+                return None
+        return None
+
+    distance_km = _parse_metric("Дистанция")
+    elevation_gain = _parse_metric("Набор высоты")
+    avg_power = _parse_metric("Средняя мощность")
+    avg_cadence = _parse_metric("Средний каденс")
+    avg_heartrate = _parse_metric("Средний пульс")
+
+    elapsed_match = re.search(r"Время:\s*([^\n]+)", text_blob)
+    elapsed_seconds = _parse_duration_seconds(elapsed_match.group(1)) if elapsed_match else None
+
+    if not account_id:
+        return None
+
+    return {
+        "account_id": account_id,
+        "activity_id": activity_id,
+        "scheduled_name": scheduled_name,
+        "start_time": start_time,
+        "athlete_name": athlete_name,
+        "distance": distance_km * 1000 if distance_km is not None else None,
+        "elapsed_time": elapsed_seconds,
+        "elevation_gain": elevation_gain,
+        "average_power": avg_power,
+        "average_cadence": avg_cadence,
+        "average_heartrate": avg_heartrate,
+    }
+
+
+def _parse_structured_entry(entry: Dict) -> Optional[Dict]:
+    """Parse new structured JSON object with explicit fields."""
+    if not isinstance(entry, dict):
+        return None
+    activity_id = entry.get("activity_id")
+    account_id = _normalize_account_id_value(entry.get("account") or entry.get("account_id"))
+    date_str = entry.get("date")
+    athlete_name = entry.get("athlete")
+    if not (activity_id and account_id and date_str):
+        return None
+    start_time: Optional[datetime] = None
+    try:
+        start_time = datetime.strptime(str(date_str), "%Y-%m-%d %H:%M").replace(tzinfo=LOCAL_TZ)
+    except Exception:
+        start_time = None
+    elapsed_seconds = entry.get("time_seconds")
+    if not elapsed_seconds and entry.get("time"):
+        elapsed_seconds = _parse_duration_seconds(str(entry["time"]))
+    return {
+        "account_id": str(account_id),
+        "activity_id": str(activity_id),
+        "scheduled_name": None,
+        "start_time": start_time,
+        "athlete_name": athlete_name,
+        "distance": float(entry.get("distance")) * 1000 if entry.get("distance") is not None else None,
+        "elapsed_time": int(elapsed_seconds) if elapsed_seconds is not None else None,
+        "elevation_gain": float(entry.get("elevation_gain")) if entry.get("elevation_gain") is not None else None,
+        "average_power": float(entry.get("avg_power")) if entry.get("avg_power") is not None else None,
+        "average_cadence": float(entry.get("cadence")) if entry.get("cadence") is not None else None,
+        "average_heartrate": float(entry.get("heartrate")) if entry.get("heartrate") is not None else None,
+    }
+
+
+def _import_legacy_payload(payload: Dict | List[Dict]) -> Dict[str, object]:
+    schedule_repository.ensure_activity_ids_table()
+
+    if isinstance(payload, list):
+        items = payload
+    else:
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError("payload must be a list or object with messages[]")
+        items = messages
+
+    processed = 0
+    stored = 0
+    matched = 0
+    skipped = 0
+    errors: List[str] = []
+    log_lines: List[str] = []
+    max_log = 400
+    created_reservations = 0
+
+    for message in items:
+        if isinstance(payload, list):
+            parsed = _parse_structured_entry(message)
+        else:
+            parsed = _parse_legacy_message(message) if isinstance(message, dict) else None
+        if not parsed:
+            skipped += 1
+            log_lines.append("skip: не распознано (нет activity_id/account)")
+            continue
+
+        processed += 1
+        client_id: Optional[int] = None
+        scheduled_name = parsed.get("scheduled_name")
+        account_id = parsed.get("account_id")
+
+        start_time = parsed.get("start_time")
+        athlete_name = parsed.get("athlete_name")
+        match_row = None
+        if start_time and athlete_name:
+            try:
+                match_row = schedule_repository.find_reservation_by_client_name(
+                    start_time,
+                    athlete_name,
+                    statuses=("booked", "legacy", "pending", "waitlist"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{parsed['activity_id']}: match failed ({exc})")
+                match_row = None
+
+            if match_row and match_row.get("client_id"):
+                client_id = match_row.get("client_id")
+                matched += 1
+                scheduled_name = scheduled_name or match_row.get("label") or match_row.get("session_kind")
+                log_lines.append(
+                    f"{parsed['activity_id']} {parsed['account_id']}: {athlete_name} → client #{client_id}"
+                )
+            else:
+                # Create synthetic slot/reservation so запись попала в расписание
+                reservation = _ensure_legacy_slot(start_time, athlete_name, scheduled_name)
+                if reservation and athlete_name:
+                    try:
+                        matches = client_repository.search_clients(athlete_name, limit=10)
+                    except Exception as exc:  # noqa: BLE001
+                        matches = []
+                        log_lines.append(f"{parsed['activity_id']} {parsed['account_id']}: поиск клиента упал ({exc})")
+                    if matches:
+                        client_id = matches[0].get("id")
+                        try:
+                            schedule_repository.update_reservation(reservation["id"], client_id=client_id, status="booked")
+                            matched += 1
+                            log_lines.append(
+                                f"{parsed['activity_id']} {parsed['account_id']}: legacy бронь #{reservation.get('id')} привязана к client #{client_id}"
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            log_lines.append(
+                                f"{parsed['activity_id']} {parsed['account_id']}: не смогли привязать клиента к legacy брони ({exc})"
+                            )
+                if reservation:
+                    created_reservations += 1
+                    log_lines.append(
+                        f"{parsed['activity_id']} {parsed['account_id']}: создан legacy-слот/бронирование #{reservation.get('id')} "
+                        f"на {start_time.date()} {start_time.time()}"
+                    )
+                    match_row = reservation
+                else:
+                    log_lines.append(f"{parsed['activity_id']} {parsed['account_id']}: нет совпадения по имени")
+        else:
+            log_lines.append(f"{parsed['activity_id']} {parsed['account_id']}: нет даты/имени для сопоставления")
+
+        try:
+            saved = schedule_repository.record_seen_activity_id(
+                str(parsed["account_id"]),
+                str(parsed["activity_id"]),
+                client_id=client_id,
+                scheduled_name=athlete_name if not client_id else scheduled_name or athlete_name,
+                start_time=start_time,
+                profile_name=athlete_name,
+                distance=parsed.get("distance"),
+                elapsed_time=parsed.get("elapsed_time"),
+                elevation_gain=parsed.get("elevation_gain"),
+                average_power=parsed.get("average_power"),
+                average_cadence=parsed.get("average_cadence"),
+                average_heartrate=parsed.get("average_heartrate"),
+            )
+            if saved:
+                stored += 1
+                log_lines.append(
+                    f"{parsed['activity_id']} {parsed['account_id']}: записано (distance={parsed.get('distance')}, elapsed={parsed.get('elapsed_time')})"
+                )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{parsed['activity_id']}: {exc}")
+            log_lines.append(f"{parsed['activity_id']} {parsed['account_id']}: ошибка записи ({exc})")
+
+        if len(log_lines) > max_log:
+            overflow = len(log_lines) - max_log
+            if overflow > 0:
+                log_lines = log_lines[overflow:]
+
+    return {
+        "processed": processed,
+        "stored": stored,
+        "matched": matched,
+        "skipped": skipped,
+        "errors": errors,
+        "log": log_lines,
+        "created_reservations": created_reservations,
+    }
+
+
+def _normalize_seen_activity_accounts() -> Dict[str, object]:
+    """Rename legacy account_ids in seen_activity_ids and move FIT files."""
+
+    schedule_repository.ensure_activity_ids_table()
+    with schedule_repository.db_connection() as conn, schedule_repository.dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT account_id
+            FROM seen_activity_ids
+            WHERE account_id ~ '^krutilkavn[0-9]+'
+            """
+        )
+        legacy_ids = [row["account_id"] for row in cur.fetchall()]
+
+    changes: Dict[str, str] = {}
+    for old_id in legacy_ids:
+        new_id = _normalize_account_id_value(old_id) or old_id
+        if new_id != old_id:
+            changes[old_id] = new_id
+
+    migrated = 0
+    skipped_conflicts = 0
+    moved_files = 0
+    errors: List[str] = []
+
+    for old_id, new_id in changes.items():
+        try:
+            with schedule_repository.db_connection() as conn, schedule_repository.dict_cursor(conn) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO seen_activity_ids (
+                        account_id, activity_id, client_id, scheduled_name, start_time,
+                        profile_name, sent_clientbot, sent_strava, sent_intervals,
+                        distance, elapsed_time, elevation_gain, average_power,
+                        average_cadence, average_heartrate, fit_path
+                    )
+                    SELECT
+                        %(new_id)s AS account_id,
+                        activity_id,
+                        client_id,
+                        scheduled_name,
+                        start_time,
+                        profile_name,
+                        sent_clientbot,
+                        sent_strava,
+                        sent_intervals,
+                        distance,
+                        elapsed_time,
+                        elevation_gain,
+                        average_power,
+                        average_cadence,
+                        average_heartrate,
+                        CASE
+                            WHEN fit_path IS NOT NULL THEN REPLACE(fit_path, %(old_path)s, %(new_path)s)
+                            ELSE fit_path
+                        END AS fit_path
+                    FROM seen_activity_ids
+                    WHERE account_id = %(old_id)s
+                    ON CONFLICT (account_id, activity_id) DO UPDATE SET
+                        client_id = COALESCE(EXCLUDED.client_id, seen_activity_ids.client_id),
+                        scheduled_name = COALESCE(EXCLUDED.scheduled_name, seen_activity_ids.scheduled_name),
+                        start_time = COALESCE(EXCLUDED.start_time, seen_activity_ids.start_time),
+                        profile_name = COALESCE(EXCLUDED.profile_name, seen_activity_ids.profile_name),
+                        sent_clientbot = seen_activity_ids.sent_clientbot OR COALESCE(EXCLUDED.sent_clientbot, FALSE),
+                        sent_strava = seen_activity_ids.sent_strava OR COALESCE(EXCLUDED.sent_strava, FALSE),
+                        sent_intervals = seen_activity_ids.sent_intervals OR COALESCE(EXCLUDED.sent_intervals, FALSE),
+                        distance = COALESCE(EXCLUDED.distance, seen_activity_ids.distance),
+                        elapsed_time = COALESCE(EXCLUDED.elapsed_time, seen_activity_ids.elapsed_time),
+                        elevation_gain = COALESCE(EXCLUDED.elevation_gain, seen_activity_ids.elevation_gain),
+                        average_power = COALESCE(EXCLUDED.average_power, seen_activity_ids.average_power),
+                        average_cadence = COALESCE(EXCLUDED.average_cadence, seen_activity_ids.average_cadence),
+                        average_heartrate = COALESCE(EXCLUDED.average_heartrate, seen_activity_ids.average_heartrate),
+                        fit_path = COALESCE(EXCLUDED.fit_path, seen_activity_ids.fit_path)
+                    """,
+                    {
+                        "new_id": new_id,
+                        "old_id": old_id,
+                        "old_path": f"/fitfiles/{old_id}/",
+                        "new_path": f"/fitfiles/{new_id}/",
+                    },
+                )
+                cur.execute("DELETE FROM seen_activity_ids WHERE account_id = %s", (old_id,))
+                migrated += cur.rowcount
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Failed to migrate account_id %s -> %s", old_id, new_id)
+            errors.append(f"{old_id}: {exc}")
+            continue
+
+        # Move FIT files on disk
+        base_dir = schedule_repository.ensure_fit_files_dir()
+        src_dir = base_dir / old_id
+        dst_dir = base_dir / new_id
+        if src_dir.exists():
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            for path in src_dir.iterdir():
+                if not path.is_file():
+                    continue
+                dest = dst_dir / path.name
+                if dest.exists():
+                    skipped_conflicts += 1
+                    continue
+                try:
+                    path.rename(dest)
+                    moved_files += 1
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Failed to move FIT %s -> %s (%s)", path, dest, exc)
+            try:
+                src_dir.rmdir()
+            except OSError:
+                pass
+
+    return {
+        "legacy_accounts": legacy_ids,
+        "updated": len(changes),
+        "migrated_rows": migrated,
+        "moved_files": moved_files,
+        "conflicts": skipped_conflicts,
+        "errors": errors,
+    }
 
 
 def _process_accounts(accounts_path: Path, timeout: float) -> None:
@@ -453,6 +933,42 @@ def api_sync_activities():
 def api_sync_status():
     """Return current sync progress/state."""
     return SYNC_STATE.to_dict()
+
+
+@router.post("/legacy/import")
+async def api_import_legacy_history(file: UploadFile = File(...)):
+    """Upload Telegram export with historical FIT notifications and backfill schedule."""
+
+    try:
+        raw_bytes = await file.read()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Не удалось прочитать файл: {exc}") from exc
+
+    try:
+        payload = json.loads(raw_bytes.decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Файл должен быть JSON") from exc
+
+    try:
+        result = _import_legacy_payload(payload)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Failed to import legacy history")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Не удалось импортировать историю") from exc
+
+    return result
+
+
+@router.post("/legacy/normalize_accounts")
+def api_normalize_legacy_accounts():
+    """Rename legacy krutilkavn account_ids to krutilka_XXX and move FIT files."""
+    try:
+        result = _normalize_seen_activity_accounts()
+        return result
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Failed to normalize legacy accounts")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Не удалось нормализовать аккаунты") from exc
 
 
 @router.get("/strava/candidates")
