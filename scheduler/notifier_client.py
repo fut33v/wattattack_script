@@ -1001,6 +1001,12 @@ def send_to_matching_clients(
     scheduled_client_name: Optional[str] = None,
 ) -> Tuple[bool, bool, bool, Optional[int], Optional[str]]:
     """Send activity information or file to clients whose names match the athlete profile."""
+
+    def _normalize_name(value: str) -> str:
+        # Collapse whitespace and strip simple punctuation to make matching more forgiving
+        cleaned = value.replace(",", " ").replace(";", " ").replace(".", " ")
+        return " ".join(cleaned.lower().split())
+
     target_clients: List[Dict[str, Any]] = []
     athlete_name = extract_athlete_name(profile)
     used_schedule = False
@@ -1045,6 +1051,7 @@ def send_to_matching_clients(
             return False, False, False, None, None
 
         athlete_name_lower = athlete_name.lower()
+        athlete_name_normalized = _normalize_name(athlete_name)
         for client in matching_clients:
             first_name = client.get("first_name", "") or ""
             last_name = client.get("last_name", "") or ""
@@ -1058,14 +1065,24 @@ def send_to_matching_clients(
             ]
 
             for client_name in client_names:
-                if client_name and client_name.lower() == athlete_name_lower:
+                normalized = _normalize_name(client_name) if client_name else ""
+                if normalized and (
+                    normalized == athlete_name_normalized
+                    or normalized == athlete_name_lower
+                    or normalized in athlete_name_normalized
+                    or athlete_name_normalized in normalized
+                ):
                     target_clients.append(client)
                     break
+
+        if not target_clients and len(matching_clients) == 1:
+            LOGGER.info("Using single fuzzy client match for athlete: %s", athlete_name)
+            target_clients.append(matching_clients[0])
 
         if not target_clients:
             LOGGER.info("No exact name matches found for athlete: %s", athlete_name)
             return False, False, False, None, None
-        LOGGER.info("Found %d exact client matches for athlete: %s", len(target_clients), athlete_name)
+        LOGGER.info("Found %d client matches for athlete: %s", len(target_clients), athlete_name)
     else:
         LOGGER.info(
             "Using scheduled client match for activity: client_id=%s name=%s",
@@ -1186,7 +1203,7 @@ def send_to_matching_clients(
                 activity,
                 account_name,
                 profile,
-                scheduled_name=matched_client_name,
+                scheduled_name=scheduled_client_name or resolved_client_name,
             )
             if temp_file and temp_file.exists() and straver_client.is_configured():
                 LOGGER.debug("✓ Temp file exists for Strava upload for client %s", client_id)
