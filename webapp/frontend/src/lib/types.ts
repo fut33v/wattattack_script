@@ -82,6 +82,33 @@ export interface ClientBalanceDeleteResponse {
   balance: ClientBalance;
 }
 
+export interface StatsResponse {
+  balance_income_rub: number;
+  subscriptions_income_rub: number;
+  total_income_rub: number;
+  clients_total: number;
+  reservations_upcoming: number;
+  reservations_past: number;
+  available_months: string[];
+  monthly: MonthlyStats;
+}
+
+export interface MonthlyStats {
+  month: string;
+  balance_income_rub: number;
+  subscriptions_income_rub: number;
+  total_income_rub: number;
+  reservations: number;
+  weeks: MonthlyWeekStats[];
+}
+
+export interface MonthlyWeekStats {
+  week_start: string;
+  week_end: string;
+  income_rub: number;
+  reservations: number;
+}
+
 export interface ClientSubscription {
   id: number;
   client_id: number;

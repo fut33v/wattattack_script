@@ -19,6 +19,7 @@ interface NavLinkConfig {
 
 const PRIMARY_NAV_LINKS: readonly NavLinkConfig[] = [
   { to: "/dashboard", label: "🏠 Панель", adminOnly: false },
+  { to: "/stats", label: "📈 Статистика", adminOnly: true },
   { to: "/clients", label: "👥 Клиенты", adminOnly: false },
   { to: "/schedule", label: "📅 Расписание", adminOnly: true },
   { to: "/schedule/manage", label: "🗂 Недели", adminOnly: true },
@@ -38,6 +39,7 @@ const SERVICE_NAV_LINKS: readonly NavLinkConfig[] = [
   { to: "/activities", label: "🚴 Активности", adminOnly: true },
   { to: "/sync", label: "🔄 Синхронизация", adminOnly: true },
   { to: "/links", label: "🧩 Связки", adminOnly: true },
+  { to: "/stats", label: "📈 Статистика", adminOnly: true },
   { to: "/import", label: "📥 Импорт", adminOnly: true }
 ] as const;
 
