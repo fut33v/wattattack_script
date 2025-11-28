@@ -76,6 +76,9 @@ export interface ClientBalanceAdjustment {
 export interface ClientBalanceResponse {
   balance: ClientBalance;
   adjustments: ClientBalanceAdjustment[];
+  balance_income_rub: number;
+  subscriptions_income_rub: number;
+  total_income_rub: number;
 }
 
 export interface ClientBalanceDeleteResponse {

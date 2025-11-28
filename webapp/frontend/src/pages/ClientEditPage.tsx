@@ -165,6 +165,7 @@ export default function ClientEditPage() {
   });
   const totalSessionsRemaining = subscriptionsQuery.data?.totals?.sessions_remaining ?? 0;
   const balanceRub = balanceQuery.data?.balance?.balance_rub ?? 0;
+  const clientIncomeTotalRub = balanceQuery.data?.total_income_rub ?? 0;
   const selectedPastSet = useMemo(() => new Set(selectedPastReservations), [selectedPastReservations]);
 
   const reservationOptions = useMemo(() => {
@@ -457,6 +458,10 @@ export default function ClientEditPage() {
               <div className="profile-stat">
                 <div className="meta-label">Баланс ₽</div>
                 <div className="profile-stat__value">{balanceRub.toLocaleString("ru-RU")}</div>
+              </div>
+              <div className="profile-stat">
+                <div className="meta-label">Сколько принес денег</div>
+                <div className="profile-stat__value">{clientIncomeTotalRub.toLocaleString("ru-RU")} ₽</div>
               </div>
             </div>
           </div>

@@ -15,6 +15,7 @@ from repositories import (
     client_subscription_repository,
     client_balance_repository,
 )
+from repositories.db_utils import db_connection, dict_cursor
 from ..config import get_settings
 from ..dependencies import require_admin, require_user
 from .schedule_utils import _serialize_reservation
@@ -194,11 +195,40 @@ def api_get_client_balance(client_id: int):
     record = client_repository.get_client(client_id)
     if not record:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+    client_balance_repository.ensure_balance_tables()
+    client_subscription_repository.ensure_subscription_tables()
     balance = client_balance_repository.get_balance(client_id)
     adjustments = client_balance_repository.list_adjustments(client_id)
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(delta_rub), 0) AS income_rub
+            FROM client_balance_adjustments
+            WHERE client_id = %s AND delta_rub > 0
+            """,
+            (client_id,),
+        )
+        balance_income_row = cur.fetchone() or {}
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(price_rub), 0) AS income_rub
+            FROM client_subscriptions
+            WHERE client_id = %s AND price_rub IS NOT NULL
+            """,
+            (client_id,),
+        )
+        subscription_income_row = cur.fetchone() or {}
+
+    balance_income_rub = int(balance_income_row.get("income_rub") or 0)
+    subscriptions_income_rub = int(subscription_income_row.get("income_rub") or 0)
     return {
         "balance": balance,
         "adjustments": [_serialize_adjustment_row(adj) for adj in adjustments],
+        "balance_income_rub": balance_income_rub,
+        "subscriptions_income_rub": subscriptions_income_rub,
+        "total_income_rub": balance_income_rub + subscriptions_income_rub,
     }
 
 
