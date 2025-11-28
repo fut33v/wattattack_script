@@ -823,15 +823,42 @@ def schedule_week(slug: str, request: Request):
             response.headers["Cache-Control"] = "no-store"
             return response
 
+    share_url = f"{request.url.scheme}://{request.url.netloc}/schedule/{slug}"
+
     try:
-        week = schedule_repository.get_or_create_week(week_start_date=week_start)
+        week = schedule_repository.get_week_by_start(week_start)
     except Exception as exc:  # pylint: disable=broad-except
-        log.error("Failed to get or create week for %s: %s", week_start, exc)
+        log.error("Failed to load week for %s: %s", week_start, exc)
         response = templates.TemplateResponse(
             "public_schedule.html",
             {
                 "request": request,
                 "error_message": "Не удалось загрузить расписание",
+                "canonical_slug": slug,
+                "share_url": share_url,
+            },
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    adjacent_weeks = schedule_repository.get_adjacent_week_starts(week_start)
+    prev_week_slug = _format_week_slug(adjacent_weeks.get("previous"))
+    next_week_slug = _format_week_slug(adjacent_weeks.get("next"))
+    week_range_label = _format_week_range_label(week["week_start_date"] if week else week_start)
+
+    if not week:
+        response = templates.TemplateResponse(
+            "public_schedule.html",
+            {
+                "request": request,
+                "error_message": "Расписание для выбранной недели не найдено",
+                "week_range_label": week_range_label,
+                "target_week_label": week_range_label,
+                "prev_week_slug": prev_week_slug,
+                "next_week_slug": next_week_slug,
+                "canonical_slug": slug,
+                "share_url": share_url,
+                "day_columns": [],
             },
         )
         response.headers["Cache-Control"] = "no-store"
@@ -844,6 +871,12 @@ def schedule_week(slug: str, request: Request):
             {
                 "request": request,
                 "error_message": "Не удалось загрузить данные расписания",
+                "week_range_label": week_range_label,
+                "prev_week_slug": prev_week_slug,
+                "next_week_slug": next_week_slug,
+                "canonical_slug": slug,
+                "share_url": share_url,
+                "day_columns": [],
             },
         )
         response.headers["Cache-Control"] = "no-store"
@@ -855,15 +888,6 @@ def schedule_week(slug: str, request: Request):
         payload["instructors"],
     )
 
-    current_week_start = date.today() - timedelta(days=date.today().weekday())
-    prev_week_start = week_start - timedelta(days=7)
-    next_week_start = week_start + timedelta(days=7)
-
-    prev_week_slug = _format_week_slug(prev_week_start)
-    next_week_slug = _format_week_slug(next_week_start)
-    current_week_slug = _format_week_slug(current_week_start)
-    week_range_label = _format_week_range_label(week["week_start_date"])
-
     context = {
         "request": request,
         "week": week,
@@ -872,7 +896,7 @@ def schedule_week(slug: str, request: Request):
         "next_week_slug": next_week_slug,
         "canonical_slug": slug,
         "week_range_label": week_range_label,
-        "share_url": f"{request.url.scheme}://{request.url.netloc}/schedule/{slug}",
+        "share_url": share_url,
     }
 
     response = templates.TemplateResponse("public_schedule.html", context)

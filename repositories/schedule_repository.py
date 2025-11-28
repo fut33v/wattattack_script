@@ -283,6 +283,41 @@ def get_week_by_start(week_start_date: date) -> Optional[Dict]:
     return row
 
 
+def get_adjacent_week_starts(week_start_date: date) -> Dict[str, Optional[date]]:
+    """Return previous/next existing weeks relative to the given start date."""
+
+    ensure_schedule_tables()
+    normalized = _normalize_week_start(week_start_date)
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                (
+                    SELECT week_start_date
+                    FROM schedule_weeks
+                    WHERE week_start_date < %s
+                    ORDER BY week_start_date DESC
+                    LIMIT 1
+                ) AS prev_week_start,
+                (
+                    SELECT week_start_date
+                    FROM schedule_weeks
+                    WHERE week_start_date > %s
+                    ORDER BY week_start_date ASC
+                    LIMIT 1
+                ) AS next_week_start
+            """,
+            (normalized, normalized),
+        )
+        row = cur.fetchone() or {}
+
+    return {
+        "previous": row.get("prev_week_start"),
+        "next": row.get("next_week_start"),
+    }
+
+
 def get_or_create_week(
     *,
     week_start_date: date,
