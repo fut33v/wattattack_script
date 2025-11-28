@@ -46,6 +46,65 @@ export interface ClientListResponse {
   pagination: Pagination;
 }
 
+export interface ClientSubscriptionAdjustment {
+  id: number;
+  subscription_id: number;
+  delta_sessions: number;
+  reason: string;
+  reservation_id?: number | null;
+  reservation_label?: string | null;
+  created_by?: number | null;
+  created_at?: string | null;
+}
+
+export interface ClientBalance {
+  client_id: number;
+  balance_rub: number;
+  updated_at?: string | null;
+}
+
+export interface ClientBalanceAdjustment {
+  id: number;
+  client_id: number;
+  delta_rub: number;
+  reason?: string | null;
+  reservation_id?: number | null;
+  created_by?: number | null;
+  created_at?: string | null;
+}
+
+export interface ClientBalanceResponse {
+  balance: ClientBalance;
+  adjustments: ClientBalanceAdjustment[];
+}
+
+export interface ClientBalanceDeleteResponse {
+  balance: ClientBalance;
+}
+
+export interface ClientSubscription {
+  id: number;
+  client_id: number;
+  plan_code: string;
+  plan_name: string;
+  sessions_total?: number | null;
+  sessions_remaining?: number | null;
+  price_rub?: number | null;
+  valid_from?: string | null;
+  valid_until?: string | null;
+  notes?: string | null;
+  created_by?: number | null;
+  created_at?: string | null;
+  adjustments?: ClientSubscriptionAdjustment[];
+}
+
+export interface ClientSubscriptionsResponse {
+  items: ClientSubscription[];
+  totals: {
+    sessions_remaining: number;
+  };
+}
+
 export interface BikeRow {
   id: number;
   title: string;

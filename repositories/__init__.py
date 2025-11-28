@@ -15,4 +15,6 @@ __all__ = [
     "db_utils",
     "vk_client_link_repository",
     "intervals_link_repository",
+    "client_subscription_repository",
+    "client_balance_repository",
 ]

@@ -1,20 +1,38 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict
 
 import psycopg2
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 
-from repositories import client_link_repository, client_repository, schedule_repository
+from repositories import (
+    client_link_repository,
+    client_repository,
+    schedule_repository,
+    client_subscription_repository,
+    client_balance_repository,
+)
 from ..config import get_settings
 from ..dependencies import require_admin, require_user
 from .schedule_utils import _serialize_reservation
 
 
 router = APIRouter(prefix="/clients", tags=["clients"], dependencies=[Depends(require_user)])
+
+SUBSCRIPTION_PLANS = {
+    "pack_4": {"plan_name": "Абонемент на 4 занятия", "sessions_total": 4, "price_rub": 2500},
+    "pack_8": {"plan_name": "Абонемент на 8 занятий", "sessions_total": 8, "price_rub": 4500},
+    "pack_12": {"plan_name": "Абонемент на 12 занятий", "sessions_total": 12, "price_rub": 6000},
+    "unlimited": {"plan_name": "Безлимит на месяц", "sessions_total": None, "price_rub": 7500},
+    "unlimited_self": {
+        "plan_name": "Безлимит на месяц самокрутки",
+        "sessions_total": None,
+        "price_rub": 5500,
+    },
+}
 
 
 def _serialize_activity_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -37,6 +55,23 @@ def _serialize_reservation_row(row: Dict[str, Any]) -> Dict[str, Any]:
     end_time = serialized.get("end_time")
     if hasattr(end_time, "strftime"):
         serialized["end_time"] = end_time.strftime("%H:%M")
+    return serialized
+
+
+def _serialize_subscription_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    serialized = dict(row)
+    for field in ("created_at", "valid_from", "valid_until"):
+        value = serialized.get(field)
+        if hasattr(value, "isoformat"):
+            serialized[field] = value.isoformat()
+    return serialized
+
+
+def _serialize_adjustment_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    serialized = dict(row)
+    created_at = serialized.get("created_at")
+    if hasattr(created_at, "isoformat"):
+        serialized["created_at"] = created_at.isoformat()
     return serialized
 
 
@@ -152,6 +187,235 @@ def api_get_client_reservations(client_id: int):
             "total": len(upcoming) + len(past),
         },
     }
+
+
+@router.get("/{client_id}/balance", dependencies=[Depends(require_admin)])
+def api_get_client_balance(client_id: int):
+    record = client_repository.get_client(client_id)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+    balance = client_balance_repository.get_balance(client_id)
+    adjustments = client_balance_repository.list_adjustments(client_id)
+    return {
+        "balance": balance,
+        "adjustments": [_serialize_adjustment_row(adj) for adj in adjustments],
+    }
+
+
+def _parse_date(value: object, field: str) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if not trimmed:
+            return None
+        try:
+            return date.fromisoformat(trimmed.split("T")[0])
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}") from exc
+    raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}")
+
+
+@router.get("/{client_id}/subscriptions", dependencies=[Depends(require_admin)])
+def api_get_client_subscriptions(client_id: int):
+    """Return purchased subscriptions and adjustments for a client (admins only)."""
+    record = client_repository.get_client(client_id)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+
+    subscriptions = client_subscription_repository.list_client_subscriptions(client_id)
+    total_sessions = 0
+    items = []
+    for sub in subscriptions:
+        serialized = _serialize_subscription_row(sub)
+        adjustments = [_serialize_adjustment_row(item) for item in sub.get("adjustments", [])]
+        serialized["adjustments"] = adjustments
+        items.append(serialized)
+        remaining = sub.get("sessions_remaining")
+        if isinstance(remaining, int):
+            total_sessions += remaining
+
+    return {"items": items, "totals": {"sessions_remaining": total_sessions}}
+
+
+@router.post("/{client_id}/subscriptions")
+async def api_create_client_subscription(client_id: int, request: Request, admin=Depends(require_admin)):
+    payload = await request.json()
+
+    record = client_repository.get_client(client_id)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+
+    def _parse_int(value: object, field: str, *, allow_none: bool = True) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}")
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned == "":
+                return None
+            try:
+                return int(cleaned)
+            except ValueError as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}") from exc
+        if allow_none:
+            return None
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Invalid {field}")
+
+    plan_code = (payload.get("plan_code") or "").strip()
+    if not plan_code:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "plan_code is required")
+
+    defaults = SUBSCRIPTION_PLANS.get(plan_code, {})
+    plan_name = (payload.get("plan_name") or defaults.get("plan_name") or plan_code).strip()
+    if not plan_name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "plan_name is required")
+
+    sessions_total = _parse_int(payload.get("sessions_total", defaults.get("sessions_total")), "sessions_total")
+    price_rub = _parse_int(payload.get("price_rub", defaults.get("price_rub")), "price_rub")
+    sessions_remaining = _parse_int(
+        payload.get("sessions_remaining", payload.get("sessions_total", defaults.get("sessions_total"))),
+        "sessions_remaining",
+    )
+    valid_from = _parse_date(payload.get("valid_from"), "valid_from")
+    valid_until = _parse_date(payload.get("valid_until"), "valid_until")
+    notes_value = payload.get("notes")
+    notes = notes_value.strip() if isinstance(notes_value, str) else None
+
+    try:
+        subscription = client_subscription_repository.create_subscription(
+            client_id=client_id,
+            plan_code=plan_code,
+            plan_name=plan_name,
+            sessions_total=sessions_total,
+            price_rub=price_rub,
+            valid_from=valid_from,
+            valid_until=valid_until,
+            notes=notes,
+            created_by=getattr(admin, "id", None),
+            sessions_remaining=sessions_remaining,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    serialized = _serialize_subscription_row(subscription)
+    return {"item": serialized}
+
+
+@router.delete("/{client_id}/subscriptions/{subscription_id}")
+async def api_delete_client_subscription(client_id: int, subscription_id: int, admin=Depends(require_admin)):
+    subscription = client_subscription_repository.get_subscription(subscription_id)
+    if not subscription or subscription.get("client_id") != client_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Subscription not found")
+
+    deleted = client_subscription_repository.delete_subscription(subscription_id)
+    if not deleted:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Не удалось удалить абонемент")
+    return {"status": "deleted"}
+
+
+@router.post("/{client_id}/subscriptions/{subscription_id}/adjust")
+async def api_adjust_client_subscription(
+    client_id: int,
+    subscription_id: int,
+    request: Request,
+    admin=Depends(require_admin),
+):
+    payload = await request.json()
+
+    subscription = client_subscription_repository.get_subscription(subscription_id)
+    if not subscription or subscription.get("client_id") != client_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Subscription not found")
+
+    try:
+        delta = int(payload.get("delta_sessions"))
+    except (TypeError, ValueError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "delta_sessions must be an integer")
+    if delta == 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "delta_sessions must be non-zero")
+
+    reservation_id_value = payload.get("reservation_id")
+    reservation_id = None
+    if reservation_id_value is not None:
+        try:
+            reservation_id = int(reservation_id_value)
+        except (TypeError, ValueError):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "reservation_id must be an integer")
+    if delta < 0 and reservation_id is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "reservation_id is required для списания тренировки")
+
+    reason = payload.get("reason") or ("spend" if delta < 0 else "top-up")
+
+    try:
+        updated, adjustment = client_subscription_repository.add_adjustment(
+            subscription_id=subscription_id,
+            delta_sessions=delta,
+            reason=reason,
+            created_by=getattr(admin, "id", None),
+            reservation_id=reservation_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    serialized = _serialize_subscription_row(updated)
+    serialized["adjustments"] = [_serialize_adjustment_row(adjustment)]
+    return {"item": serialized}
+
+
+@router.post("/{client_id}/balance", dependencies=[Depends(require_admin)])
+async def api_adjust_client_balance(client_id: int, request: Request, admin=Depends(require_admin)):
+    payload = await request.json()
+    try:
+        delta_rub = int(payload.get("delta_rub"))
+    except (TypeError, ValueError):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "delta_rub must be an integer")
+    if delta_rub == 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "delta_rub must be non-zero")
+    reservation_id_value = payload.get("reservation_id")
+    reservation_id = None
+    if reservation_id_value is not None:
+        try:
+            reservation_id = int(reservation_id_value)
+        except (TypeError, ValueError):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "reservation_id must be an integer")
+    reason = (payload.get("reason") or "").strip() or ("spend" if delta_rub < 0 else "top-up")
+    created_at_value = payload.get("created_at")
+    created_at = None
+    if created_at_value:
+        try:
+            created_at = str(created_at_value)
+        except (TypeError, ValueError):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "created_at must be a string")
+    try:
+        balance, adjustment = client_balance_repository.add_adjustment(
+            client_id=client_id,
+            delta_rub=delta_rub,
+            reason=reason,
+            reservation_id=reservation_id,
+            created_by=getattr(admin, "id", None),
+            created_at=created_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    return {
+        "balance": _serialize_adjustment_row(balance),
+        "adjustment": _serialize_adjustment_row(adjustment),
+    }
+
+
+@router.delete("/{client_id}/balance/{adjustment_id}", dependencies=[Depends(require_admin)])
+async def api_delete_client_balance_adjustment(client_id: int, adjustment_id: int, admin=Depends(require_admin)):
+    try:
+        balance = client_balance_repository.delete_adjustment(client_id, adjustment_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return {"balance": _serialize_adjustment_row(balance)}
 
 
 @router.patch("/{client_id}", dependencies=[Depends(require_admin)])

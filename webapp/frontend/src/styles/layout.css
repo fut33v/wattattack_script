@@ -1189,6 +1189,14 @@
   display: flex;
   gap: 0.75rem;
   align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.profile-main {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
 }
 
 .profile-avatar {
@@ -1234,6 +1242,18 @@
 
 .profile-link:hover {
   text-decoration: underline;
+}
+
+.profile-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.5rem;
+  text-align: right;
+}
+
+.profile-stat__value {
+  font-weight: 800;
+  font-size: 1.4rem;
 }
 
 .detail-card dl {
@@ -1951,6 +1971,130 @@ button.secondary:hover {
   font-size: 1.2rem;
   font-weight: 700;
   color: #f7f9ff;
+}
+
+.subscription-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.subscription-layout {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(320px, 360px) 1fr;
+  align-items: start;
+}
+
+@media (max-width: 960px) {
+  .subscription-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.subscription-form {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.subscription-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.subscription-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 1rem;
+  background: rgba(15, 22, 40, 0.6);
+  display: grid;
+  gap: 0.75rem;
+}
+
+.subscription-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.subscription-title {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.subscription-meta {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.subscription-actions {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.subscription-actions__quick {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.subscription-adjust-form {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  align-items: end;
+}
+
+.subscription-adjustments {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.balance-training {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.balance-training-wrapper {
+  margin-top: 0.5rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 0.75rem 0.9rem;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.balance-training__list {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 0.5rem 0.75rem;
+  max-height: 220px;
+  overflow: auto;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.checkbox-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  font-size: 0.95rem;
+}
+
+.positive {
+  color: #56d364;
+  font-weight: 700;
+}
+
+.negative {
+  color: #ff7b7b;
+  font-weight: 700;
 }
 
 .sync-content {
