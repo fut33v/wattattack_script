@@ -386,13 +386,30 @@ export default function ClientEditPage() {
     return Number.isNaN(parsed) ? null : parsed;
   }
 
+  function slugifyPlanCode(code: string) {
+    const trimmed = code.trim().toLowerCase();
+    if (!trimmed) return "";
+    return trimmed
+      .replace(/\s+/g, "_")
+      .replace(/[^a-z0-9_]/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/^_+|_+$/g, "");
+  }
+
   function handleCreateSubscription(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubscriptionMessage(null);
     const formData = new FormData(event.currentTarget);
+    const planName = (formData.get("plan_name") as string | null)?.trim() || planDefaults?.label || planCode;
+    const derivedPlanCode = planCode || slugifyPlanCode(planName || "");
+    if (!derivedPlanCode) {
+      setSubscriptionMessage("Укажите название или выберите тип абонемента — нужен код плана.");
+      return;
+    }
+
     const payload: Record<string, unknown> = {
-      plan_code: planCode,
-      plan_name: (formData.get("plan_name") as string | null)?.trim() || planDefaults?.label || planCode,
+      plan_code: derivedPlanCode,
+      plan_name: planName || derivedPlanCode,
       sessions_total: parseIntField(formData.get("sessions_total")),
       price_rub: parseIntField(formData.get("price_rub")),
       valid_from: (formData.get("valid_from") as string | null) || null,
