@@ -239,12 +239,17 @@ export default function ActivitiesPage() {
               {
                 key: "sent_strava",
                 title: "Strava",
-                render: (item) => formatFlag(item.sent_strava),
-              },
+              render: (item) => formatFlag(item.sent_strava),
+            },
+            {
+              key: "sent_intervals",
+              title: "ICU",
+              render: (item) => formatFlag(item.sent_intervals),
+            },
               {
-                key: "sent_intervals",
-                title: "Intervals",
-                render: (item) => formatFlag(item.sent_intervals),
+                key: "fit_path",
+                title: "FIT",
+                render: (item) => formatFlag(Boolean(item.fit_path)),
               },
               {
                 key: "created_at",

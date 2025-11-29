@@ -265,7 +265,7 @@ export default function ActivityDetailPage() {
           <div className="flag-row">
             <Flag label="БОТ" value={activity.sent_clientbot} />
             <Flag label="Strava" value={activity.sent_strava} />
-            <Flag label="Intervals" value={activity.sent_intervals} />
+            <Flag label="ICU" value={activity.sent_intervals} />
           </div>
 
           <div className="activity-stats-grid">
@@ -339,7 +339,7 @@ export default function ActivityDetailPage() {
               onClick={() => sendToIntervals.mutate()}
               disabled={!activity || anyPending}
             >
-              {sendToIntervals.isPending ? "⏳ Отправляем…" : "📊 Отправить в Intervals"}
+              {sendToIntervals.isPending ? "⏳ Отправляем…" : "📊 Отправить в ICU"}
             </button>
             {actionMessage && (
               <span
