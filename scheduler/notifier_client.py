@@ -1013,6 +1013,15 @@ def send_to_matching_clients(
     resolved_client_id: Optional[int] = None
     resolved_client_name: Optional[str] = None
 
+    def _search_clients(term: str) -> List[Dict[str, Any]]:
+        if not term.strip():
+            return []
+        try:
+            return search_clients(term, limit=100)
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to search clients by term %s", term)
+            return []
+
     if scheduled_client_id:
         try:
             scheduled_client = get_client(scheduled_client_id)
@@ -1045,7 +1054,27 @@ def send_to_matching_clients(
             return False, False, False, None, None
 
         LOGGER.info("Searching for clients matching athlete name: %s", athlete_name)
-        matching_clients = search_clients(athlete_name, limit=100)
+        matching_clients = _search_clients(athlete_name)
+
+        # Fallback: try reversed name order (e.g., "Last First" -> "First Last")
+        if not matching_clients:
+            parts = [part for part in athlete_name.replace(",", " ").split() if part]
+            if len(parts) >= 2:
+                reversed_name = " ".join(reversed(parts))
+                if reversed_name.lower() != athlete_name.lower():
+                    LOGGER.info("No direct match; trying reversed name: %s", reversed_name)
+                    matching_clients = _search_clients(reversed_name)
+
+            # Fallback: collect matches for individual name parts
+            if not matching_clients and parts:
+                LOGGER.info("No reversed match; trying partial tokens for %s", athlete_name)
+                dedup: dict[int, Dict[str, Any]] = {}
+                for token in parts:
+                    for client in _search_clients(token):
+                        if client.get("id") is not None:
+                            dedup[int(client["id"])] = client
+                matching_clients = list(dedup.values())
+
         if not matching_clients:
             LOGGER.info("No clients found matching athlete name: %s", athlete_name)
             return False, False, False, None, None
