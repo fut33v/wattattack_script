@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from wattattack_activities import DEFAULT_BASE_URL
+from repositories import wattattack_account_repository
 
 LOGGER = logging.getLogger(__name__)
 
@@ -43,15 +44,41 @@ def _parse_stand_ids(entry: Dict[str, Any]) -> Tuple[int, ...]:
 
 
 def load_accounts(config_path: Path) -> Dict[str, AccountConfig]:
-    if not config_path.exists():
+    """Load WattAttack accounts, preferring database records, with JSON fallback."""
+
+    accounts: Dict[str, AccountConfig] = {}
+
+    # Try database first
+    try:
+        wattattack_account_repository.ensure_table()
+        db_accounts = wattattack_account_repository.list_accounts()
+        for entry in db_accounts:
+            identifier = entry.get("id")
+            if not identifier:
+                continue
+            accounts[identifier] = AccountConfig(
+                identifier=identifier,
+                name=entry.get("name") or str(identifier),
+                email=entry["email"],
+                password=entry["password"],
+                base_url=entry.get("base_url") or DEFAULT_BASE_URL,
+                stand_ids=tuple(entry.get("stand_ids") or ()),
+            )
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("Failed to load WattAttack accounts from DB, will try JSON")
+        accounts = {}
+
+    if accounts:
+        return accounts
+
+    # Fallback to JSON
+    if not config_path.exists() or config_path.is_dir():
         raise FileNotFoundError(
             f"Accounts config file not found: {config_path}. "
-            "Create it from the sample template."
+            "Create it from the sample template or seed DB."
         )
 
     raw_data = json.loads(config_path.read_text(encoding="utf-8"))
-    accounts: Dict[str, AccountConfig] = {}
-
     for entry in raw_data:
         identifier = entry["id"]
         accounts[identifier] = AccountConfig(
@@ -65,6 +92,20 @@ def load_accounts(config_path: Path) -> Dict[str, AccountConfig]:
 
     if not accounts:
         raise ValueError("Accounts list is empty")
+
+    # Persist into DB for future runs
+    for acc in accounts.values():
+        try:
+            wattattack_account_repository.upsert_account(
+                account_id=acc.identifier,
+                name=acc.name,
+                email=acc.email,
+                password=acc.password,
+                base_url=acc.base_url,
+                stand_ids=list(acc.stand_ids) or None,
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("Failed to save WattAttack account %s into DB", acc.identifier)
 
     return accounts
 

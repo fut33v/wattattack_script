@@ -39,6 +39,7 @@ from .routes.schedule import router as schedule_router, public_router as public_
 from .routes.schedule_slots import router as schedule_slots_router
 from .routes.backup import router as backup_router
 from .routes.stats import router as stats_router
+from .routes.wattattack_accounts import router as wattattack_accounts_router
 
 
 BASE_DIR = Path(__file__).parent
@@ -90,6 +91,7 @@ api.include_router(schedule_slots_router)
 api.include_router(strava_router)
 api.include_router(backup_router)
 api.include_router(stats_router)
+api.include_router(wattattack_accounts_router)
 
 
 def create_app() -> FastAPI:

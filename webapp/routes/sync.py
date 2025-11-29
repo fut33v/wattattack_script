@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Sequence
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile, status
 from zoneinfo import ZoneInfo
 
-from scheduler.notifier import load_accounts  # type: ignore
+from scheduler.accounts import load_accounts  # type: ignore
 from scheduler.notifier_client import (  # type: ignore
     parse_activity_start_dt,
     resolve_scheduled_client,

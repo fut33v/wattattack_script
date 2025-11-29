@@ -47,6 +47,7 @@ from scheduler.notifier_client import (
 from scheduler import reminders
 from scheduler import intervals_plan
 from scheduler import intervals_upload
+from scheduler import accounts as accounts_utils
 from wattattack_profiles import apply_client_profile as apply_wattattack_profile
 
 LOGGER = logging.getLogger(__name__)
@@ -54,7 +55,6 @@ LOGGER = logging.getLogger(__name__)
 BOT_TOKEN_ENV = "KRUTILKAFIT_BOT_TOKEN"
 BOT_TOKEN_FALLBACK_ENV = "TELEGRAM_BOT_TOKEN"
 KRUTILKAVN_BOT_TOKEN_ENV = "KRUTILKAVN_BOT_TOKEN"
-ACCOUNTS_ENV = "WATTATTACK_ACCOUNTS_FILE"
 STATE_ENV = "WATTATTACK_STATE_FILE"
 DEFAULT_ACCOUNTS_PATH = Path("accounts.json")
 DEFAULT_STATE_PATH = Path("notifier_state.json")
@@ -104,7 +104,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--accounts",
         type=Path,
-        default=Path(os.environ.get(ACCOUNTS_ENV, DEFAULT_ACCOUNTS_PATH)),
+        default=Path(os.environ.get(accounts_utils.ACCOUNTS_ENV, accounts_utils.DEFAULT_ACCOUNTS_PATH)),
         help="Path to JSON file with WattAttack accounts (same format as accounts.sample.json)",
     )
     parser.add_argument(
@@ -154,46 +154,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Window length in minutes when scanning slots for automatic assignments",
     )
     return parser.parse_args(argv)
-
-
-def _parse_stand_ids(entry: Dict[str, Any]) -> List[int]:
-    raw_value = entry.get("stand_ids")
-    if raw_value is None and entry.get("stand_id") is not None:
-        raw_value = [entry.get("stand_id")]
-    if raw_value is None:
-        return []
-    iterable = raw_value if isinstance(raw_value, (list, tuple)) else [raw_value]
-    values: List[int] = []
-    for value in iterable:
-        try:
-            values.append(int(value))
-        except (TypeError, ValueError):
-            LOGGER.warning("Account %s has invalid stand id %r", entry.get("id"), value)
-    return values
-
-
-def load_accounts(config_path: Path) -> Dict[str, Dict[str, Any]]:
-    if not config_path.exists():
-        raise FileNotFoundError(
-            f"Accounts config file not found: {config_path}. "
-            "Supply --accounts or set WATTATTACK_ACCOUNTS_FILE."
-        )
-
-    data = json.loads(config_path.read_text(encoding="utf-8"))
-    accounts: Dict[str, Dict[str, Any]] = {}
-    for entry in data:
-        identifier = entry["id"]
-        accounts[identifier] = {
-            "id": identifier,
-            "name": entry.get("name", identifier),
-            "email": entry["email"],
-            "password": entry["password"],
-            "base_url": entry.get("base_url", DEFAULT_BASE_URL),
-            "stand_ids": _parse_stand_ids(entry),
-        }
-    if not accounts:
-        raise ValueError("Accounts list is empty")
-    return accounts
 
 
 def telegram_send_message(
@@ -910,7 +870,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     try:
-        accounts = load_accounts(args.accounts)
+        accounts = accounts_utils.load_accounts(args.accounts)
     except Exception as exc:  # noqa: BLE001
         LOGGER.error("Failed to load accounts: %s", exc)
         return 2

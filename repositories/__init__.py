@@ -17,4 +17,5 @@ __all__ = [
     "intervals_link_repository",
     "client_subscription_repository",
     "client_balance_repository",
+    "wattattack_account_repository",
 ]

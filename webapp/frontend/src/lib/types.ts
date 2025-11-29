@@ -424,6 +424,25 @@ export interface ActivityFitDownloadResponse {
   fit_path?: string | null;
 }
 
+export interface WattAttackAccount {
+  id: string;
+  name?: string | null;
+  email: string;
+  password: string;
+  base_url?: string | null;
+  stand_ids?: number[];
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface WattAttackAccountListResponse {
+  items: WattAttackAccount[];
+}
+
+export interface WattAttackAccountResponse {
+  item: WattAttackAccount;
+}
+
 export interface ClientActivitiesStats {
   count: number;
   distance: number;
