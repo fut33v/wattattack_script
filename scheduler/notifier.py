@@ -34,6 +34,7 @@ from repositories.schedule_repository import (
     was_account_assignment_done,
     find_reservation_by_client_name,
     ensure_fit_files_dir,
+    list_activities_missing_fit,
 )
 from repositories.client_link_repository import get_link_by_client
 from repositories.client_repository import get_client, search_clients
@@ -994,6 +995,130 @@ def send_activity_fit(
         fit_path,
     )
 
+
+def backfill_missing_fit_files(
+    *,
+    account_id: str,
+    client: WattAttackClient,
+    activities: Sequence[Dict[str, Any]],
+    account_name: Optional[str],
+    profile: Dict[str, Any],
+    clientbot_token: Optional[str],
+    timeout: float,
+    max_missing: int = 200,
+) -> int:
+    """
+    Attempt to download FIT files for activities that are already stored but missing fit_path.
+
+    Returns the number of FIT files successfully downloaded or linked.
+    """
+
+    missing = list_activities_missing_fit(account_id, limit=max_missing)
+    if not missing:
+        return 0
+
+    LOGGER.info("%s: ищем FIT для %d активностей без файла", account_id, len(missing))
+
+    activity_map = {
+        str(item.get("id")): item for item in activities if isinstance(item, dict) and item.get("id") is not None
+    }
+
+    if any(str(item.get("activity_id")) not in activity_map for item in missing):
+        try:
+            extra_activities, _ = client.fetch_activity_feed(limit=2000, timeout=timeout)
+            for item in extra_activities:
+                key = item.get("id")
+                if key is not None:
+                    activity_map[str(key)] = item
+        except Exception:  # noqa: BLE001
+            LOGGER.warning("%s: не удалось обновить ленту для поиска FIT", account_id)
+
+    downloaded = 0
+    base_dir = ensure_fit_files_dir()
+
+    for row in missing:
+        activity_id = str(row.get("activity_id"))
+        scheduled_client_id = row.get("manual_client_id") or row.get("client_id")
+        scheduled_client_name = row.get("manual_client_name") or row.get("scheduled_name")
+        activity = activity_map.get(activity_id)
+        if not activity:
+            LOGGER.info("%s: активность %s не найдена в ленте, пропускаем", account_id, activity_id)
+            continue
+
+        fit_id = activity.get("fitFileId")
+        if not fit_id:
+            LOGGER.info("%s: у активности %s нет fitFileId, пропускаем", account_id, activity_id)
+            continue
+
+        dest_dir = base_dir / account_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_file = dest_dir / f"{activity_id}.fit"
+
+        if not dest_file.exists():
+            try:
+                client.download_fit_file(str(fit_id), dest_file, timeout=timeout)
+            except Exception:  # noqa: BLE001
+                LOGGER.warning("%s: ошибка скачивания FIT %s для активности %s", account_id, fit_id, activity_id)
+                dest_file.unlink(missing_ok=True)
+                continue
+
+        fit_path = None
+        if dest_file.exists():
+            fit_path = f"/fitfiles/{account_id}/{activity_id}.fit"
+            record_seen_activity_id(account_id, activity_id, fit_path=fit_path)
+            downloaded += 1
+
+        needs_delivery = (
+            not row.get("sent_clientbot")
+            or not row.get("sent_strava")
+            or not row.get("sent_intervals")
+        )
+        if not needs_delivery or not dest_file.exists():
+            continue
+
+        caption = format_activity_meta(activity, account_name, profile, scheduled_client_name)
+        try:
+            sent_clientbot, sent_strava, sent_intervals, resolved_client_id, resolved_client_name = (
+                send_to_matching_clients(
+                    activity,
+                    profile,
+                    caption,
+                    clientbot_token or "",
+                    timeout,
+                    dest_file,
+                    account_name,
+                    scheduled_client_id,
+                    scheduled_client_name,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            LOGGER.exception("%s: не удалось отправить восстановленную активность %s", account_id, activity_id)
+            continue
+
+        final_client_id = resolved_client_id or scheduled_client_id
+        final_client_name = resolved_client_name or scheduled_client_name
+
+        record_seen_activity_id(
+            account_id,
+            activity_id,
+            client_id=final_client_id,
+            scheduled_name=final_client_name,
+            fit_path=fit_path,
+            sent_clientbot=sent_clientbot,
+            sent_strava=sent_strava,
+            sent_intervals=sent_intervals,
+            start_time=row.get("start_time"),
+            profile_name=row.get("profile_name"),
+        )
+
+    if downloaded:
+        LOGGER.info("%s: скачано %d FIT-файлов из пропущенных", account_id, downloaded)
+    else:
+        LOGGER.info("%s: нет скачанных FIT-файлов из пропущенных", account_id)
+
+    return downloaded
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
 
@@ -1135,6 +1260,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         )
         else:
             LOGGER.info("No new activities for %s", account_id)
+
+        if not args.dry_run:
+            try:
+                recovered = backfill_missing_fit_files(
+                    account_id=account_id,
+                    client=client,
+                    activities=activities,
+                    account_name=account.get("name", account_id),
+                    profile=profile,
+                    clientbot_token=os.environ.get(KRUTILKAVN_BOT_TOKEN_ENV),
+                    timeout=args.timeout,
+                )
+                if recovered:
+                    any_changes = True
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to backfill FIT files for %s", account_id)
 
     # Note: We're not saving state to JSON file anymore
     # if any_changes:

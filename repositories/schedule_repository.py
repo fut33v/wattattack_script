@@ -1648,6 +1648,26 @@ def list_intervals_backfill_activities(client_id: int, limit: int = 200) -> List
     return [dict(row) for row in rows]
 
 
+def list_activities_missing_fit(account_id: str, limit: int = 200) -> List[Dict]:
+    """Return activities for account that do not have a recorded FIT file path."""
+    ensure_activity_ids_table()
+    safe_limit = max(1, min(limit, 1000))
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM seen_activity_ids
+            WHERE account_id = %s
+              AND fit_path IS NULL
+            ORDER BY COALESCE(start_time, created_at) DESC
+            LIMIT %s
+            """,
+            (account_id, safe_limit),
+        )
+        rows = cur.fetchall()
+    return [dict(row) for row in rows]
+
+
 def find_reservation_for_activity(
     stand_ids: Sequence[int],
     target_dt: datetime,
