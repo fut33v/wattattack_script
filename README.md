@@ -57,6 +57,7 @@ See `AGENTS.md` for repository-wide guidelines on structure, workflows, and revi
    - `TELEGRAM_BOT_TOKEN` для adminbot, optional `TELEGRAM_ADMIN_IDS` seed.
    - `KRUTILKAFIT_BOT_TOKEN` — токен отдельного бота для скачивания активностей (если не указан, будет использован `TELEGRAM_BOT_TOKEN`).
    - `KRUTILKAVN_BOT_TOKEN` for the greeting bot (use `KRUTILKAVN_GREETING` to override the default message).
+   - `DEV_BUILD` — если установить в `1`/`true`, веб-приложение использует чёрный фавикон `img/logo_black.png` для dev-сборок.
 - `WATTATTACK_ACCOUNTS_FILE` (JSON with email/password/base_url per account plus optional `stand_ids` for automatic assignments).
    - `WATTATTACK_LOCAL_TZ` (default `Europe/Moscow`) — региональная таймзона для scheduler’а и ботов.
    - `WATTATTACK_ASSIGN_ENABLED` — включить автоматическую запись клиентов в WattAttack-аккаунты (по умолчанию только уведомления).

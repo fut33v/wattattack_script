@@ -14,6 +14,13 @@ def _env(name: str, default: Optional[str] = None, *, required: bool = False) ->
     return value or ""
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(slots=True)
 class Settings:
     telegram_bot_token: str
@@ -21,6 +28,7 @@ class Settings:
     session_secret_key: str
     telegram_login_bot_token: str
     krutilkavn_bot_token: str
+    dev_build: bool = False
     base_url: Optional[str] = None
     public_url: Optional[str] = None
     straver_base_url: Optional[str] = None
@@ -50,6 +58,7 @@ def get_settings() -> Settings:
         telegram_login_bot_token=login_token,
         krutilkavn_bot_token=krutilkavn_token,
         session_secret_key=_env("WEBAPP_SECRET_KEY", required=True),
+        dev_build=_env_bool("DEV_BUILD") or _env_bool("WEBAPP_DEV_BUILD"),
         base_url=os.environ.get("WEBAPP_BASE_URL"),
         public_url=os.environ.get("WEBAPP_PUBLIC_URL"),
         straver_base_url=os.environ.get("STRAVER_BASE_URL"),

@@ -78,8 +78,8 @@ export default function AppShell({ session, children, hideSidebar = false }: App
           <div className="brand">
             <span className="brand-accent" />
             <div>
-              <div className="brand-title">Крутилка</div>
-              <div className="brand-sub">Admin Portal</div>
+              <div className="brand-title">КРУТИЛКА</div>
+              <div className="brand-sub">АДМИНКА</div>
             </div>
           </div>
           <nav className="nav">
@@ -198,7 +198,7 @@ export default function AppShell({ session, children, hideSidebar = false }: App
       <main className={mainClass}>
         {!hideSidebar && (
           <header className="main-header">
-            <h1>Крутилка Admin</h1>
+            <h1>АДМИНКА КРУТИЛКИ</h1>
             <div className="main-meta">
               <span>Управление базой клиентов и инвентарем</span>
             </div>

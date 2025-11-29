@@ -44,7 +44,7 @@ export default function LoginView({ config }: LoginViewProps) {
   return (
     <div className="login-screen">
       <div className="login-card">
-        <h1>Крутилка Admin</h1>
+        <h1>АДМИНКА КРУТИЛКИ</h1>
         <p>Войдите через Telegram, чтобы продолжить.</p>
         <div ref={containerRef} className="login-widget" />
         {error && <div className="login-error">{error}</div>}

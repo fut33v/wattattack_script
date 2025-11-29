@@ -94,6 +94,12 @@ api.include_router(stats_router)
 api.include_router(wattattack_accounts_router)
 
 
+def _apply_dev_favicon(html: str, *, enabled: bool) -> str:
+    if not enabled:
+        return html
+    return html.replace("/app/logo.png", "/img/logo_black.png")
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -129,6 +135,17 @@ def create_app() -> FastAPI:
     if assets_dir.exists():
         app.mount("/app/assets", StaticFiles(directory=str(assets_dir), html=False), name="frontend-assets")
 
+    images_dir = BASE_DIR.parent / "img"
+    dev_favicon_path = images_dir / "logo_black.png"
+    dev_favicon_enabled = False
+    if images_dir.exists():
+        app.mount("/img", StaticFiles(directory=str(images_dir), html=False), name="static-images")
+    if settings.dev_build:
+        if dev_favicon_path.exists():
+            dev_favicon_enabled = True
+        else:
+            log.warning("DEV_BUILD is set but %s is missing; using default favicon", dev_favicon_path)
+
     if MESSAGING_UPLOADS_DIR.exists():
         app.mount("/uploads", StaticFiles(directory=str(MESSAGING_UPLOADS_DIR), html=False), name="uploads")
     try:
@@ -158,6 +175,7 @@ def create_app() -> FastAPI:
                 },
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
+        html = _apply_dev_favicon(html, enabled=dev_favicon_enabled)
         return HTMLResponse(html)
 
     @app.get("/app", response_class=HTMLResponse)
