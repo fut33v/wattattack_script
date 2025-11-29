@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -12,11 +13,13 @@ from scheduler import intervals_sync
 from scheduler.notifier_client import (
     format_activity_meta,
     format_strava_activity_description,
+    load_accounts,
     telegram_send_document,
     telegram_send_message,
 )
 from straver_client import StraverClient
-from .sync import _build_strava_payload, _resolve_fit_file_path
+from wattattack_activities import DEFAULT_BASE_URL, WattAttackClient
+from .sync import _build_strava_payload, _fit_storage_path, _resolve_fit_file_path
 
 log = logging.getLogger(__name__)
 
@@ -205,6 +208,76 @@ def _build_activity_payload(row: dict) -> dict:
         "averageCadence": row.get("average_cadence"),
         "averageHeartrate": row.get("average_heartrate"),
     }
+
+
+@router.post("/{account_id}/{activity_id}/fit")
+def api_download_fit_file(account_id: str, activity_id: str):
+    """Download a missing FIT file for an activity directly from WattAttack."""
+    try:
+        activity_row = _load_activity_row(account_id, activity_id)
+        existing_path = _resolve_fit_file_path(activity_row)
+        if existing_path:
+            fit_path = activity_row.get("fit_path") or f"/fitfiles/{account_id}/{activity_id}.fit"
+            if not activity_row.get("fit_path"):
+                schedule_repository.record_seen_activity_id(str(account_id), str(activity_id), fit_path=fit_path)
+            return {
+                "status": "exists",
+                "message": "FIT-файл уже сохранен",
+                "fit_path": fit_path,
+            }
+
+        accounts_path = Path(os.environ.get("WATTATTACK_ACCOUNTS_FILE", "accounts.json"))
+        timeout = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
+        try:
+            accounts = load_accounts(accounts_path)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, f"Не удалось прочитать конфиг аккаунтов: {exc}") from exc
+
+        account_cfg = accounts.get(account_id)
+        if not account_cfg:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Аккаунт не найден в конфиге")
+
+        client = WattAttackClient(account_cfg.get("base_url", DEFAULT_BASE_URL))
+        try:
+            client.login(account_cfg["email"], account_cfg["password"], timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Не удалось авторизоваться в WattAttack: {exc}") from exc
+
+        try:
+            activities, _ = client.fetch_activity_feed(limit=2000, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Не удалось загрузить список активностей: {exc}") from exc
+
+        target = next((item for item in activities if str(item.get("id")) == str(activity_id)), None)
+        if not target:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Активность не найдена в WattAttack")
+
+        fit_id = target.get("fitFileId")
+        if not fit_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "У активности нет FIT-файла в WattAttack")
+
+        dest_file = _fit_storage_path(str(account_id), str(activity_id))
+        try:
+            client.download_fit_file(str(fit_id), dest_file, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            dest_file.unlink(missing_ok=True)
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Не удалось скачать FIT-файл: {exc}") from exc
+
+        fit_path = f"/fitfiles/{account_id}/{activity_id}.fit"
+        schedule_repository.record_seen_activity_id(
+            str(account_id),
+            str(activity_id),
+            fit_path=fit_path,
+        )
+
+        return {"status": "downloaded", "message": "FIT-файл скачан", "fit_path": fit_path}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Unexpected error while downloading FIT for %s/%s", account_id, activity_id)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Не удалось скачать FIT-файл"
+        ) from exc
 
 
 @router.post("/{account_id}/{activity_id}/strava")

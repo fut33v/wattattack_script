@@ -8,6 +8,7 @@ import { ApiError, apiFetch } from "../lib/api";
 import type {
   ActivityDetailResponse,
   ActivityIdRecord,
+  ActivityFitDownloadResponse,
   ActivityStravaUploadResponse,
   ClientListResponse,
   ClientRow,
@@ -181,6 +182,19 @@ export default function ActivityDetailPage() {
     },
   });
 
+  const downloadFit = useMutation({
+    mutationFn: () =>
+      apiFetch<ActivityFitDownloadResponse>(`/api/activities/${accountId}/${activityId}/fit`, {
+        method: "POST",
+      }),
+    onSuccess: (data) => {
+      handleSuccess(data?.message || "FIT-файл скачан");
+    },
+    onError: (error: unknown) => {
+      handleError(error, "Не удалось скачать FIT-файл");
+    },
+  });
+
   const updateClient = useMutation({
     mutationFn: () =>
       apiFetch<ActivityDetailResponse>(`/api/activities/${accountId}/${activityId}/client`, {
@@ -197,7 +211,11 @@ export default function ActivityDetailPage() {
   });
 
   const anyPending =
-    stravaUpload.isPending || sendToBot.isPending || sendToIntervals.isPending || updateClient.isPending;
+    stravaUpload.isPending ||
+    sendToBot.isPending ||
+    sendToIntervals.isPending ||
+    downloadFit.isPending ||
+    updateClient.isPending;
 
   const clientsQuery = useQuery<ClientListResponse>({
     queryKey: ["client-search", clientSearch],
@@ -283,7 +301,14 @@ export default function ActivityDetailPage() {
                     Скачать
                   </a>
                 ) : (
-                  "—"
+                  <button
+                    type="button"
+                    className="button"
+                    onClick={() => downloadFit.mutate()}
+                    disabled={anyPending}
+                  >
+                    {downloadFit.isPending ? "⏳ Скачиваем…" : "⬇️ Запросить из WattAttack"}
+                  </button>
                 )}
               </div>
             </div>

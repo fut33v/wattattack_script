@@ -418,6 +418,12 @@ export interface ActivityStravaUploadResponse {
   message?: string;
 }
 
+export interface ActivityFitDownloadResponse {
+  status: string;
+  message?: string;
+  fit_path?: string | null;
+}
+
 export interface ClientActivitiesStats {
   count: number;
   distance: number;
