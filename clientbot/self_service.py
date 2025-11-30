@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Optional
+from typing import Callable, Dict, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
@@ -53,7 +53,9 @@ class SelfServiceFlow:
     def __init__(
         self,
         fetch_linked_client: Callable[[int], tuple[Optional[dict], Optional[dict]]],
-        send_main_menu: Callable[[ContextTypes.DEFAULT_TYPE, int, str], asyncio.Future],
+        send_main_menu: Callable[
+            [ContextTypes.DEFAULT_TYPE, int, str, Optional[int], Optional[dict]], asyncio.Future
+        ],
         *,
         accounts_path: Path = ACCOUNTS_CONFIG_PATH,
     ):
@@ -300,7 +302,7 @@ class SelfServiceFlow:
         chat_id = query.message.chat_id if query.message else query.from_user.id if query.from_user else None
         user_id = query.from_user.id if query.from_user else None
         if chat_id is not None:
-            await self._send_main_menu(context, chat_id, "Выберите действие:")
+            await self._send_main_menu(context, chat_id, "Выберите действие:", user_id, None)
 
     @staticmethod
     def _format_client_display_name(client: dict) -> str:
@@ -315,6 +317,8 @@ class SelfServiceFlow:
 
     def register_handlers(self, application: Application) -> None:
         application.add_handler(CallbackQueryHandler(self.handle_ack, pattern=r"^self_service:ack$"), group=-1)
-        application.add_handler(CallbackQueryHandler(self.handle_account_choice, pattern=r"^self_service:account:[^:]+$"), group=-1)
+        application.add_handler(
+            CallbackQueryHandler(self.handle_account_choice, pattern=r"^self_service:account:[^:]+$"), group=-1
+        )
         application.add_handler(CallbackQueryHandler(self.handle_apply_all, pattern=r"^self_service:all$"), group=-1)
         application.add_handler(CallbackQueryHandler(self.handle_back, pattern=r"^self_service:back$"), group=-1)

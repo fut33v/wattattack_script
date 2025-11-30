@@ -2129,7 +2129,24 @@ def _format_profile_summary(client: Dict[str, Any]) -> str:
 
 def _has_self_service_access(user_id: Optional[int] = None, client: Optional[Dict[str, Any]] = None) -> bool:
     flow = _SELF_SERVICE_FLOW
-    return flow.has_access(user_id, client) if flow is not None else False
+    if flow is not None:
+        try:
+            return flow.has_access(user_id, client)
+        except Exception:
+            LOGGER.exception("Self-service access check failed")
+    client_id = client.get("id") if isinstance(client, dict) else None
+    if client_id is None and user_id is not None:
+        _, linked_client = _fetch_linked_client(user_id)
+        client_id = linked_client.get("id") if isinstance(linked_client, dict) else None
+    if not isinstance(client_id, int):
+        return False
+    try:
+        from clientbot.self_service import SELF_SERVICE_GROUP_NAME
+
+        return client_groups_repository.is_client_in_group(client_id, SELF_SERVICE_GROUP_NAME)
+    except Exception:
+        LOGGER.exception("Failed to check self-service group fallback for client %s", client_id)
+        return False
 
 
 def _build_main_menu_keyboard(show_self_service: bool = False) -> InlineKeyboardMarkup:
@@ -3553,8 +3570,10 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
 
     global _SELF_SERVICE_FLOW
 
-    async def _menu_wrapper(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
-        await _send_main_menu_prompt(ctx, chat_id, text)
+    async def _menu_wrapper(
+        ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, user_id: Optional[int], client: Optional[Dict[str, Any]]
+    ) -> None:
+        await _send_main_menu_prompt(ctx, chat_id, text, user_id=user_id, client=client)
 
     _SELF_SERVICE_FLOW = self_service.SelfServiceFlow(
         fetch_linked_client=_fetch_linked_client,
