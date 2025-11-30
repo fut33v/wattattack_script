@@ -46,6 +46,23 @@ export interface ClientListResponse {
   pagination: Pagination;
 }
 
+export interface ClientGroup {
+  group_name: string;
+}
+
+export interface ClientGroupListResponse {
+  items: ClientGroup[];
+}
+
+export interface GroupDefinition {
+  group_name: string;
+  created_at?: string | null;
+}
+
+export interface GroupListResponse {
+  items: GroupDefinition[];
+}
+
 export interface ClientSubscriptionAdjustment {
   id: number;
   subscription_id: number;

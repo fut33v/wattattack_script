@@ -1,6 +1,7 @@
 """Entry points for the Krutilka VNB Telegram bot."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, time, timedelta
 import requests
@@ -21,7 +22,14 @@ from telegram.ext import (
     filters,
 )
 
-from repositories import bikes_repository, message_repository, race_repository, schedule_repository, trainers_repository
+from repositories import (
+    bikes_repository,
+    client_groups_repository,
+    message_repository,
+    race_repository,
+    schedule_repository,
+    trainers_repository,
+)
 from repositories.client_repository import create_client, get_client, search_clients
 from repositories.client_link_repository import (
     get_link_by_client,
@@ -36,7 +44,9 @@ from repositories.link_requests_repository import (
 from repositories.admin_repository import get_admin_ids, is_admin
 from straver_client import StraverClient
 from clientbot import intervals
+from clientbot import self_service
 from repositories.intervals_link_repository import get_link as get_intervals_link
+from wattattack_profiles import apply_client_profile as apply_wattattack_profile
 
 import os
 
@@ -67,6 +77,8 @@ DEFAULT_GREETING: Final[str] = "Здравствуйте!"
 MAX_SUGGESTIONS: Final[int] = 6
 ADMIN_BOT_TOKEN_ENV: Final[str] = "TELEGRAM_BOT_TOKEN"
 LINK_REQUEST_ID_LEN: Final[int] = 12
+_SELF_SERVICE_BUTTON: Final[Tuple[str, str]] = ("🔄 Самокрутка", "main_menu:selfservice")
+_SELF_SERVICE_FLOW: Optional[self_service.SelfServiceFlow] = None
 
 (
     ASK_LAST_NAME,
@@ -702,6 +714,7 @@ async def _handle_booking_back(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def _handle_booking_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    user = update.effective_user
     if query is not None:
         await query.answer("Бронирование отменено")
         try:
@@ -713,7 +726,12 @@ async def _handle_booking_cancel_callback(update: Update, context: ContextTypes.
         target_chat = update.effective_chat.id if update.effective_chat else None
     _clear_booking_state(context)
     if target_chat is not None:
-        await _send_main_menu_prompt(context, target_chat, "Вы вернулись в главное меню. Выберите действие:")
+        await _send_main_menu_prompt(
+            context,
+            target_chat,
+            "Вы вернулись в главное меню. Выберите действие:",
+            user_id=user.id if user else None,
+        )
     return ConversationHandler.END
 
 
@@ -727,7 +745,12 @@ async def _booking_cancel_command(update: Update, context: ContextTypes.DEFAULT_
     if message is not None:
         await message.reply_text("Бронирование отменено.")
         if link_record:
-            await _send_main_menu_prompt(context, message.chat_id, "Вы вернулись в главное меню. Выберите действие:")
+            await _send_main_menu_prompt(
+                context,
+                message.chat_id,
+                "Вы вернулись в главное меню. Выберите действие:",
+                user_id=user.id if user else None,
+            )
     _clear_booking_state(context)
     return ConversationHandler.END
 
@@ -2104,10 +2127,25 @@ def _format_profile_summary(client: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _build_main_menu_keyboard() -> InlineKeyboardMarkup:
+def _has_self_service_access(user_id: Optional[int] = None, client: Optional[Dict[str, Any]] = None) -> bool:
+    flow = _SELF_SERVICE_FLOW
+    return flow.has_access(user_id, client) if flow is not None else False
+
+
+def _build_main_menu_keyboard(show_self_service: bool = False) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
     for row in _MAIN_MENU_BUTTONS:
         rows.append([InlineKeyboardButton(text, callback_data=data) for text, data in row])
+    if show_self_service:
+        rows.insert(
+            1,
+            [
+                InlineKeyboardButton(
+                    _SELF_SERVICE_BUTTON[0],
+                    callback_data=_SELF_SERVICE_BUTTON[1],
+                )
+            ],
+        )
     return InlineKeyboardMarkup(rows)
 
 
@@ -2115,9 +2153,17 @@ async def _send_main_menu_prompt(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     text: str = "Выберите действие:",
+    user_id: Optional[int] = None,
+    client: Optional[Dict[str, Any]] = None,
 ) -> None:
+    flow = _SELF_SERVICE_FLOW
+    show_self_service = flow.has_access(user_id, client) if flow is not None else False
     try:
-        await context.bot.send_message(chat_id, text, reply_markup=_build_main_menu_keyboard())
+        await context.bot.send_message(
+            chat_id,
+            text,
+            reply_markup=_build_main_menu_keyboard(show_self_service=show_self_service),
+        )
     except Exception:
         LOGGER.exception("Failed to send main menu prompt", exc_info=True)
 
@@ -2421,7 +2467,9 @@ async def _start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await message.reply_text(
             text,
             parse_mode=ParseMode.HTML,
-            reply_markup=_build_main_menu_keyboard(),
+            reply_markup=_build_main_menu_keyboard(
+                show_self_service=_has_self_service_access(user_id=user.id, client=linked_client)
+            ),
         )
         return ConversationHandler.END
 
@@ -2454,6 +2502,7 @@ async def _handle_main_menu_callback(update: Update, context: ContextTypes.DEFAU
         "history": _history_handler,
         "profile": _show_profile_menu,
         "services": _show_services_menu,
+        "selfservice": _self_service_entry,
     }
     handler = handlers.get(action)
     if handler is None:
@@ -2461,6 +2510,12 @@ async def _handle_main_menu_callback(update: Update, context: ContextTypes.DEFAU
         return
 
     await handler(update, context)
+
+
+async def _self_service_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if _SELF_SERVICE_FLOW is None:
+        return
+    await _SELF_SERVICE_FLOW.show_menu(update, context)
 
 
 async def _handle_services_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2478,7 +2533,202 @@ async def _handle_services_callback(update: Update, context: ContextTypes.DEFAUL
     if action == "back":
         target_chat = query.message.chat_id if query.message else query.from_user.id if query.from_user else None
         if target_chat is not None:
-            await _send_main_menu_prompt(context, target_chat, "Выберите действие:")
+            await _send_main_menu_prompt(
+                context,
+                target_chat,
+                "Выберите действие:",
+                user_id=query.from_user.id if query.from_user else None,
+            )
+
+
+async def _handle_self_service_account_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    parts = (query.data or "").split(":", 2)
+    if len(parts) != 3:
+        await query.answer("Неизвестный аккаунт.", show_alert=True)
+        return
+
+    account_id = parts[2]
+    user = update.effective_user
+    if user is None:
+        return
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await query.edit_message_text("Сначала привяжите свою анкету через /start.")
+        return
+    if not _has_self_service_access(user_id=user.id, client=client):
+        await query.answer("Самокрутка доступна только участникам группы «САМОКРУТЧИКИ».", show_alert=True)
+        return
+
+    accounts = _load_accounts_registry(context)
+    account = accounts.get(account_id)
+    if account is None:
+        await query.edit_message_text(
+            "Аккаунт недоступен. Попробуйте выбрать другой.",
+            reply_markup=_build_self_service_keyboard(accounts),
+        )
+        return
+
+    progress_text = f"⏳ Сажаем на {_format_account_label(account)}..."
+    try:
+        await query.edit_message_text(progress_text)
+    except Exception:
+        LOGGER.debug("Failed to edit self-service progress message", exc_info=True)
+
+    target_chat = query.message.chat_id if query.message else user.id
+    try:
+        await asyncio.to_thread(
+            apply_wattattack_profile,
+            account_id=account.identifier,
+            account_label=account.name,
+            email=account.email,
+            password=account.password,
+            base_url=account.base_url,
+            client_record=client,
+        )
+        success_text = (
+            f"✅ Данные {_format_client_display_name(client)} применены к аккаунту {_format_account_label(account)}."
+        )
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В главное меню", callback_data="self_service:back")]])
+        try:
+            await query.edit_message_text(success_text, reply_markup=markup)
+        except Exception:
+            LOGGER.debug("Failed to edit self-service success message", exc_info=True)
+            if target_chat is not None:
+                await context.bot.send_message(target_chat, success_text, reply_markup=markup)
+    except Exception:
+        LOGGER.exception(
+            "Failed to apply profile for client %s to account %s", client.get("id"), account.identifier
+        )
+        error_text = (
+            f"❌ Не удалось посадить на аккаунт {_format_account_label(account)}. "
+            "Попробуйте ещё раз позже или обратитесь к администратору."
+        )
+        markup = _build_self_service_keyboard(accounts)
+        try:
+            await query.edit_message_text(error_text, reply_markup=markup)
+        except Exception:
+            LOGGER.debug("Failed to edit self-service failure message", exc_info=True)
+            if target_chat is not None:
+                await context.bot.send_message(target_chat, error_text, reply_markup=markup)
+
+
+async def _handle_self_service_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    chat_id = query.message.chat_id if query.message else query.from_user.id if query.from_user else None
+    user_id = query.from_user.id if query.from_user else None
+    if chat_id is not None:
+        await _send_main_menu_prompt(context, chat_id, "Выберите действие:", user_id=user_id)
+
+
+async def _handle_self_service_ack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    user = update.effective_user
+    if user is None:
+        return
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await query.edit_message_text("Сначала привяжите свою анкету через /start.")
+        return
+    if not _has_self_service_access(user_id=user.id, client=client):
+        await query.answer("Самокрутка доступна только участникам группы «САМОКРУТЧИКИ».", show_alert=True)
+        return
+
+    accounts = _load_accounts_registry(context)
+    if not accounts:
+        await query.edit_message_text("Аккаунты WattAttack не настроены. Сообщите администратору.")
+        return
+
+    text = (
+        "🔄 Самокрутка\n"
+        "Выберите аккаунт WattAttack, на который вас посадить.\n"
+        "Не забудьте перезагрузить WattAttack после применения аккаунта!"
+    )
+    keyboard = _build_self_service_keyboard(accounts)
+    try:
+        await query.edit_message_text(text, reply_markup=keyboard)
+    except Exception:
+        LOGGER.debug("Failed to edit self-service ack message", exc_info=True)
+        chat_id = query.message.chat_id if query.message else user.id
+        if chat_id is not None:
+            await context.bot.send_message(chat_id, text, reply_markup=keyboard)
+
+
+async def _handle_self_service_apply_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+    await query.answer()
+    user = update.effective_user
+    if user is None:
+        return
+
+    link, client = _fetch_linked_client(user.id)
+    if not link or not client:
+        await query.edit_message_text("Сначала привяжите свою анкету через /start.")
+        return
+    if not _has_self_service_access(user_id=user.id, client=client):
+        await query.answer("Самокрутка доступна только участникам группы «САМОКРУТЧИКИ».", show_alert=True)
+        return
+
+    accounts = _load_accounts_registry(context)
+    if not accounts:
+        await query.edit_message_text("Аккаунты WattAttack не настроены. Сообщите администратору.")
+        return
+
+    progress_text = f"⏳ Сажаем на все аккаунты ({len(accounts)} шт.)..."
+    try:
+        await query.edit_message_text(progress_text)
+    except Exception:
+        LOGGER.debug("Failed to edit self-service apply-all progress message", exc_info=True)
+
+    successes: List[str] = []
+    failures: List[str] = []
+    for account in accounts.values():
+        try:
+            await asyncio.to_thread(
+                apply_wattattack_profile,
+                account_id=account.identifier,
+                account_label=account.name,
+                email=account.email,
+                password=account.password,
+                base_url=account.base_url,
+                client_record=client,
+            )
+            successes.append(_format_account_label(account))
+        except Exception:
+            LOGGER.exception(
+                "Failed to apply profile for client %s to account %s in apply-all",
+                client.get("id"),
+                account.identifier,
+            )
+            failures.append(_format_account_label(account))
+
+    lines = ["✅ Данные применены ко всем аккаунтам."]
+    if successes:
+        lines.append("Обновлены: " + ", ".join(successes))
+    if failures:
+        lines.append("Не удалось: " + ", ".join(failures))
+
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В главное меню", callback_data="self_service:back")]])
+    try:
+        await query.edit_message_text("\n".join(lines), reply_markup=markup)
+    except Exception:
+        LOGGER.debug("Failed to edit self-service apply-all result message", exc_info=True)
+        chat_id = query.message.chat_id if query.message else user.id
+        if chat_id is not None:
+            await context.bot.send_message(chat_id, "\n".join(lines), reply_markup=markup)
 
 
 async def _help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2569,7 +2819,11 @@ async def _fallback_text_handler(update: Update, context: ContextTypes.DEFAULT_T
     )
     await message.reply_text("\n\n".join(lines))
     if link_record:
-        await _send_main_menu_prompt(context, message.chat_id)
+        await _send_main_menu_prompt(
+            context,
+            message.chat_id,
+            user_id=user.id if user else None,
+        )
 
 
 async def _handle_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2599,6 +2853,7 @@ async def _handle_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 context,
                 message.chat_id,
                 "🤖 Бот не умеет общаться, но умеет давать вам кнопочки ниже.",
+                user_id=user.id,
             )
         return ConversationHandler.END
 
@@ -3073,7 +3328,7 @@ async def _finalize_client_creation(
         await send_message(
             "🔗 Ваш Telegram автоматически привязан к новой анкете. Готово!"
         )
-        await _send_main_menu_prompt(context, chat_id)
+        await _send_main_menu_prompt(context, chat_id, user_id=user.id, client=client)
     except Exception:
         LOGGER.exception("Failed to link new client %s to user %s", client["id"], user.id)
         await send_message(
@@ -3296,6 +3551,17 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application = Application.builder().token(token).build()
     application.bot_data[_GREETING_KEY] = greeting or DEFAULT_GREETING
 
+    global _SELF_SERVICE_FLOW
+
+    async def _menu_wrapper(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
+        await _send_main_menu_prompt(ctx, chat_id, text)
+
+    _SELF_SERVICE_FLOW = self_service.SelfServiceFlow(
+        fetch_linked_client=_fetch_linked_client,
+        send_main_menu=_menu_wrapper,
+    )
+    _SELF_SERVICE_FLOW.register_handlers(application)
+
     # High-priority handlers that must run even while a conversation is active
     application.add_handler(CommandHandler("strava", _strava_command_handler), group=-1)
     application.add_handler(CallbackQueryHandler(_handle_strava_callback, pattern=r"^strava_connect$"), group=-1)
@@ -3304,7 +3570,7 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
     application.add_handler(CallbackQueryHandler(_handle_profile_back, pattern=r"^profile_back$"), group=-1)
     application.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"code="), _handle_strava_webhook), group=-1)
     application.add_handler(CallbackQueryHandler(_handle_services_callback, pattern=r"^services:(intervals|back)$"), group=-1)
-    application.add_handler(CallbackQueryHandler(_handle_main_menu_callback, pattern=r"^main_menu:(cancel|mybookings|history|profile|services)$"), group=-1)
+    application.add_handler(CallbackQueryHandler(_handle_main_menu_callback, pattern=r"^main_menu:(cancel|mybookings|history|profile|services|selfservice)$"), group=-1)
     application.add_handler(CallbackQueryHandler(_handle_cancel_booking_callback, pattern=r"^cancel_booking"), group=-1)
 
     conversation = ConversationHandler(

@@ -532,6 +532,30 @@
   color: rgba(230, 237, 255, 0.8);
 }
 
+.pill-action {
+  gap: 0.4rem;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.35rem 0 0.75rem;
+}
+
+.link-button {
+  background: transparent;
+  border: none;
+  color: rgba(230, 237, 255, 0.8);
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+}
+
+.link-button:hover {
+  color: #fff;
+}
+
 .muted {
   color: rgba(196, 205, 238, 0.65);
 }

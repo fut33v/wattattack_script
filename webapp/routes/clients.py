@@ -14,6 +14,7 @@ from repositories import (
     schedule_repository,
     client_subscription_repository,
     client_balance_repository,
+    client_groups_repository,
 )
 from repositories.db_utils import db_connection, dict_cursor
 from ..config import get_settings
@@ -116,6 +117,45 @@ def api_get_client(client_id: int):
     if not record:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
     return {"item": jsonable_encoder(record)}
+
+
+@router.get("/{client_id}/groups", dependencies=[Depends(require_admin)])
+def api_get_client_groups(client_id: int):
+    record = client_repository.get_client(client_id)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+    items = [{"group_name": name} for name in client_groups_repository.list_groups(client_id)]
+    return {"items": items}
+
+
+@router.post("/{client_id}/groups", dependencies=[Depends(require_admin)])
+async def api_add_client_group(client_id: int, request: Request):
+    payload = await request.json()
+    group_name = payload.get("group_name") if isinstance(payload, dict) else None
+    if not group_name or not isinstance(group_name, str) or not group_name.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "group_name is required")
+
+    record = client_repository.get_client(client_id)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+
+    client_groups_repository.add_client_to_group(client_id, group_name)
+    items = [{"group_name": name} for name in client_groups_repository.list_groups(client_id)]
+    return {"items": items}
+
+
+@router.delete("/{client_id}/groups", dependencies=[Depends(require_admin)])
+def api_remove_client_group(client_id: int, group_name: str):
+    if not group_name or not group_name.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "group_name is required")
+
+    record = client_repository.get_client(client_id)
+    if not record:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Client not found")
+
+    client_groups_repository.remove_client_from_group(client_id, group_name)
+    items = [{"group_name": name} for name in client_groups_repository.list_groups(client_id)]
+    return {"items": items}
 
 
 @router.get("/{client_id}/activities")

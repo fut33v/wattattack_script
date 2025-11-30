@@ -21,9 +21,16 @@ import type {
   IntervalsLinkRow,
   ClientSubscriptionsResponse,
   ClientSubscription,
-  ClientBalanceResponse
+  ClientBalanceResponse,
+  ClientGroupListResponse,
+  ClientGroup,
+  GroupListResponse,
+  GroupDefinition
 } from "../lib/types";
 import StateScreen from "../components/StateScreen";
+import { useAppContext } from "../lib/AppContext";
+
+const SELF_SERVICE_GROUP = "САМОКРУТЧИКИ";
 
 const PEDAL_OPTIONS = [
   "топталки (под кроссовки)",
@@ -111,6 +118,8 @@ export default function ClientEditPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { session } = useAppContext();
+  const isAdmin = session.isAdmin;
   const clientId = useMemo(() => Number(id), [id]);
   const [editExpanded, setEditExpanded] = useState(false);
   const [subscriptionsExpanded, setSubscriptionsExpanded] = useState(false);
@@ -122,6 +131,7 @@ export default function ClientEditPage() {
   const [balanceTrainingExpanded, setBalanceTrainingExpanded] = useState(false);
   const [selectedPastReservations, setSelectedPastReservations] = useState<number[]>([]);
   const [planCode, setPlanCode] = useState<string>(SUBSCRIPTION_PLAN_OPTIONS[0].code);
+  const [newGroupName, setNewGroupName] = useState<string>(SELF_SERVICE_GROUP);
   const planDefaults = useMemo(() => findPlanDefaults(planCode), [planCode]);
   const defaultStartDate = useMemo(() => dayjs().format("YYYY-MM-DD"), []);
   const defaultEndDate = useMemo(() => dayjs().add(30, "day").format("YYYY-MM-DD"), []);
@@ -203,6 +213,20 @@ export default function ClientEditPage() {
     enabled: isIdValid
   });
 
+  const groupsQuery = useQuery<ClientGroupListResponse>({
+    queryKey: ["client-groups", clientId],
+    queryFn: () => apiFetch(`/api/clients/${clientId}/groups`),
+    enabled: isIdValid && session.isAdmin
+  });
+  const groupItems = groupsQuery.data?.items ?? [];
+  const groupNames = groupItems.map((group) => group.group_name);
+  const groupDefsQuery = useQuery<GroupListResponse>({
+    queryKey: ["group-definitions"],
+    queryFn: () => apiFetch("/api/groups"),
+    enabled: session.isAdmin
+  });
+  const availableGroupDefs = (groupDefsQuery.data?.items as GroupDefinition[] | undefined) ?? [];
+
   const bikesQuery = useQuery<BikeListResponse>({
     queryKey: ["bikes"],
     queryFn: () => apiFetch<BikeListResponse>("/api/bikes")
@@ -230,6 +254,30 @@ export default function ClientEditPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["clients"], exact: false });
       queryClient.invalidateQueries({ queryKey: ["client", clientId] });
+    }
+  });
+
+  const addGroupMutation = useMutation<ClientGroupListResponse, ApiError, string>({
+    mutationFn: (group_name: string) =>
+      apiFetch<ClientGroupListResponse>(`/api/clients/${clientId}/groups`, {
+        method: "POST",
+        body: JSON.stringify({ group_name })
+      }),
+    onSuccess: (response: ClientGroupListResponse) => {
+      queryClient.setQueryData(["client-groups", clientId], response);
+      queryClient.invalidateQueries({ queryKey: ["group-definitions"] });
+      setNewGroupName(SELF_SERVICE_GROUP);
+    }
+  });
+
+  const removeGroupMutation = useMutation<ClientGroupListResponse, ApiError, string>({
+    mutationFn: (group_name: string) =>
+      apiFetch<ClientGroupListResponse>(`/api/clients/${clientId}/groups?group_name=${encodeURIComponent(group_name)}`, {
+        method: "DELETE"
+      }),
+    onSuccess: (response: ClientGroupListResponse) => {
+      queryClient.setQueryData(["client-groups", clientId], response);
+      queryClient.invalidateQueries({ queryKey: ["group-definitions"] });
     }
   });
 
@@ -513,6 +561,20 @@ export default function ClientEditPage() {
                 <dd>{client.favorite_bike}</dd>
               </div>
             )}
+            <div>
+              <dt>Группы</dt>
+              <dd className="meta-value">
+                {groupNames.length === 0 ? (
+                  <span className="meta-hint">Нет групп</span>
+                ) : (
+                  groupNames.map((name) => (
+                    <span key={name} className="pill pill-muted">
+                      {name}
+                    </span>
+                  ))
+                )}
+              </dd>
+            </div>
             {client.pedals && (
               <div>
                 <dt>Педали</dt>
@@ -664,6 +726,85 @@ export default function ClientEditPage() {
                 Цель
                 <textarea name="goal" rows={3} defaultValue={client.goal ?? ""} />
               </label>
+            </div>
+
+            <div className="form-column">
+              <div className="form-subsection">
+                <div className="form-subsection__header">
+                  <div>
+                    <div className="form-subsection__title">Группы клиента</div>
+                    <div className="form-subsection__hint">Используется для доступа к Самокрутке и других сегментов.</div>
+                  </div>
+                  {groupsQuery.isLoading && <span className="meta-hint">Загружаем…</span>}
+                  {groupsQuery.isError && <span className="form-error">Не удалось загрузить группы.</span>}
+                  {!isAdmin && <span className="meta-hint">Только просмотр</span>}
+                </div>
+                <div className="chip-row">
+                  {groupItems.length === 0 && !groupsQuery.isLoading && <span className="meta-hint">Групп нет.</span>}
+                  {groupItems.map((group: ClientGroup) => (
+                    <div key={group.group_name} className="pill pill-muted pill-action">
+                      <span>{group.group_name}</span>
+                      <button
+                        type="button"
+                        className="link-button"
+                        aria-label={`Удалить группу ${group.group_name}`}
+                        disabled={removeGroupMutation.isPending || !isAdmin}
+                        onClick={() => isAdmin && removeGroupMutation.mutate(group.group_name)}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {availableGroupDefs.length > 0 && (
+                  <div className="chip-row">
+                    {availableGroupDefs
+                      .filter((group) => !groupNames.includes(group.group_name))
+                      .map((group) => (
+                        <button
+                          key={group.group_name}
+                          type="button"
+                          className="pill pill-accent"
+                          disabled={addGroupMutation.isPending || !isAdmin}
+                          onClick={() => isAdmin && addGroupMutation.mutate(group.group_name)}
+                        >
+                          + {group.group_name}
+                        </button>
+                      ))}
+                  </div>
+                )}
+                <div className="form-subgrid">
+                  <label>
+                    Новая группа
+                    <input
+                      type="text"
+                      value={newGroupName}
+                      onChange={(event) => setNewGroupName(event.target.value)}
+                      placeholder="Например, САМОКРУТЧИКИ"
+                      disabled={!isAdmin}
+                    />
+                  </label>
+                  <div className="form-actions form-actions--inline">
+                    <button
+                      type="button"
+                      className="button"
+                      disabled={addGroupMutation.isPending || !isAdmin}
+                      onClick={() => {
+                        const value = newGroupName.trim();
+                        if (!value) return;
+                        if (isAdmin) {
+                          addGroupMutation.mutate(value);
+                        }
+                      }}
+                    >
+                      {addGroupMutation.isPending ? "Добавляем…" : "Добавить в группу"}
+                    </button>
+                    {(addGroupMutation.isError || removeGroupMutation.isError) && (
+                      <span className="form-error">Не удалось обновить группы.</span>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div className="form-column">

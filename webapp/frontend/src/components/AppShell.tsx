@@ -39,6 +39,7 @@ const SERVICE_NAV_LINKS: readonly NavLinkConfig[] = [
   { to: "/activities", label: "🚴 Активности", adminOnly: true },
   { to: "/sync", label: "🔄 Синхронизация", adminOnly: true },
   { to: "/links", label: "🧩 Связки", adminOnly: true },
+  { to: "/groups", label: "🏷 Группы", adminOnly: true },
   { to: "/stats", label: "📈 Статистика", adminOnly: true },
   { to: "/import", label: "📥 Импорт", adminOnly: true },
   { to: "/wattattack/accounts", label: "⚡️ Аккаунты WattAttack", adminOnly: true }

@@ -18,4 +18,5 @@ __all__ = [
     "client_subscription_repository",
     "client_balance_repository",
     "wattattack_account_repository",
+    "client_groups_repository",
 ]

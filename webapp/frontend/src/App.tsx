@@ -30,6 +30,7 @@ import ScheduleViewPage from "./pages/ScheduleViewPage";
 import ImportPage from "./pages/ImportPage";
 import StatsPage from "./pages/StatsPage";
 import WattattackAccountsPage from "./pages/WattattackAccountsPage";
+import GroupsPage from "./pages/GroupsPage";
 
 import "./styles/layout.css";
 import "./styles/messaging.css";
@@ -90,6 +91,7 @@ export default function App() {
           <Route path="/import" element={<ImportPage />} />
           <Route path="/sync" element={<SyncPage />} />
           <Route path="/wattattack/accounts" element={<WattattackAccountsPage />} />
+          <Route path="/groups" element={<GroupsPage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="/admins" element={<AdminsPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
