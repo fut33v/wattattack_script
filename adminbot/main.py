@@ -2031,8 +2031,8 @@ async def wizard_message_handler(update: Update, context: ContextTypes.DEFAULT_T
     handled = await wizard_admin.handle_message(
         update, context, ACCOUNT_REGISTRY, LOCAL_TIMEZONE
     )
-    if handled:
-        return
+    if not handled:
+        await text_search_handler(update, context)
 
 
 async def _newclient_send_gender_prompt(
@@ -7214,7 +7214,9 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("help", help_handler))
     application.add_handler(CommandHandler("events", events_handler))
     application.add_handler(CommandHandler("wizard", wizard_handler))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), wizard_message_handler))
+    application.add_handler(
+        MessageHandler(filters.TEXT & (~filters.COMMAND), wizard_message_handler, block=False)
+    )
     application.add_handler(CommandHandler("account", account_handler))
     application.add_handler(CommandHandler("combinate", combinate_handler))
     application.add_handler(CommandHandler("client", client_handler))

@@ -38,6 +38,12 @@ SLOTS_LIMIT = max(
     int(os.environ.get("ADMINBOT_WIZARD_SLOTS_LIMIT", str(MIN_SLOTS_LIMIT))),
 )
 WIZARD_SEARCH_RESULTS_LIMIT = 8
+WIZARD_SEATING_ENABLED = str(os.environ.get("ADMINBOT_WIZARD_SEATING_ENABLED", "")).lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 PEDAL_CODE_TO_LABEL = {
     "platform": "топталки (под кроссовки)",
@@ -229,6 +235,54 @@ def _stand_number_emoji(stand_id: int, trainers: Iterable[Dict[str, Any]]) -> st
         return _format_digit_emoji(stand_id)
 
 
+def _pick_stand_for_client(
+    free_stands: List[int],
+    trainers: Mapping[int, Dict[str, Any]],
+    client: Optional[Dict[str, Any]],
+) -> Optional[int]:
+    """Pick best stand for client based on favorite bike title or height range."""
+
+    if not free_stands:
+        return None
+
+    favorite_bike = ""
+    height_cm: Optional[float] = None
+    if isinstance(client, dict):
+        favorite_bike = str(client.get("favorite_bike") or "").strip().lower()
+        try:
+            h_val = client.get("height")
+            if h_val not in (None, ""):
+                height_cm = float(h_val)
+        except (TypeError, ValueError):
+            height_cm = None
+
+    # 1) exact favorite bike title match
+    if favorite_bike:
+        for stand_id in free_stands:
+            trainer = trainers.get(stand_id) or {}
+            bike_title = str(trainer.get("bike_title") or "").strip().lower()
+            if bike_title and bike_title == favorite_bike:
+                return stand_id
+
+    # 2) height range match
+    if height_cm is not None:
+        for stand_id in free_stands:
+            trainer = trainers.get(stand_id) or {}
+            try:
+                h_min = float(trainer.get("bike_height_min_cm")) if trainer.get("bike_height_min_cm") else None
+                h_max = float(trainer.get("bike_height_max_cm")) if trainer.get("bike_height_max_cm") else None
+            except (TypeError, ValueError):
+                h_min = h_max = None
+            if h_min is not None and height_cm < h_min:
+                continue
+            if h_max is not None and height_cm > h_max:
+                continue
+            return stand_id
+
+    # 3) fallback first free stand
+    return free_stands[0]
+
+
 def _format_stand_label(reservation: Dict[str, Any], trainers: Mapping[int, Dict[str, Any]]) -> str:
     stand_id = reservation.get("stand_id")
     trainer = trainers.get(stand_id)
@@ -395,12 +449,19 @@ def _combine_slot_start(slot: Dict[str, Any], timezone) -> datetime:
     return combined.replace(tzinfo=timezone)
 
 
-def _assign_client_to_slot(slot_id: int, stand_id: int, client_id: int) -> Dict[str, Any]:
+def _assign_client_to_slot(
+    slot_id: int, stand_id: int, client_id: int, client_name: Optional[str] = None
+) -> Dict[str, Any]:
     """Assign a client to a stand within a slot, creating a reservation if needed."""
 
     existing = get_reservation_for_stand(slot_id, stand_id)
     if existing:
-        update_reservation(existing["id"], client_id=client_id, status="booked")
+        update_reservation(
+            existing["id"],
+            client_id=client_id,
+            client_name=client_name,
+            status="booked",
+        )
         return get_reservation_for_stand(slot_id, stand_id) or existing
 
     created = create_reservation(
@@ -408,7 +469,7 @@ def _assign_client_to_slot(slot_id: int, stand_id: int, client_id: int) -> Dict[
         stand_id=stand_id,
         stand_code=None,
         client_id=client_id,
-        client_name=None,
+        client_name=client_name,
         status="booked",
         source="wizard-add",
         notes=None,
@@ -473,6 +534,11 @@ async def _send_slot_detail(
     trainers = await _load_trainers(stand_ids)
     clients = await _load_clients(client_ids)
     stand_accounts = _build_stand_account_map(accounts)
+    try:
+        trainers_all = list_trainers()
+    except Exception:
+        LOGGER.exception("Failed to load full trainers list for numbering")
+        trainers_all = []
 
     lines: List[str] = [f"🗓 Слот: {html.escape(_format_slot_summary(slot))}", ""]
     assignable = 0
@@ -503,7 +569,12 @@ async def _send_slot_detail(
         extras = f" — {', '.join(extras_parts)}" if extras_parts else ""
         stand_label = _format_stand_label(reservation, trainers)
         account = stand_accounts.get(reservation.get("stand_id"))
-        prefix = _format_digit_emoji(idx)
+        stand_id_val = reservation.get("stand_id")
+        prefix = (
+            _stand_number_emoji(stand_id_val, trainers_all)
+            if isinstance(stand_id_val, int)
+            else _format_digit_emoji(idx)
+        )
         lines.append(
             f"{prefix} {html.escape(client_label)}{extras}"
         )
@@ -531,15 +602,16 @@ async def _send_slot_detail(
             ),
         ]
     ]
-    buttons.insert(
-        0,
-        [
-            InlineKeyboardButton(
-                text="↔️ Пересадить",
-                callback_data=f"wizard|swap|{slot_id}",
-            )
-        ],
-    )
+    if WIZARD_SEATING_ENABLED:
+        buttons.insert(
+            0,
+            [
+                InlineKeyboardButton(
+                    text="↔️ Пересадить",
+                    callback_data=f"wizard|swap|{slot_id}",
+                )
+            ],
+        )
     if assignable:
         buttons.insert(
             0,
@@ -550,7 +622,7 @@ async def _send_slot_detail(
                 )
             ],
         )
-    if free_stands:
+    if free_stands and WIZARD_SEATING_ENABLED:
         buttons.insert(
             0,
             [
@@ -614,6 +686,11 @@ async def _render_swap_from(
     }
     clients = await _load_clients(client_ids)
     trainers = await _load_trainers(stand_ids)
+    try:
+        trainers_all = list_trainers()
+    except Exception:
+        LOGGER.exception("Failed to load trainers list for swap labels")
+        trainers_all = []
 
     lines = [f"🗓 Слот: {html.escape(_format_slot_summary(slot))}", title, ""]
     keyboard_rows: List[List[InlineKeyboardButton]] = []
@@ -624,7 +701,7 @@ async def _render_swap_from(
         client_record = clients.get(reservation.get("client_id"))
         client_label = _format_client_short(client_record)
         stand_label = _format_stand_label(reservation, trainers)
-        prefix = _format_digit_emoji(idx)
+        prefix = _stand_number_emoji(stand_id, trainers_all)
         lines.append(f"{prefix} {html.escape(stand_label)} — {html.escape(client_label)}")
         keyboard_rows.append(
             [
@@ -671,6 +748,12 @@ async def _render_swap_to(
             reservation.get("stand_id") or 0,
         )
     )
+    free_stands = _free_stands_for_slot(slot)
+    try:
+        trainers_all = list_trainers()
+    except Exception:
+        LOGGER.exception("Failed to load trainers list for swap target labels")
+        trainers_all = []
     client_ids = {
         reservation["client_id"]
         for reservation in reservations
@@ -683,6 +766,7 @@ async def _render_swap_to(
             for reservation in reservations
             if isinstance(reservation.get("stand_id"), int)
         }
+        | set(free_stands)
     )
 
     target_rows: List[List[InlineKeyboardButton]] = []
@@ -697,7 +781,7 @@ async def _render_swap_to(
             continue
         client_label = _format_client_short(clients.get(reservation.get("client_id")))
         stand_label = _format_stand_label(reservation, trainers)
-        prefix = _format_digit_emoji(idx)
+        prefix = _stand_number_emoji(stand_id, trainers_all)
         marker = " (отсюда)" if stand_id == stand_from else ""
         lines.append(f"{prefix} {html.escape(stand_label)} — {html.escape(client_label)}{marker}")
         if stand_id == stand_from:
@@ -710,6 +794,22 @@ async def _render_swap_to(
                 )
             ]
         )
+
+    # Allow moving to free stands too
+    if free_stands:
+        lines.append("")
+        lines.append("Свободные станки:")
+        for stand_id in free_stands:
+            prefix = _stand_number_emoji(stand_id, trainers_all)
+            lines.append(f"{prefix} свободен")
+            target_rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{prefix} свободен",
+                        callback_data=f"wizard|swapto|{slot_id}|{stand_from}|{stand_id}",
+                    )
+                ]
+            )
 
     target_rows.append(
         [InlineKeyboardButton(text="↩️ Назад", callback_data=f"wizard|swap|{slot_id}")]
@@ -732,17 +832,44 @@ def _swap_reservations_slot_stands(slot_id: int, stand_a: int, stand_b: int) -> 
         for reservation in reservations
         if isinstance(reservation.get("stand_id"), int)
     }
-    if stand_a not in stand_map or stand_b not in stand_map:
-        raise ValueError("Не найден один из станков в слоте")
+    if stand_a not in stand_map:
+        raise ValueError("Не найден исходный станок в слоте")
     res_a = stand_map[stand_a]
-    res_b = stand_map[stand_b]
-    # Free stand A, assign stand B to A, then A to B to avoid unique constraint collisions
-    update_reservation(res_a["id"], stand_id=None)
-    update_reservation(res_b["id"], stand_id=stand_a)
-    update_reservation(res_a["id"], stand_id=stand_b)
+    res_b = stand_map.get(stand_b)
     client_a = res_a.get("client_id")
-    client_b = res_b.get("client_id")
-    return str(client_a or ""), str(client_b or "")
+
+    if res_b:
+        client_b = res_b.get("client_id")
+        if client_b is None:
+            # Target reservation exists but is free: move client A into it, free A
+            update_reservation(
+                res_b["id"],
+                client_id=client_a,
+                client_name=res_a.get("client_name"),
+                status="booked",
+            )
+            update_reservation(res_a["id"], client_id=None, client_name=None, status="available")
+            return str(client_a or ""), ""
+
+        # Swap between two occupied reservations; avoid unique constraint collisions
+        update_reservation(res_a["id"], stand_id=None)
+        update_reservation(res_b["id"], stand_id=stand_a)
+        update_reservation(res_a["id"], stand_id=stand_b)
+        return str(client_a or ""), str(client_b or "")
+
+    # Target stand is not present in slot: create new reservation and free old one
+    create_reservation(
+        slot_id=slot_id,
+        stand_id=stand_b,
+        stand_code=None,
+        client_id=client_a if isinstance(client_a, int) else None,
+        client_name=res_a.get("client_name"),
+        status="booked",
+        source="wizard-swap",
+        notes=None,
+    )
+    update_reservation(res_a["id"], client_id=None, client_name=None, status="available")
+    return str(client_a or ""), ""
 
 
 async def _apply_slot_accounts(
@@ -901,6 +1028,9 @@ async def handle_callback(
         )
         return True
     if action == "swap" and len(parts) >= 3:
+        if not WIZARD_SEATING_ENABLED:
+            await query.answer("Пересадка отключена", show_alert=True)
+            return True
         try:
             slot_id = int(parts[2])
         except ValueError:
@@ -909,6 +1039,9 @@ async def handle_callback(
         await _render_swap_from(query=query, slot_id=slot_id, timezone=timezone)
         return True
     if action == "swapfrom" and len(parts) >= 4:
+        if not WIZARD_SEATING_ENABLED:
+            await query.answer("Пересадка отключена", show_alert=True)
+            return True
         try:
             slot_id = int(parts[2])
             stand_from = int(parts[3])
@@ -918,6 +1051,9 @@ async def handle_callback(
         await _render_swap_to(query=query, slot_id=slot_id, stand_from=stand_from, timezone=timezone)
         return True
     if action == "swapto" and len(parts) >= 5:
+        if not WIZARD_SEATING_ENABLED:
+            await query.answer("Пересадка отключена", show_alert=True)
+            return True
         try:
             slot_id = int(parts[2])
             stand_from = int(parts[3])
@@ -942,6 +1078,9 @@ async def handle_callback(
         )
         return True
     if action == "add" and len(parts) >= 3:
+        if not WIZARD_SEATING_ENABLED:
+            await query.answer("Посадка вручную отключена", show_alert=True)
+            return True
         try:
             slot_id = int(parts[2])
         except ValueError:
@@ -963,16 +1102,40 @@ async def handle_callback(
             ),
         )
         return True
-    if action == "addpick" and len(parts) >= 5:
+    if action == "addpick" and len(parts) >= 6:
+        if not WIZARD_SEATING_ENABLED:
+            await query.answer("Посадка вручную отключена", show_alert=True)
+            return True
         try:
             slot_id = int(parts[2])
             client_id = int(parts[3])
-            stand_id = int(parts[4])
+            client_name_raw = parts[5]
         except ValueError:
             await query.edit_message_text("⚠️ Некорректный выбор.")
             return True
+        client_name = client_name_raw.replace("+", " ")
         try:
-            await asyncio.to_thread(_assign_client_to_slot, slot_id, stand_id, client_id)
+            slot = await asyncio.to_thread(get_slot_with_reservations, slot_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to reload slot %s for addpick", slot_id)
+            await query.edit_message_text(f"❌ Не удалось загрузить слот: {exc}")
+            return True
+        if not slot:
+            await query.edit_message_text("🔍 Слот не найден или удалён.")
+            context.user_data.pop("wizard_add", None)
+            return True
+        free_stands = _free_stands_for_slot(slot)
+        if not free_stands:
+            await query.edit_message_text("ℹ️ Нет свободных станков в этом слоте.")
+            context.user_data.pop("wizard_add", None)
+            return True
+        trainers_list = await _load_trainers(free_stands)
+        trainers_map = {t_id: data for t_id, data in trainers_list.items()}
+        clients_single = await _load_clients([client_id])
+        client = clients_single.get(client_id)
+        stand_id = _pick_stand_for_client(free_stands, trainers_map, client) or free_stands[0]
+        try:
+            await asyncio.to_thread(_assign_client_to_slot, slot_id, stand_id, client_id, client_name)
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Failed to add client %s to slot %s stand %s", client_id, slot_id, stand_id)
             await query.edit_message_text(f"❌ Не удалось добавить клиента: {exc}")
@@ -1025,7 +1188,7 @@ async def handle_message(
         return False
 
     add_ctx = context.user_data.get("wizard_add")
-    if not isinstance(add_ctx, dict):
+    if not isinstance(add_ctx, dict) or not WIZARD_SEATING_ENABLED:
         return False
 
     slot_id = add_ctx.get("slot_id")
@@ -1055,12 +1218,13 @@ async def handle_message(
         context.user_data.pop("wizard_add", None)
         return True
 
-    stand_id = free_stands[0]
     try:
-        trainers = list_trainers()
+        trainers_list = list_trainers()
     except Exception:
-        trainers = []
-    stand_number_emoji = _stand_number_emoji(stand_id, trainers)
+        trainers_list = []
+    trainers_map = {t["id"]: t for t in trainers_list if isinstance(t.get("id"), int)}
+    stand_id = _pick_stand_for_client(free_stands, trainers_map, None) or free_stands[0]
+    stand_number_emoji = _stand_number_emoji(stand_id, trainers_list)
 
     results = search_clients(term, limit=WIZARD_SEARCH_RESULTS_LIMIT)
     if not results:
@@ -1070,11 +1234,12 @@ async def handle_message(
     keyboard_rows: List[List[InlineKeyboardButton]] = []
     for client in results:
         label = _format_client_short(client)
+        client_name = client.get("full_name") or label
         keyboard_rows.append(
             [
                 InlineKeyboardButton(
                     text=label,
-                    callback_data=f"wizard|addpick|{slot_id}|{client.get('id')}|{stand_id}",
+                    callback_data=f"wizard|addpick|{slot_id}|{client.get('id')}|{stand_id}|{client_name}",
                 )
             ]
         )
