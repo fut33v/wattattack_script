@@ -73,6 +73,15 @@
    - Фронтенд (dev): `cd webapp/frontend && npm run dev` — Vite поднимет SPA на `http://localhost:5173` и проксирует запросы на `:8000`.
    - Telegram-боты: `docker-compose up -d adminbot fitbot scheduler clientbot`.
    - Прод-образ: `docker-compose up -d db webapp` соберёт фронтенд внутри Dockerfile (Node-стадия).
+   - **Быстрый локальный дев без пересборки**: `docker compose -f docker-compose.dev.yml up -d db` чтобы поднять только Postgres, затем запускать сервисы напрямую из кода:
+     - Adminbot: `bash scripts/dev_adminbot.sh`
+       - Остановить: `bash scripts/stop_adminbot.sh`
+     - Fitbot: `bash scripts/dev_fitbot.sh`
+     - Clientbot: `bash scripts/dev_clientbot.sh`
+     - Scheduler: `bash scripts/dev_scheduler.sh`
+     - Webapp (reload): `bash scripts/dev_webapp.sh` (порт по умолчанию 8000)
+       - Остановить: `bash scripts/stop_webapp.sh`
+   Все скрипты подхватывают `.env`, принудительно выставляют `DB_HOST=localhost:5432` и используют `venv/bin/python`. Adminbot-скрипт перед запуском сам убивает активные `python -m adminbot`, чтобы не ловить конфликт getUpdates.
 5. Импорт референсных данных:
    - Клиенты: `python -m scripts.load_clients --truncate` или отправьте CSV через `/uploadclients`.
    - Велосипеды: `python -m scripts.load_bikes --truncate` для загрузки CSV из `data/`.
@@ -81,8 +90,8 @@
    - Для `adminbot`:
      ```
      start - краткое описание возможностей
+     wizard - ближайшие слоты и массовая посадка на аккаунты (пересадка/запись в слот)
      help - подсказать доступные команды
-     wizard - ближайшие слоты и массовая посадка на аккаунты
      setclient - применить данные клиента к аккаунту
      account - показать текущие данные аккаунта
      combinate - подобрать велосипеды и станки

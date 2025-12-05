@@ -9,6 +9,7 @@ Core Telegram bot logic lives in `adminbot/`, `krutilkafitbot/`, and `clientbot/
 - `uvicorn webapp.main:app --reload` — launch the API + server-rendered assets; mount the SPA build from `webapp/frontend/dist`.
 - `cd webapp/frontend && npm install && npm run dev` for iterative UI work, and `npm run build` before packaging Docker images.
 - `docker compose up -d --build` or `./start.sh` — spin up Postgres, bots, scheduler, and the web app exactly as production expects.
+- Dev-only flow: `docker compose -f docker-compose.dev.yml up -d db` to run only Postgres, then launch services locally via `bash scripts/dev_adminbot.sh`, `bash scripts/dev_fitbot.sh`, `bash scripts/dev_clientbot.sh`, `bash scripts/dev_scheduler.sh`, and `bash scripts/dev_webapp.sh`.
 
 ## Coding Style & Naming Conventions
 Follow PEP 8 with 4-space indentation, descriptive snake_case functions, and module-level `log = logging.getLogger(__name__)` rather than ad-hoc prints. Keep env and token constants uppercase (see `adminbot/main.py:BOT_TOKEN_ENV`) and return plain dict payloads like the repository helpers do. FastAPI endpoints favor explicit Pydantic-like typing even when returning dicts; mirror that approach. Frontend code is TypeScript-first with PascalCase component files (`webapp/frontend/src/components/DataGrid.tsx`) and React Query hooks under `lib/`. Keep JSX lean, colocate styles in `src/styles`, and use ESLint (`npx eslint src --max-warnings=0`) before committing UI changes.
