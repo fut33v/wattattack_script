@@ -221,6 +221,42 @@
   margin: 6px 0 12px;
 }
 
+.filter-section {
+  margin-top: 10px;
+}
+
+.filter-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #e0e4ff;
+  margin-bottom: 6px;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  align-items: center;
+}
+
+.radio-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #e0e4ff;
+  font-size: 14px;
+}
+
+.filter-grid input[type="date"],
+.filter-grid select {
+  width: 100%;
+  padding: 9px 12px;
+  background: rgba(10, 15, 30, 0.6);
+  border: 1px solid rgba(79, 155, 255, 0.3);
+  border-radius: 8px;
+  color: #f4f6ff;
+}
+
 .button.toggle {
   background: rgba(10, 15, 30, 0.6);
   color: #e0e4ff;

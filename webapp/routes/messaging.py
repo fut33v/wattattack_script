@@ -103,26 +103,108 @@ def _parse_id_list(raw_value: object, field_name: str) -> set[int] | None:
     return result
 
 
-def _collect_clients_without_bookings(target_date: date) -> FilterClientSet:
-    """Return client IDs that HAVE bookings on a specific date (to exclude them)."""
+def _collect_clients_with_bookings_on_date(target_date: date) -> FilterClientSet:
+    """Return client IDs that have bookings on a specific date."""
+
     reservations = schedule_repository.list_reservations_by_date(target_date)
     booked_ids = {int(res["client_id"]) for res in reservations or [] if res.get("client_id")}
+    note = f"Бронь на {target_date.isoformat()}"
     if not booked_ids:
         return set(), "Нет броней в расписании"
-    return booked_ids, f"Исключены клиенты с бронью на {target_date.isoformat()}"
+    return booked_ids, note
+
+
+def _collect_clients_without_bookings(target_date: date) -> FilterClientSet:
+    """Return client IDs that have bookings on a specific date (legacy exclude helper)."""
+
+    booked_ids, note = _collect_clients_with_bookings_on_date(target_date)
+    return booked_ids, f"Исключены клиенты с {note.lower()}"
+
+
+def _collect_clients_with_bookings_for_slot(slot_id: int) -> FilterClientSet:
+    """Return client IDs that have bookings for a specific slot."""
+
+    slot = schedule_repository.get_slot_with_reservations(slot_id)
+    if not slot:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Slot not found")
+
+    reservations = slot.get("reservations") or []
+    booked_ids = {int(res["client_id"]) for res in reservations if res.get("client_id")}
+
+    label_parts = [str(slot.get("slot_date") or "")]
+    start_time = slot.get("start_time")
+    end_time = slot.get("end_time")
+    if start_time and end_time:
+        label_parts.append(f"{start_time}-{end_time}")
+    slot_label = " ".join(part for part in label_parts if part).strip() or "слот"
+    if slot.get("label"):
+        slot_label = f"{slot_label} · {slot['label']}"
+
+    note = f"Бронь в слоте {slot_label}"
+    return booked_ids, note
 
 
 @router.get("/booking-filters")
-def api_booking_filters():
-    """Return client IDs that already have bookings today/tomorrow."""
+def api_booking_filters(filter_date: Optional[date] = None, slot_id: Optional[int] = None):
+    """Return client IDs grouped by booking selectors (today/tomorrow/date/slot)."""
+
     today = date.today()
     tomorrow = today + timedelta(days=1)
     today_ids, _ = _collect_clients_without_bookings(today)
     tomorrow_ids, _ = _collect_clients_without_bookings(tomorrow)
-    return {
+
+    payload: dict[str, object] = {
         "todayIds": sorted(today_ids),
         "tomorrowIds": sorted(tomorrow_ids),
     }
+
+    if filter_date is not None:
+        date_ids, _ = _collect_clients_with_bookings_on_date(filter_date)
+        payload.update(
+            {
+                "dateIds": sorted(date_ids),
+                "dateLabel": filter_date.isoformat(),
+            }
+        )
+
+    if slot_id is not None:
+        slot_ids, note = _collect_clients_with_bookings_for_slot(slot_id)
+        payload.update(
+            {
+                "slotIds": sorted(slot_ids),
+                "slotLabel": note,
+            }
+        )
+
+    return payload
+
+
+@router.get("/booking-slots")
+def api_booking_slots(limit: int = 80):
+    """Return upcoming slots for booking-based messaging filters."""
+
+    limit = max(1, min(limit, 200))
+    slots = schedule_repository.list_upcoming_slots(limit=limit)
+
+    def _serialize_slot(slot: dict[str, Any]) -> dict[str, object]:
+        slot_date = slot.get("slot_date")
+        start_time = slot.get("start_time")
+        end_time = slot.get("end_time")
+        return {
+            "id": slot.get("id"),
+            "slot_date": slot_date.isoformat() if hasattr(slot_date, "isoformat") else slot_date,
+            "start_time": str(start_time) if start_time is not None else None,
+            "end_time": str(end_time) if end_time is not None else None,
+            "label": slot.get("label"),
+            "week_start_date": (
+                slot.get("week_start_date").isoformat()
+                if hasattr(slot.get("week_start_date"), "isoformat")
+                else slot.get("week_start_date")
+            ),
+            "instructor_name": slot.get("instructor_name"),
+        }
+
+    return {"items": [_serialize_slot(slot) for slot in slots]}
 
 
 def _store_uploaded_image(image_upload: UploadFile, *, request: Request, image_bytes: bytes) -> str:
@@ -178,6 +260,10 @@ async def api_broadcast_message(request: Request):
         race_id_raw = payload.get("raceId") or payload.get("race_id")
         filter_no_booking_today = payload.get("filterNoBookingToday")
         filter_no_booking_tomorrow = payload.get("filterNoBookingTomorrow")
+        filter_has_booking_today = payload.get("filterHasBookingToday")
+        filter_has_booking_tomorrow = payload.get("filterHasBookingTomorrow")
+        filter_booking_date_raw = payload.get("filterBookingDate")
+        filter_slot_id_raw = payload.get("filterSlotId") or payload.get("slotId")
         image_url = payload.get("imageUrl") or payload.get("image_url")
         log.info(
             "broadcast: parsed message_len=%s image_upload=%s image_url=%s",
@@ -246,6 +332,37 @@ async def api_broadcast_message(request: Request):
             links = [link for link in links if int(link.get("client_id") or 0) in race_client_ids]
             if not links:
                 return {"sent": 0, "message": "Нет получателей среди участников гонки"}
+
+        inclusion_ids: set[int] | None = None
+
+        if filter_has_booking_today:
+            today_ids, _ = _collect_clients_with_bookings_on_date(date.today())
+            inclusion_ids = today_ids if inclusion_ids is None else inclusion_ids | today_ids
+
+        if filter_has_booking_tomorrow:
+            tomorrow_ids, _ = _collect_clients_with_bookings_on_date(date.today() + timedelta(days=1))
+            inclusion_ids = tomorrow_ids if inclusion_ids is None else inclusion_ids | tomorrow_ids
+
+        if filter_booking_date_raw:
+            try:
+                parsed_date = date.fromisoformat(str(filter_booking_date_raw))
+            except Exception as exc:  # pylint: disable=broad-except
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "filterBookingDate must be YYYY-MM-DD") from exc
+            date_ids, _ = _collect_clients_with_bookings_on_date(parsed_date)
+            inclusion_ids = date_ids if inclusion_ids is None else inclusion_ids | date_ids
+
+        if filter_slot_id_raw:
+            try:
+                slot_id = int(filter_slot_id_raw)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "filterSlotId must be an integer") from exc
+            slot_ids, _ = _collect_clients_with_bookings_for_slot(slot_id)
+            inclusion_ids = slot_ids if inclusion_ids is None else inclusion_ids | slot_ids
+
+        if inclusion_ids is not None:
+            links = [link for link in links if int(link.get("client_id") or 0) in inclusion_ids]
+            if not links:
+                return {"sent": 0, "message": "Нет получателей с бронью по выбранным условиям"}
 
         # Exclude clients who already have bookings on the selected dates
         exclusion_ids: set[int] = set()

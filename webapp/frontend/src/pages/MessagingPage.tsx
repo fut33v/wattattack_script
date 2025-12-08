@@ -26,12 +26,32 @@ interface MessagingFilters {
   imageUrl?: string;
   filterNoBookingToday?: boolean;
   filterNoBookingTomorrow?: boolean;
+  filterHasBookingToday?: boolean;
+  filterHasBookingTomorrow?: boolean;
+  filterBookingDate?: string;
+  filterSlotId?: number;
 }
 
 interface BookingFilterResponse {
   todayIds: number[];
   tomorrowIds: number[];
+  dateIds?: number[];
+  dateLabel?: string;
+  slotIds?: number[];
+  slotLabel?: string;
 }
+
+interface BookingSlotOption {
+  id: number;
+  slot_date: string;
+  start_time: string;
+  end_time: string;
+  label?: string | null;
+  week_start_date?: string | null;
+  instructor_name?: string | null;
+}
+
+type BookingIncludeMode = "none" | "today" | "tomorrow" | "date" | "slot";
 
 export default function MessagingPage() {
   const [message, setMessage] = useState("");
@@ -50,6 +70,9 @@ export default function MessagingPage() {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [filterNoBookingToday, setFilterNoBookingToday] = useState(false);
   const [filterNoBookingTomorrow, setFilterNoBookingTomorrow] = useState(false);
+  const [bookingIncludeMode, setBookingIncludeMode] = useState<BookingIncludeMode>("none");
+  const [bookingDate, setBookingDate] = useState("");
+  const [bookingSlotId, setBookingSlotId] = useState<number | null>(null);
 
   const linksQuery = useQuery({
     queryKey: ["client-links"],
@@ -71,8 +94,28 @@ export default function MessagingPage() {
   });
 
   const bookingFiltersQuery = useQuery({
-    queryKey: ["booking-filters"],
-    queryFn: () => apiFetch<BookingFilterResponse>("/api/messages/booking-filters"),
+    queryKey: [
+      "booking-filters",
+      bookingIncludeMode === "date" ? bookingDate : null,
+      bookingIncludeMode === "slot" ? bookingSlotId : null
+    ],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (bookingIncludeMode === "date" && bookingDate) {
+        params.set("filter_date", bookingDate);
+      }
+      if (bookingIncludeMode === "slot" && bookingSlotId) {
+        params.set("slot_id", String(bookingSlotId));
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      return apiFetch<BookingFilterResponse>(`/api/messages/booking-filters${suffix}`);
+    },
+    staleTime: 60000
+  });
+
+  const bookingSlotsQuery = useQuery({
+    queryKey: ["booking-slots"],
+    queryFn: () => apiFetch<{ items: BookingSlotOption[] }>("/api/messages/booking-slots"),
     staleTime: 60000
   });
 
@@ -139,6 +182,19 @@ export default function MessagingPage() {
       data.filterNoBookingTomorrow = true;
     }
 
+    if (bookingIncludeMode === "today") {
+      data.filterHasBookingToday = true;
+    }
+    if (bookingIncludeMode === "tomorrow") {
+      data.filterHasBookingTomorrow = true;
+    }
+    if (bookingIncludeMode === "date" && bookingDate) {
+      data.filterBookingDate = bookingDate;
+    }
+    if (bookingIncludeMode === "slot" && bookingSlotId) {
+      data.filterSlotId = bookingSlotId;
+    }
+
     const shouldSendAsForm = Boolean(imageFile || imageUrl);
 
     if (shouldSendAsForm) {
@@ -147,6 +203,12 @@ export default function MessagingPage() {
       if (data.sendAt) formData.append("sendAt", data.sendAt);
       if (data.clientIds) formData.append("clientIds", JSON.stringify(data.clientIds));
       if (data.raceId) formData.append("raceId", String(data.raceId));
+      if (data.filterNoBookingToday) formData.append("filterNoBookingToday", "true");
+      if (data.filterNoBookingTomorrow) formData.append("filterNoBookingTomorrow", "true");
+      if (data.filterHasBookingToday) formData.append("filterHasBookingToday", "true");
+      if (data.filterHasBookingTomorrow) formData.append("filterHasBookingTomorrow", "true");
+      if (data.filterBookingDate) formData.append("filterBookingDate", data.filterBookingDate);
+      if (data.filterSlotId) formData.append("filterSlotId", String(data.filterSlotId));
       if (imageFile) formData.append("image", imageFile);
       if (imageUrl) formData.append("imageUrl", imageUrl.trim());
       broadcastMutation.mutate(formData);
@@ -256,6 +318,12 @@ export default function MessagingPage() {
     return Number.isNaN(parsed.getTime()) ? dateIso : parsed.toLocaleDateString("ru-RU");
   }
 
+  function formatSlotLabel(slot: BookingSlotOption) {
+    const base = `${slot.slot_date} · ${slot.start_time}-${slot.end_time}`;
+    const extras = [slot.label, slot.instructor_name].filter(Boolean);
+    return extras.length > 0 ? `${base} (${extras.join(" · ")})` : base;
+  }
+
   const links = linksQuery.data?.items ?? [];
   const linkedUsersCount = links.length;
   const normalizedSearch = clientSearch.trim().toLowerCase();
@@ -283,12 +351,66 @@ export default function MessagingPage() {
 
   const bookedToday = useMemo(() => new Set(bookingFiltersQuery.data?.todayIds ?? []), [bookingFiltersQuery.data]);
   const bookedTomorrow = useMemo(() => new Set(bookingFiltersQuery.data?.tomorrowIds ?? []), [bookingFiltersQuery.data]);
+  const bookedOnDate = useMemo(() => new Set(bookingFiltersQuery.data?.dateIds ?? []), [bookingFiltersQuery.data]);
+  const bookedOnSlot = useMemo(() => new Set(bookingFiltersQuery.data?.slotIds ?? []), [bookingFiltersQuery.data]);
+
+  const bookingIncludeSet = useMemo<Set<number> | null>(() => {
+    if (bookingIncludeMode === "today") return bookedToday;
+    if (bookingIncludeMode === "tomorrow") return bookedTomorrow;
+    if (bookingIncludeMode === "date") {
+      if (!bookingDate || bookingFiltersQuery.data?.dateIds === undefined) return null;
+      return bookedOnDate;
+    }
+    if (bookingIncludeMode === "slot") {
+      if (!bookingSlotId || bookingFiltersQuery.data?.slotIds === undefined) return null;
+      return bookedOnSlot;
+    }
+    return null;
+  }, [bookingIncludeMode, bookingDate, bookingSlotId, bookedToday, bookedTomorrow, bookedOnDate, bookedOnSlot, bookingFiltersQuery.data]);
+
+  const bookingSummaryLabel = useMemo(() => {
+    switch (bookingIncludeMode) {
+      case "today":
+        return "с бронью сегодня";
+      case "tomorrow":
+        return "с бронью завтра";
+      case "date":
+        return bookingDate ? `с бронью на ${bookingDate}` : "выберите дату";
+      case "slot": {
+        if (!bookingSlotId) return "выберите слот";
+        const option = bookingSlotsQuery.data?.items?.find((item) => item.id === bookingSlotId);
+        return option ? `слот ${formatSlotLabel(option)}` : "выберите слот";
+      }
+      default:
+        return "";
+    }
+  }, [bookingIncludeMode, bookingDate, bookingSlotId, bookingSlotsQuery.data]);
+
+  const bookingSummary = useMemo(() => {
+    const parts: string[] = [];
+    if (bookingIncludeMode !== "none") {
+      parts.push(bookingSummaryLabel || "фильтр по брони");
+    }
+    if (filterNoBookingToday) parts.push("без брони сегодня");
+    if (filterNoBookingTomorrow) parts.push("без брони завтра");
+    return parts.length ? parts.join(" · ") : "(опционально)";
+  }, [bookingIncludeMode, bookingSummaryLabel, filterNoBookingToday, filterNoBookingTomorrow]);
+
+  const bookingFilterInvalid =
+    (bookingIncludeMode === "date" && !bookingDate) || (bookingIncludeMode === "slot" && !bookingSlotId);
+  const bookingFilterPending =
+    (bookingIncludeMode === "date" && Boolean(bookingDate) && bookingFiltersQuery.isFetching) ||
+    (bookingIncludeMode === "slot" && Boolean(bookingSlotId) && bookingFiltersQuery.isFetching);
 
   const filteredLinks = useMemo(() => {
     let scoped = links;
     const applyRaceFilter = raceFilterActive && raceFilterLoaded && raceParticipantIds.size > 0;
     if (applyRaceFilter) {
       scoped = scoped.filter((link) => raceParticipantIds.has(link.client_id));
+    }
+
+    if (bookingIncludeSet) {
+      scoped = scoped.filter((link) => bookingIncludeSet.has(link.client_id));
     }
 
     if (filterNoBookingToday || filterNoBookingTomorrow) {
@@ -308,6 +430,7 @@ export default function MessagingPage() {
     raceFilterActive,
     raceFilterLoaded,
     raceParticipantIds,
+    bookingIncludeSet,
     filterNoBookingToday,
     filterNoBookingTomorrow,
     bookedToday,
@@ -321,6 +444,13 @@ export default function MessagingPage() {
     if (raceFilterActive && selectedRace) {
       filters.push(`гонка: ${formatRaceLabel(selectedRace.title, selectedRace.race_date)}`);
     }
+    if (bookingIncludeMode !== "none") {
+      if (bookingSummaryLabel) {
+        filters.push(bookingSummaryLabel);
+      } else {
+        filters.push("фильтр по брони");
+      }
+    }
     if (filterNoBookingToday) {
       filters.push("без брони сегодня");
     }
@@ -328,11 +458,18 @@ export default function MessagingPage() {
       filters.push("без брони завтра");
     }
     return filters;
-  }, [raceFilterActive, selectedRace, filterNoBookingToday, filterNoBookingTomorrow]);
+  }, [raceFilterActive, selectedRace, bookingIncludeMode, bookingSummaryLabel, filterNoBookingToday, filterNoBookingTomorrow]);
 
   useEffect(() => {
     setSelectedClientIds((prev) => prev.filter((id) => filteredLinks.some((link) => link.client_id === id)));
   }, [filteredLinks]);
+
+  useEffect(() => {
+    if (bookingIncludeMode !== "none") {
+      setFilterNoBookingToday(false);
+      setFilterNoBookingTomorrow(false);
+    }
+  }, [bookingIncludeMode]);
 
   return (
     <Panel title="Рассылка сообщений" subtitle="Отправка сообщений всем пользователям через clientbot">
@@ -389,39 +526,124 @@ export default function MessagingPage() {
             <summary>
               Фильтр по брони
               <span className="summary-hint">
-                {filterNoBookingToday || filterNoBookingTomorrow
-                  ? [
-                      filterNoBookingToday ? "без брони сегодня" : null,
-                      filterNoBookingTomorrow ? "без брони завтра" : null
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")
-                  : "(опционально)"}
+                {bookingSummary}
               </span>
             </summary>
             <div className="collapsible-content">
-              <div className="form-hint">
-                Исключаем клиентов, у которых уже есть брони в расписании на выбранные дни.
+              <div className="form-hint">Фильтруем получателей по наличию или отсутствию брони.</div>
+              <div className="filter-section">
+                <div className="filter-section-title">Исключить с бронью</div>
+                <div className="filter-buttons">
+                  <button
+                    type="button"
+                    className={`button toggle ${filterNoBookingToday ? "active" : ""}`}
+                    onClick={() => setFilterNoBookingToday((prev) => !prev)}
+                    aria-pressed={filterNoBookingToday}
+                    disabled={isSending || bookingIncludeMode !== "none"}
+                  >
+                    Без брони сегодня
+                  </button>
+                  <button
+                    type="button"
+                    className={`button toggle ${filterNoBookingTomorrow ? "active" : ""}`}
+                    onClick={() => setFilterNoBookingTomorrow((prev) => !prev)}
+                    aria-pressed={filterNoBookingTomorrow}
+                    disabled={isSending || bookingIncludeMode !== "none"}
+                  >
+                    Без брони завтра
+                  </button>
+                </div>
+                {bookingIncludeMode !== "none" && (
+                  <div className="form-hint">Отключено, потому что выбран режим "с бронью" ниже.</div>
+                )}
               </div>
-              <div className="filter-buttons">
-                <button
-                  type="button"
-                  className={`button toggle ${filterNoBookingToday ? "active" : ""}`}
-                  onClick={() => setFilterNoBookingToday((prev) => !prev)}
-                  aria-pressed={filterNoBookingToday}
-                  disabled={isSending}
-                >
-                  Без брони сегодня
-                </button>
-                <button
-                  type="button"
-                  className={`button toggle ${filterNoBookingTomorrow ? "active" : ""}`}
-                  onClick={() => setFilterNoBookingTomorrow((prev) => !prev)}
-                  aria-pressed={filterNoBookingTomorrow}
-                  disabled={isSending}
-                >
-                  Без брони завтра
-                </button>
+
+              <div className="filter-section">
+                <div className="filter-section-title">Отправить только тем, у кого есть бронь</div>
+                <div className="filter-grid">
+                  <label className="radio-row">
+                    <input
+                      type="radio"
+                      name="bookingInclude"
+                      checked={bookingIncludeMode === "none"}
+                      onChange={() => setBookingIncludeMode("none")}
+                      disabled={isSending}
+                    />
+                    <span>Не учитывать брони</span>
+                  </label>
+                  <label className="radio-row">
+                    <input
+                      type="radio"
+                      name="bookingInclude"
+                      checked={bookingIncludeMode === "today"}
+                      onChange={() => setBookingIncludeMode("today")}
+                      disabled={isSending}
+                    />
+                    <span>Есть бронь сегодня</span>
+                  </label>
+                  <label className="radio-row">
+                    <input
+                      type="radio"
+                      name="bookingInclude"
+                      checked={bookingIncludeMode === "tomorrow"}
+                      onChange={() => setBookingIncludeMode("tomorrow")}
+                      disabled={isSending}
+                    />
+                    <span>Есть бронь завтра</span>
+                  </label>
+                  <label className="radio-row">
+                    <input
+                      type="radio"
+                      name="bookingInclude"
+                      checked={bookingIncludeMode === "date"}
+                      onChange={() => setBookingIncludeMode("date")}
+                      disabled={isSending}
+                    />
+                    <span>Есть бронь в выбранный день</span>
+                  </label>
+                  <input
+                    type="date"
+                    value={bookingDate}
+                    onChange={(e) => {
+                      setBookingDate(e.target.value);
+                      setBookingIncludeMode("date");
+                    }}
+                    disabled={isSending || bookingIncludeMode !== "date"}
+                  />
+                  <label className="radio-row">
+                    <input
+                      type="radio"
+                      name="bookingInclude"
+                      checked={bookingIncludeMode === "slot"}
+                      onChange={() => setBookingIncludeMode("slot")}
+                      disabled={isSending}
+                    />
+                    <span>Есть бронь в конкретном слоте</span>
+                  </label>
+                  <select
+                    value={bookingSlotId ?? ""}
+                    onChange={(e) => {
+                      setBookingSlotId(e.target.value ? Number(e.target.value) : null);
+                      setBookingIncludeMode("slot");
+                    }}
+                    disabled={isSending || bookingIncludeMode !== "slot" || bookingSlotsQuery.isLoading}
+                  >
+                    <option value="">Выберите слот</option>
+                    {(bookingSlotsQuery.data?.items ?? []).map((slot) => (
+                      <option key={slot.id} value={slot.id}>
+                        {formatSlotLabel(slot)}
+                      </option>
+                    ))}
+                  </select>
+                  {bookingSlotsQuery.isError && (
+                    <div className="form-message error">Не удалось загрузить список слотов.</div>
+                  )}
+                </div>
+                <div className="form-hint">
+                  Включаем клиентов, у которых есть бронь в выбранные дни или слот.
+                  {bookingSlotsQuery.isLoading ? " Загружаем слоты..." : ""}
+                  {bookingIncludeMode === "date" && !bookingDate ? " Укажите дату, чтобы применить фильтр." : ""}
+                </div>
               </div>
             </div>
           </details>
@@ -547,8 +769,8 @@ export default function MessagingPage() {
               Текст сообщения
               <div className="form-hint">
                 {selectedClientIds.length > 0
-                  ? `Сообщение получат ${selectedCount} выбранных клиентов${raceFilterActive ? ' (участники выбранной гонки)' : ''}`
-                  : `Сообщение будет отправлено всем ${filteredLinks.length} получателям${raceFilterActive ? ' — участникам гонки' : ''}`}
+                  ? `Сообщение получат ${selectedCount} выбранных клиентов${raceFilterActive ? " (участники выбранной гонки)" : ""}${bookingIncludeMode !== "none" ? ` — ${bookingSummaryLabel || "фильтр по брони"}` : ""}`
+                  : `Сообщение будет отправлено всем ${filteredLinks.length} получателям${raceFilterActive ? " — участникам гонки" : ""}${bookingIncludeMode !== "none" ? ` — ${bookingSummaryLabel || "фильтр по брони"}` : ""}`}
               </div>
             </label>
             <textarea
@@ -601,10 +823,21 @@ export default function MessagingPage() {
             <button
               type="submit"
               className="button primary"
-              disabled={isSending || broadcastMutation.isPending || linkedUsersCount === 0}
+              disabled={
+                isSending ||
+                broadcastMutation.isPending ||
+                linkedUsersCount === 0 ||
+                bookingFilterPending ||
+                bookingFilterInvalid
+              }
             >
               {isSending || broadcastMutation.isPending ? "Отправка..." : "Отправить сообщение"}
             </button>
+
+            {bookingFilterPending && <div className="form-hint">Обновляем список клиентов с бронью…</div>}
+            {bookingFilterInvalid && (
+              <div className="form-message error">Заполните дату или слот, чтобы применить фильтр по брони.</div>
+            )}
             
             {sendResult && (
               <div className="form-message success">

@@ -803,6 +803,41 @@ def list_future_slots_for_copy(
     return rows
 
 
+def list_upcoming_slots(*, limit: int = 100, start_date: Optional[date] = None) -> List[Dict]:
+    """Return upcoming slots (ordered by date/time) for messaging filters."""
+
+    ensure_schedule_tables()
+    start = start_date or date.today()
+    limit = max(1, min(limit, 500))
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                s.id,
+                s.week_id,
+                s.slot_date,
+                s.start_time,
+                s.end_time,
+                s.label,
+                s.session_kind,
+                s.instructor_id,
+                w.week_start_date,
+                instr.full_name AS instructor_name
+            FROM schedule_slots AS s
+            JOIN schedule_weeks AS w ON w.id = s.week_id
+            LEFT JOIN schedule_instructors AS instr ON instr.id = s.instructor_id
+            WHERE s.is_cancelled = FALSE AND s.slot_date >= %s
+            ORDER BY s.slot_date, s.start_time, s.id
+            LIMIT %s
+            """,
+            (start, limit),
+        )
+        rows = cur.fetchall()
+
+    return rows
+
+
 def copy_slot_seating(source_slot_id: int, target_slot_id: int) -> Dict[str, Any]:
     """Copy seating (stand assignments) from one slot to another."""
 
