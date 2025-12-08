@@ -1,6 +1,7 @@
 """VK bot that replies with a greeting and simple booking actions (book/profile/cancel)."""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, time, timedelta
 from typing import Any, Dict, List, Optional
@@ -31,7 +32,7 @@ WHAT_TO_BRING_TEXT = (
     "Чтобы тренировка была комфортной, подготовьте:\n"
     "✅ Бутылку чистой воды\n"
     "✅ Полотенце\n"
-    "✅ Удобную сменную обувь (кроссовки или велотуфли с шипами Look)\n"
+    "✅ Удобную сменную обувь (кроссовки или велотуфли)\n"
     "✅ Шлёпанцы\n"
     "✅ Принадлежности для душа\n\n"
     "Собирайте рюкзак и увидимся на тренировке!"
@@ -89,12 +90,13 @@ def run_bot(
         peer_id = message.get("peer_id")
         user_id = message.get("from_id")
         text = message.get("text", "")
+        payload = message.get("payload")
         if peer_id is None:
             log.debug("Received message without peer_id: %s", message)
             continue
 
         log.info("Incoming message from peer %s: %s", peer_id, text)
-        handled = _handle_stateful_message(peer_id, user_id, text.strip(), vk)
+        handled = _handle_stateful_message(peer_id, user_id, text.strip(), vk, payload=payload)
         if handled:
             continue
 
@@ -134,6 +136,13 @@ def _handle_message_event(event, vk, greeting: str) -> None:
     elif action == "book_day":
         date_str = payload.get("date")
         _show_slots_for_day(peer_id, user_id, date_str, vk)
+    elif action == "slots_page":
+        date_str = payload.get("date")
+        try:
+            page = int(payload.get("page", 0))
+        except Exception:
+            page = 0
+        _show_slots_for_day(peer_id, user_id, date_str, vk, page=page)
     elif action == "slot":
         try:
             slot_id = int(payload.get("slot_id"))
@@ -184,7 +193,16 @@ def _clear_state(peer_id: int) -> None:
     _STATE.pop(peer_id, None)
 
 
-def _handle_stateful_message(peer_id: int, user_id: Optional[int], text: str, vk) -> bool:
+def _handle_stateful_message(peer_id: int, user_id: Optional[int], text: str, vk, *, payload: Any = None) -> bool:
+    payload_data = None
+    if isinstance(payload, str):
+        try:
+            payload_data = json.loads(payload)
+        except Exception:
+            payload_data = None
+    elif isinstance(payload, dict):
+        payload_data = payload
+
     # Plain-text shortcuts for main actions in case inline events are unavailable.
     lowered = text.lower()
     if lowered in {"забронировать", "бронь", "book"}:
@@ -208,6 +226,14 @@ def _handle_stateful_message(peer_id: int, user_id: Optional[int], text: str, vk
         return True
     if lowered in {"что взять", "что взять с собой"}:
         _send_text(vk, peer_id, WHAT_TO_BRING_TEXT, keyboard=build_inline_keyboard())
+        return True
+    if payload_data and payload_data.get("action") == "slots_page":
+        date_str = payload_data.get("date")
+        try:
+            page = int(payload_data.get("page", 0))
+        except Exception:
+            page = 0
+        _show_slots_for_day(peer_id, user_id or peer_id, date_str, vk, page=page)
         return True
 
     state = _get_state(peer_id)
@@ -241,6 +267,25 @@ def _handle_stateful_message(peer_id: int, user_id: Optional[int], text: str, vk
     if mode == "link_pick":
         _handle_link_pick(peer_id, text, vk)
         return True
+    if mode == "slot_select" and state.get("current_date"):
+        if text in {"→", ">", ">>", "вперёд"}:
+            _show_slots_for_day(
+                peer_id,
+                user_id or peer_id,
+                state["current_date"],
+                vk,
+                page=(state.get("slots_page", 0) or 0) + 1,
+            )
+            return True
+        if text in {"←", "<", "<<", "назад"}:
+            _show_slots_for_day(
+                peer_id,
+                user_id or peer_id,
+                state["current_date"],
+                vk,
+                page=(state.get("slots_page", 0) or 0) - 1,
+            )
+            return True
     return False
 
 
@@ -638,15 +683,16 @@ def _start_booking(peer_id: int, user_id: int, vk) -> None:
         _send_text(vk, peer_id, "Свободных слотов пока нет. Попробуйте позже.")
         return
 
+    state = _get_state(peer_id)
+    state["day_map"] = {day.isoformat(): slots for day, slots in day_slots}
+
     # If only one day, show slots right away
     if len(day_slots) == 1:
-        _, slots_for_day = day_slots[0]
-        _send_slots_keyboard(peer_id, slots_for_day, vk)
+        day, _ = day_slots[0]
+        _show_slots_for_day(peer_id, user_id, day.isoformat(), vk)
         return
 
     # Store day map in state for later validation
-    state = _get_state(peer_id)
-    state["day_map"] = {day.isoformat(): slots for day, slots in day_slots}
     state["mode"] = "day_select"
 
     keyboard = build_day_keyboard(day_slots[:5], add_back=True)
@@ -673,7 +719,7 @@ def _group_slots_by_day(slots: List[Dict[str, Any]]) -> List[tuple[date, List[Di
     return result
 
 
-def _show_slots_for_day(peer_id: int, user_id: int, date_str: Optional[str], vk) -> None:
+def _show_slots_for_day(peer_id: int, user_id: int, date_str: Optional[str], vk, *, page: int = 0) -> None:
     if not date_str:
         _send_text(vk, peer_id, "Не смог понять дату. Попробуйте снова.")
         return
@@ -699,23 +745,41 @@ def _show_slots_for_day(peer_id: int, user_id: int, date_str: Optional[str], vk)
         return
 
     state["mode"] = "slot_select"
+    state["current_date"] = date_str
     # cache slots map for text matching
     state["slots_map"] = {slot["id"]: slot for slot in slots_for_day if isinstance(slot.get("id"), int)}
-    _send_slots_keyboard(peer_id, slots_for_day, vk)
+    current_page = _send_slots_keyboard(peer_id, slots_for_day, vk, date_iso=date_str, page=page)
+    state["slots_page"] = current_page
 
 
-def _send_slots_keyboard(peer_id: int, slots: List[Dict[str, Any]], vk) -> None:
-    limited_slots = slots[:5]  # keep under inline keyboard line limit
+def _send_slots_keyboard(peer_id: int, slots: List[Dict[str, Any]], vk, *, date_iso: str, page: int = 0) -> int:
+    per_page = 5
+    total_pages = (len(slots) + per_page - 1) // per_page or 1
+    current_page = max(0, min(page, total_pages - 1))
+    start_idx = current_page * per_page
+    limited_slots = slots[start_idx : start_idx + per_page]
     try:
-        keyboard = build_slots_keyboard(limited_slots)
-        _send_text(vk, peer_id, "Выберите слот для бронирования:", keyboard=keyboard)
+        keyboard = build_slots_keyboard(
+            limited_slots,
+            has_prev=current_page > 0,
+            has_next=current_page < total_pages - 1,
+            date_iso=date_iso,
+            page=current_page,
+        )
+        _send_text(
+            vk,
+            peer_id,
+            f"Выберите слот для бронирования (стр. {current_page + 1}/{total_pages}):",
+            keyboard=keyboard,
+        )
     except Exception:
         log.exception("Failed to build slots keyboard, sending text list")
         # Fallback to text list
-        lines = ["Свободные слоты:"]
+        lines = [f"Свободные слоты (стр. {current_page + 1}/{total_pages}):"]
         for idx, slot in enumerate(limited_slots, 1):
             lines.append(f"{idx}) {format_slot_label(slot)} (id {slot.get('id')})")
         _send_text(vk, peer_id, "\n".join(lines))
+    return current_page
 
 
 def _pick_available_reservation(slot: Dict[str, Any]) -> Optional[Dict]:

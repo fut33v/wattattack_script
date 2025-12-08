@@ -17,15 +17,21 @@ def build_inline_keyboard() -> str:
     keyboard.add_line()
     keyboard.add_button("Отменить бронь", color=VkKeyboardColor.NEGATIVE, payload={"action": "cancel"})
     keyboard.add_line()
-    keyboard.add_openlink_button("Расписание (текущая)", link="https://clc.to/krutilka_current_week")
-    keyboard.add_openlink_button("Расписание (следующая)", link="https://clc.to/krutilka_next_week")
+    keyboard.add_openlink_button("Расписание", link="https://clc.to/krutilka_current_week")
     keyboard.add_line()
     keyboard.add_button("Как добраться", color=VkKeyboardColor.SECONDARY, payload={"action": "how_to_get"})
     keyboard.add_button("Что взять", color=VkKeyboardColor.SECONDARY, payload={"action": "what_to_bring"})
     return keyboard.get_keyboard()
 
 
-def build_slots_keyboard(slots: List[Dict[str, Any]]) -> str:
+def build_slots_keyboard(
+    slots: List[Dict[str, Any]],
+    *,
+    has_prev: bool = False,
+    has_next: bool = False,
+    date_iso: str | None = None,
+    page: int = 0,
+) -> str:
     keyboard = VkKeyboard(inline=True)
     for idx, slot in enumerate(slots):
         slot_id = slot.get("id")
@@ -38,8 +44,21 @@ def build_slots_keyboard(slots: List[Dict[str, Any]]) -> str:
         )
         if idx != len(slots) - 1:
             keyboard.add_line()
+    # single line for navigation + cancel to stay within VK inline limits (max 6 lines)
     keyboard.add_line()
+    if has_prev:
+        keyboard.add_button(
+            "←",
+            color=VkKeyboardColor.SECONDARY,
+            payload={"action": "slots_page", "date": date_iso, "page": page - 1},
+        )
     keyboard.add_button("Отмена", color=VkKeyboardColor.NEGATIVE, payload={"action": "cancel"})
+    if has_next:
+        keyboard.add_button(
+            "→",
+            color=VkKeyboardColor.SECONDARY,
+            payload={"action": "slots_page", "date": date_iso, "page": page + 1},
+        )
     return keyboard.get_keyboard()
 
 
