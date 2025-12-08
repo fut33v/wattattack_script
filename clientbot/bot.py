@@ -22,6 +22,9 @@ from telegram.ext import (
     filters,
 )
 
+from booking import notifications as booking_notifications
+from booking import service as booking_service
+from notifications import admin as admin_notifications
 from repositories import (
     bikes_repository,
     client_groups_repository,
@@ -41,14 +44,15 @@ from repositories.link_requests_repository import (
     create_link_request,
     delete_link_request,
 )
-from repositories.admin_repository import get_admin_ids, is_admin
+from repositories.admin_repository import (
+    get_admin_ids,
+    is_admin,
+)
 from straver_client import StraverClient
 from clientbot import intervals
 from clientbot import self_service
 from repositories.intervals_link_repository import get_link as get_intervals_link
 from wattattack_profiles import apply_client_profile as apply_wattattack_profile
-
-import os
 
 LOGGER = logging.getLogger(__name__)
 
@@ -75,7 +79,6 @@ _STATUS_LABELS: Final[Dict[str, str]] = {
 
 DEFAULT_GREETING: Final[str] = "Здравствуйте!"
 MAX_SUGGESTIONS: Final[int] = 6
-ADMIN_BOT_TOKEN_ENV: Final[str] = "TELEGRAM_BOT_TOKEN"
 LINK_REQUEST_ID_LEN: Final[int] = 12
 _SELF_SERVICE_BUTTON: Final[Tuple[str, str]] = ("🔄 Самокрутка", "main_menu:selfservice")
 _SELF_SERVICE_FLOW: Optional[self_service.SelfServiceFlow] = None
@@ -113,10 +116,6 @@ _RACE_MODE_CHOICES: Final[Dict[str, str]] = {
     "online": "💻 Онлайн (у себя дома)",
 }
 
-_ADMIN_NOTIFICATION_BOT: Optional[Bot] = None
-_ADMIN_NOTIFICATION_WARNED: bool = False
-
-
 def _gear_label_from_code(code: str) -> Optional[str]:
     normalized_code = (code or "").strip().lower()
     for option in _RACE_GEARS_CHOICES:
@@ -125,43 +124,6 @@ def _gear_label_from_code(code: str) -> Optional[str]:
             return option
     return None
 
-
-def _get_admin_notification_bot() -> Optional[Bot]:
-    global _ADMIN_NOTIFICATION_BOT, _ADMIN_NOTIFICATION_WARNED
-    token = os.environ.get(ADMIN_BOT_TOKEN_ENV)
-    if not token:
-        if not _ADMIN_NOTIFICATION_WARNED:
-            LOGGER.warning(
-                "TELEGRAM_BOT_TOKEN is not configured in clientbot; admin alerts will be sent from the client bot"
-            )
-            _ADMIN_NOTIFICATION_WARNED = True
-        return None
-    if _ADMIN_NOTIFICATION_BOT is None:
-        _ADMIN_NOTIFICATION_BOT = Bot(token=token)
-    return _ADMIN_NOTIFICATION_BOT
-
-
-async def _send_admin_notification(
-    chat_id: int,
-    text: str,
-    *,
-    context: ContextTypes.DEFAULT_TYPE | None = None,
-    reply_markup: InlineKeyboardMarkup | None = None,
-) -> bool:
-    admin_bot = _get_admin_notification_bot()
-    if admin_bot is not None:
-        try:
-            await admin_bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
-            return True
-        except Exception:
-            LOGGER.exception("Failed to send admin notification via adminbot", exc_info=True)
-    if context is not None:
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
-            return True
-        except Exception:
-            LOGGER.exception("Failed to send admin notification via clientbot fallback", exc_info=True)
-    return False
 
 _FORM_STEP_HINTS: Final[Dict[int, str]] = {
     FORM_FIRST_NAME: "Сейчас ждём ваше имя (только текст).",
@@ -185,8 +147,8 @@ _PEDAL_CHOICES: Final[List[Tuple[str, str]]] = [
 _PEDAL_LABEL_BY_CODE: Final[Dict[str, str]] = {code: label for label, code in _PEDAL_CHOICES}
 _GENDER_LABELS: Final[Dict[str, str]] = {"male": "М", "female": "Ж"}
 _WEEKDAY_SHORT: Final[List[str]] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-_BOOKING_CUTOFF: Final[timedelta] = timedelta(minutes=90)
-_LOCAL_TZ: Final[ZoneInfo] = ZoneInfo("Europe/Moscow")
+_BOOKING_CUTOFF: Final[timedelta] = booking_service.BOOKING_CUTOFF
+_LOCAL_TZ: Final[ZoneInfo] = booking_service.LOCAL_TZ
 _KNOWN_COMMANDS: Final[Set[str]] = {
     "/start",
     "/book",
@@ -328,12 +290,7 @@ def _format_stand_label(stand: Optional[Dict[str, Any]], reservation: Optional[D
 
 
 def _slot_start_datetime(slot: Dict[str, Any]) -> Optional[datetime]:
-    slot_date = _parse_date(slot.get("slot_date"))
-    start_time_value = _parse_time(slot.get("start_time"))
-    if slot_date and start_time_value:
-        combined = datetime.combine(slot_date, start_time_value)
-        return combined.replace(tzinfo=_LOCAL_TZ)
-    return None
+    return booking_service.slot_start_datetime(slot)
 
 
 def _to_local_naive(value: datetime) -> datetime:
@@ -343,7 +300,7 @@ def _to_local_naive(value: datetime) -> datetime:
 
 
 def _local_now() -> datetime:
-    return datetime.now(tz=_LOCAL_TZ)
+    return booking_service.local_now()
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -489,15 +446,7 @@ def _fetch_linked_client(user_id: int) -> Tuple[Optional[Dict[str, Any]], Option
 
 
 def _group_slots_by_day(slots: List[Dict[str, Any]]) -> List[Tuple[date, List[Dict[str, Any]]]]:
-    grouped: Dict[date, List[Dict[str, Any]]] = {}
-    for slot in slots:
-        slot_date = slot.get("slot_date")
-        if not isinstance(slot_date, date):
-            continue
-        grouped.setdefault(slot_date, []).append(slot)
-    for slot_list in grouped.values():
-        slot_list.sort(key=lambda item: (item.get("start_time"), item.get("id")))
-    return sorted(grouped.items(), key=lambda item: item[0])
+    return booking_service.group_slots_by_day(slots)
 
 
 def _build_day_keyboard(day_slots: List[Tuple[date, List[Dict[str, Any]]]]) -> InlineKeyboardMarkup:
@@ -547,27 +496,11 @@ async def _present_day_selection(
     horizon_days: int = 21,
 ) -> bool:
     now_local = _local_now()
-    end = now_local + timedelta(days=horizon_days)
-    cutoff_threshold = now_local + _BOOKING_CUTOFF
-    if end <= cutoff_threshold:
-        end = cutoff_threshold + timedelta(days=1)
     try:
-        slots_raw = schedule_repository.list_available_slots(
-            _to_local_naive(now_local),
-            _to_local_naive(end),
-        )
+        slots = booking_service.list_bookable_slots_for_horizon(now=now_local, horizon_days=horizon_days)
     except Exception:
         LOGGER.exception("Failed to load available slots for booking")
         return False
-
-    slots = []
-    for slot in slots_raw:
-        start_dt = _slot_start_datetime(slot)
-        if start_dt is None:
-            continue
-        if start_dt - now_local < _BOOKING_CUTOFF:
-            continue
-        slots.append(slot)
 
     if not slots:
         return False
@@ -579,8 +512,12 @@ async def _present_day_selection(
     limited = grouped[:10]
     booking_state = _get_booking_state(context)
     booking_state["day_map"] = {day.isoformat(): day_slots for day, day_slots in limited}
+    cutoff_threshold = now_local + _BOOKING_CUTOFF
+    horizon_end = now_local + timedelta(days=horizon_days)
+    if horizon_end <= cutoff_threshold:
+        horizon_end = cutoff_threshold + timedelta(days=1)
     booking_state["horizon_start"] = cutoff_threshold.isoformat()
-    booking_state["horizon_end"] = end
+    booking_state["horizon_end"] = horizon_end
 
     text = "Выберите день для бронирования тренировки:"
     markup = _build_day_keyboard(limited)
@@ -654,29 +591,7 @@ async def _handle_booking_day(update: Update, context: ContextTypes.DEFAULT_TYPE
     start_dt_local = datetime.combine(selected_date, time.min, tzinfo=_LOCAL_TZ)
     end_dt_local = datetime.combine(selected_date, time.max, tzinfo=_LOCAL_TZ)
 
-    try:
-        slots = schedule_repository.list_available_slots(
-            _to_local_naive(start_dt_local),
-            _to_local_naive(end_dt_local),
-        )
-    except Exception:
-        LOGGER.exception("Failed to load slots for %s", date_str)
-        await query.edit_message_text("Не удалось загрузить список слотов. Попробуйте позже.")
-        _clear_booking_state(context)
-        return ConversationHandler.END
-
-    now_check = _local_now()
-    filtered_slots: List[Dict[str, Any]] = []
-    for slot in slots:
-        if not slot.get("free_count"):
-            continue
-        start_dt_candidate = _slot_start_datetime(slot)
-        if start_dt_candidate is None:
-            continue
-        if start_dt_candidate - now_check < _BOOKING_CUTOFF:
-            continue
-        filtered_slots.append(slot)
-    slots = filtered_slots
+    slots = booking_service.list_bookable_slots_between(start_dt_local, end_dt_local, now=_local_now())
     if not slots:
         success = await _edit_day_selection_message(query, context)
         if not success:
@@ -881,27 +796,7 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
             end_dt_local = datetime.combine(selected_date_obj, time.max, tzinfo=_LOCAL_TZ)
             if end_dt_local <= start_dt_local:
                 end_dt_local = start_dt_local + timedelta(minutes=1)
-            try:
-                refreshed = schedule_repository.list_available_slots(
-                    _to_local_naive(start_dt_local),
-                    _to_local_naive(end_dt_local),
-                )
-            except Exception:
-                LOGGER.exception("Failed to refresh slots for %s", selected_date)
-                refreshed = []
-
-            now_refresh = _local_now()
-            filtered_refreshed: List[Dict[str, Any]] = []
-            for item in refreshed:
-                if not item.get("free_count"):
-                    continue
-                start_dt_candidate = _slot_start_datetime(item)
-                if start_dt_candidate is None:
-                    continue
-                if start_dt_candidate - now_refresh < _BOOKING_CUTOFF:
-                    continue
-                filtered_refreshed.append(item)
-            refreshed = filtered_refreshed
+            refreshed = booking_service.list_bookable_slots_between(start_dt_local, end_dt_local, now=_local_now())
             if refreshed:
                 state["slots_map"] = {
                     item["id"]: item for item in refreshed if isinstance(item.get("id"), int)
@@ -996,60 +891,59 @@ async def _notify_admins_of_booking(
     bike: Optional[Dict[str, Any]]
 ) -> None:
     """Send notification to all admins about a new booking."""
-    try:
-        admin_ids = get_admin_ids()
-    except Exception:
-        LOGGER.exception("Failed to load admin IDs for booking notification")
-        return
-
+    admin_ids = admin_notifications.resolve_admin_chat_ids(instructor_id=slot.get("instructor_id"))
     if not admin_ids:
         LOGGER.debug("No admin IDs found for booking notification")
         return
 
-    # Format the booking details
     client_name = _format_client_display_name(client)
-    
     slot_date = _parse_date(slot.get("slot_date"))
     start_time = _parse_time(slot.get("start_time"))
-    
-    date_str = slot_date.strftime('%d.%m.%Y') if slot_date else "неизвестная дата"
-    time_str = start_time.strftime('%H:%M') if start_time else "неизвестное время"
-    
     stand_label = _format_stand_label(stand, None)
-    
-    bike_info = ""
+    bike_label = None
     if bike:
         bike_title = (bike.get("title") or "").strip()
         bike_owner = (bike.get("owner") or "").strip()
-        if bike_title or bike_owner:
-            bike_info = f"\n🚲 Велосипед: {bike_title} ({bike_owner})" if bike_title and bike_owner else f"\n🚲 Велосипед: {bike_title or bike_owner}"
-
-    # Determine if it's with an instructor or self-service
-    session_type = ""
-    if slot.get("session_kind") == "instructor":
-        instructor_name = (slot.get("instructor_name") or "").strip()
-        if instructor_name:
-            session_type = f"\n🧑‍🏫 С инструктором: {instructor_name}"
+        if bike_title and bike_owner:
+            bike_label = f"{bike_title} ({bike_owner})"
         else:
-            session_type = "\n🧑‍🏫 С инструктором (имя уточняется)"
-    else:
-        session_type = "\n🔄 Самокрутка"
-    
-    # Create the notification message
-    message = (
-        f"🔔 Новая запись!\n\n"
-        f"Клиент: {client_name}\n"
-        f"Дата и время: {date_str} в {time_str}"
-        f"{session_type}\n"
-        f"🏋️ Станок: {stand_label}"
-        f"{bike_info}\n\n"
-        f"Запись создана через бота clientbot"
+            bike_label = bike_title or bike_owner or None
+
+    instructor_id = slot.get("instructor_id")
+
+    message = booking_notifications.format_booking_created_message(
+        client_name=client_name,
+        slot_date=slot_date,
+        start_time=start_time,
+        stand_label=stand_label,
+        bike_label=bike_label,
+        session_kind=slot.get("session_kind"),
+        instructor_name=(slot.get("instructor_name") or "").strip() or None,
+        source="clientbot",
     )
 
-    # Send notification to all admins
+    booking_notifications.notify_booking_created(
+        booking_notifications.BookingNotification(
+            client_id=client.get("id") if isinstance(client.get("id"), int) else None,
+            client_name=client_name,
+            slot_date=slot_date,
+            start_time=start_time,
+            slot_label=(slot.get("label") or "").strip() or None,
+            stand_label=stand_label,
+            bike_label=bike_label,
+            source="clientbot",
+            message_text=message,
+            payload={"slot_id": slot.get("id"), "stand_id": stand.get("id") if stand else None},
+        )
+    )
+
+    delivered = await admin_notifications.notify_admins(
+        message,
+        admin_ids=admin_ids,
+        context=context,
+    )
     for admin_id in admin_ids:
-        sent = await _send_admin_notification(admin_id, message, context=context)
-        if not sent:
+        if admin_id not in delivered:
             LOGGER.warning("Failed to send booking notification to admin %s", admin_id)
 
 
@@ -1344,11 +1238,46 @@ async def _handle_cancel_booking_callback(update: Update, context: ContextTypes.
         reservation_info.setdefault("label", slot_details.get("label"))
         reservation_info.setdefault("session_kind", slot_details.get("session_kind"))
         reservation_info.setdefault("instructor_name", slot_details.get("instructor_name"))
+        reservation_info.setdefault("instructor_id", slot_details.get("instructor_id"))
 
     try:
         await _notify_admins_of_cancellation(context, client, reservation_info)
     except Exception:
         LOGGER.exception("Failed to notify admins about cancellation")
+    try:
+        client_name = _format_client_display_name(client)
+        slot_date_val = _parse_date(reservation_info.get("slot_date"))
+        start_time_val = _parse_time(reservation_info.get("start_time"))
+        stand_label = reservation_info.get("stand_code") or reservation_info.get("stand_id")
+        message = booking_notifications.format_booking_cancelled_message(
+            client_name=client_name,
+            slot_date=slot_date_val,
+            start_time=start_time_val,
+            stand_label=str(stand_label) if stand_label else None,
+            source="clientbot",
+        )
+        booking_notifications.notify_booking_cancelled(
+            booking_notifications.BookingNotification(
+                client_id=client.get("id") if isinstance(client.get("id"), int) else None,
+                client_name=client_name,
+                slot_date=slot_date_val,
+                start_time=start_time_val,
+                slot_label=(reservation_info.get("label") or "").strip() or None,
+                stand_label=str(stand_label) if stand_label else None,
+                bike_label=None,
+                source="clientbot",
+                message_text=message,
+                payload={
+                    "reservation_id": reservation_id,
+                    "slot_id": reservation_info.get("slot_id"),
+                    "instructor_id": reservation_info.get("instructor_id"),
+                },
+            )
+        )
+    except Exception:
+        LOGGER.debug("Failed to record booking cancellation notification", exc_info=True)
+    except Exception:
+        LOGGER.debug("Failed to record cancellation notification", exc_info=True)
 
     # Format the cancellation message for the user
     slot_summary = _format_cancellation_summary(reservation_info)
@@ -1659,12 +1588,7 @@ async def _notify_admins_of_cancellation(
     reservation: Dict[str, Any]
 ) -> None:
     """Send notification to all admins about a cancelled booking."""
-    try:
-        admin_ids = get_admin_ids()
-    except Exception:
-        LOGGER.exception("Failed to load admin IDs for cancellation notification")
-        return
-
+    admin_ids = admin_notifications.resolve_admin_chat_ids(instructor_id=reservation.get("instructor_id"))
     if not admin_ids:
         LOGGER.debug("No admin IDs found for cancellation notification")
         return
@@ -1699,9 +1623,13 @@ async def _notify_admins_of_cancellation(
     )
 
     # Send notification to all admins
+    delivered = await admin_notifications.notify_admins(
+        message,
+        admin_ids=admin_ids,
+        context=context,
+    )
     for admin_id in admin_ids:
-        sent = await _send_admin_notification(admin_id, message, context=context)
-        if not sent:
+        if admin_id not in delivered:
             LOGGER.warning("Failed to send cancellation notification to admin %s", admin_id)
 
 
@@ -1744,9 +1672,13 @@ async def _notify_admins_of_new_message(
     )
 
     # Send notification to all admins
+    delivered = await admin_notifications.notify_admins(
+        notification,
+        admin_ids=admin_ids,
+        context=context,
+    )
     for admin_id in admin_ids:
-        sent = await _send_admin_notification(admin_id, notification, context=context)
-        if not sent:
+        if admin_id not in delivered:
             LOGGER.warning("Failed to send message notification to admin %s", admin_id)
 
 
@@ -3317,6 +3249,17 @@ async def _finalize_client_creation(
         )
         _clear_form(context)
         return ASK_LAST_NAME
+    try:
+        booking_notifications.notify_client_created(
+            booking_notifications.ClientCreatedNotification(
+                client_id=client.get("id") if isinstance(client.get("id"), int) else None,
+                client_name=_format_client_display_name(client),
+                source="clientbot",
+                payload={"tg_user_id": user.id if user else None},
+            )
+        )
+    except Exception:
+        LOGGER.debug("Failed to record client_created notification", exc_info=True)
 
     summary_lines = [
         "📝 Анкета (проверьте данные):",
@@ -3414,21 +3357,16 @@ async def _notify_admins(
     )
 
     # Send interactive message from adminbot (no notifications from client bot).
-    delivered = False
+    delivered_admins = await admin_notifications.notify_admins(
+        "\n".join(lines),
+        admin_ids=admin_ids,
+        reply_markup=keyboard,
+        context=context,
+    )
     for admin_id in admin_ids:
-        try:
-            sent = await _send_admin_notification(
-                admin_id,
-                "\n".join(lines),
-                reply_markup=keyboard,
-            )
-            if not sent:
-                LOGGER.warning("Admin notification not delivered for request %s to %s", request["request_id"], admin_id)
-            else:
-                delivered = True
-        except Exception:
-            LOGGER.debug("Failed to send adminbot notification for approval request %s", request["request_id"], exc_info=True)
-    return delivered
+        if admin_id not in delivered_admins:
+            LOGGER.warning("Admin notification not delivered for request %s to %s", request["request_id"], admin_id)
+    return bool(delivered_admins)
 
 
 async def _handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

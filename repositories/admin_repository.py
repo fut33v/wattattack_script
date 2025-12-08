@@ -33,6 +33,9 @@ def ensure_admin_table() -> None:
                 username TEXT,
                 username_lower TEXT,
                 display_name TEXT,
+                instructor_id INTEGER,
+                notify_booking_events BOOLEAN DEFAULT TRUE,
+                notify_instructor_only BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT NOW()
             )
             """
@@ -42,6 +45,15 @@ def ensure_admin_table() -> None:
         )
         cur.execute(
             "ALTER TABLE admins ADD COLUMN IF NOT EXISTS display_name TEXT"
+        )
+        cur.execute(
+            "ALTER TABLE admins ADD COLUMN IF NOT EXISTS instructor_id INTEGER"
+        )
+        cur.execute(
+            "ALTER TABLE admins ADD COLUMN IF NOT EXISTS notify_booking_events BOOLEAN DEFAULT TRUE"
+        )
+        cur.execute(
+            "ALTER TABLE admins ADD COLUMN IF NOT EXISTS notify_instructor_only BOOLEAN DEFAULT FALSE"
         )
         cur.execute(
             "ALTER TABLE admins ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()"
@@ -87,7 +99,7 @@ def list_admins() -> List[Dict]:
     ensure_admin_table()
     with db_connection() as conn, dict_cursor(conn) as cur:
         cur.execute(
-            "SELECT id, tg_id, username, display_name, created_at FROM admins ORDER BY COALESCE(username_lower, ''), COALESCE(display_name, ''), tg_id"
+            "SELECT id, tg_id, username, display_name, instructor_id, notify_booking_events, notify_instructor_only, created_at FROM admins ORDER BY COALESCE(username_lower, ''), COALESCE(display_name, ''), tg_id"
         )
         rows = cur.fetchall()
     return rows
@@ -114,7 +126,13 @@ def is_admin(tg_id: Optional[int], username: Optional[str]) -> bool:
 
 
 def add_admin(
-    *, tg_id: Optional[int], username: Optional[str], display_name: Optional[str] = None
+    *,
+    tg_id: Optional[int],
+    username: Optional[str],
+    display_name: Optional[str] = None,
+    instructor_id: Optional[int] = None,
+    notify_booking_events: Optional[bool] = None,
+    notify_instructor_only: Optional[bool] = None,
 ) -> Tuple[bool, Dict]:
     """Insert or update an admin.
 
@@ -144,12 +162,15 @@ def add_admin(
 
         if existing:
             cur.execute(
-                "UPDATE admins SET tg_id = COALESCE(%s, tg_id), username = COALESCE(%s, username), username_lower = COALESCE(%s, username_lower), display_name = COALESCE(%s, display_name) WHERE id = %s RETURNING id, tg_id, username, display_name, created_at",
+                "UPDATE admins SET tg_id = COALESCE(%s, tg_id), username = COALESCE(%s, username), username_lower = COALESCE(%s, username_lower), display_name = COALESCE(%s, display_name), instructor_id = COALESCE(%s, instructor_id), notify_booking_events = COALESCE(%s, notify_booking_events), notify_instructor_only = COALESCE(%s, notify_instructor_only) WHERE id = %s RETURNING id, tg_id, username, display_name, instructor_id, notify_booking_events, notify_instructor_only, created_at",
                 (
                     tg_id,
                     username_clean,
                     username_lower,
                     display_value,
+                    instructor_id,
+                    notify_booking_events,
+                    notify_instructor_only,
                     existing["id"],
                 ),
             )
@@ -158,17 +179,67 @@ def add_admin(
             return False, record
         else:
             cur.execute(
-                "INSERT INTO admins (tg_id, username, username_lower, display_name) VALUES (%s, %s, %s, %s) RETURNING id, tg_id, username, display_name, created_at",
+                "INSERT INTO admins (tg_id, username, username_lower, display_name, instructor_id, notify_booking_events, notify_instructor_only) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id, tg_id, username, display_name, instructor_id, notify_booking_events, notify_instructor_only, created_at",
                 (
                     tg_id,
                     username_clean,
                     username_lower,
                     display_value,
+                    instructor_id,
+                    notify_booking_events if notify_booking_events is not None else True,
+                    notify_instructor_only if notify_instructor_only is not None else False,
                 ),
             )
             record = cur.fetchone()
             conn.commit()
             return True, record
+
+
+def update_admin(
+    admin_id: int,
+    *,
+    tg_id: Optional[int] = None,
+    username: Optional[str] = None,
+    display_name: Optional[str] = None,
+    instructor_id: Optional[int] = None,
+    notify_booking_events: Optional[bool] = None,
+    notify_instructor_only: Optional[bool] = None,
+) -> Optional[Dict]:
+    """Update an admin record by id."""
+    ensure_admin_table()
+    username_clean = _sanitize_username(username)
+    username_lower = _normalize_username(username)
+    display_value = display_name.strip() if isinstance(display_name, str) else display_name
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            UPDATE admins
+            SET
+                tg_id = COALESCE(%s, tg_id),
+                username = COALESCE(%s, username),
+                username_lower = COALESCE(%s, username_lower),
+                display_name = COALESCE(%s, display_name),
+                instructor_id = COALESCE(%s, instructor_id),
+                notify_booking_events = COALESCE(%s, notify_booking_events),
+                notify_instructor_only = COALESCE(%s, notify_instructor_only)
+            WHERE id = %s
+            RETURNING id, tg_id, username, display_name, instructor_id, notify_booking_events, notify_instructor_only, created_at
+            """,
+            (
+                tg_id,
+                username_clean,
+                username_lower,
+                display_value,
+                instructor_id,
+                notify_booking_events,
+                notify_instructor_only,
+                admin_id,
+            ),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        return row
 
 
 def remove_admin(*, tg_id: Optional[int], username: Optional[str]) -> bool:
@@ -184,3 +255,40 @@ def remove_admin(*, tg_id: Optional[int], username: Optional[str]) -> bool:
         deleted = cur.rowcount > 0
         conn.commit()
     return deleted
+
+
+def list_admins_by_instructor(instructor_id: int) -> List[Dict]:
+    """Return admins mapped to a specific instructor_id."""
+    ensure_admin_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, tg_id, username, display_name, instructor_id, created_at FROM admins WHERE instructor_id = %s",
+            (instructor_id,),
+        )
+        return cur.fetchall()
+
+
+def get_admin(admin_id: int) -> Optional[Dict]:
+    """Return a single admin by id."""
+    ensure_admin_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            "SELECT id, tg_id, username, display_name, instructor_id, notify_booking_events, notify_instructor_only, created_at FROM admins WHERE id = %s",
+            (admin_id,),
+        )
+        row = cur.fetchone()
+    return row
+
+
+def list_admins_for_notifications() -> List[Dict]:
+    """Admins that can receive booking/cancel events."""
+    ensure_admin_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT id, tg_id, username, display_name, instructor_id, notify_booking_events, notify_instructor_only
+            FROM admins
+            WHERE tg_id IS NOT NULL AND (notify_booking_events IS NULL OR notify_booking_events = TRUE)
+            """
+        )
+        return cur.fetchall()

@@ -192,6 +192,9 @@ export interface AdminRow {
   tg_id?: number | null;
   username?: string | null;
   display_name?: string | null;
+  instructor_id?: number | null;
+  notify_booking_events?: boolean | null;
+  notify_instructor_only?: boolean | null;
   created_at?: string | null;
 }
 
@@ -391,6 +394,27 @@ export interface WorkoutNotification {
 
 export interface WorkoutNotificationListResponse {
   items: WorkoutNotification[];
+  pagination: Pagination;
+}
+
+export interface PulseNotification {
+  id: number;
+  event_type: string;
+  client_id: number | null;
+  client_name: string | null;
+  slot_date: string | null;
+  start_time: string | null;
+  slot_label: string | null;
+  stand_label: string | null;
+  bike_label: string | null;
+  source: string | null;
+  message_text: string | null;
+  payload: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface PulseNotificationListResponse {
+  items: PulseNotification[];
   pagination: Pagination;
 }
 

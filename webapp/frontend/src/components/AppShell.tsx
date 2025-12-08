@@ -35,6 +35,7 @@ const MESSAGE_NAV_LINKS: readonly NavLinkConfig[] = [
 ] as const;
 
 const SERVICE_NAV_LINKS: readonly NavLinkConfig[] = [
+  { to: "/pulse", label: "❤️ Pulse", adminOnly: true },
   { to: "/schedule/notifications", label: "🔔 Уведомления", adminOnly: true },
   { to: "/activities", label: "🚴 Активности", adminOnly: true },
   { to: "/sync", label: "🔄 Синхронизация", adminOnly: true },

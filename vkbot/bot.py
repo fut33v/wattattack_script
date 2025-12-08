@@ -3,15 +3,17 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from typing import Any, Dict, List, Optional
-from zoneinfo import ZoneInfo
 
 import vk_api
 from vk_api.bot_longpoll import VkBotEventType, VkBotLongPoll
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 from vk_api.utils import get_random_id
 
+from booking import notifications as booking_notifications
+from booking import service as booking_service
+from notifications import admin as admin_notifications
 from repositories import client_repository, schedule_repository
 from repositories.vk_client_link_repository import get_link_by_vk_user, link_vk_user_to_client
 from .formatting import (
@@ -27,6 +29,7 @@ from .matchers import match_booking_text, match_cancel_text, match_day_text, mat
 log = logging.getLogger(__name__)
 
 DEFAULT_GREETING = "Привет!"
+_PAGE_SIZE = 4
 WHAT_TO_BRING_TEXT = (
     "⛹️‍♂️ Что взять с собой в КРУТИЛКУ ⛹️‍♀️\n\n"
     "Чтобы тренировка была комфортной, подготовьте:\n"
@@ -38,8 +41,8 @@ WHAT_TO_BRING_TEXT = (
     "Собирайте рюкзак и увидимся на тренировке!"
 )
 HOW_TO_GET_ATTACHMENT = "video-232708853_456239017"
-_LOCAL_TZ = ZoneInfo("Europe/Moscow")
-_BOOKING_CUTOFF = timedelta(minutes=90)
+_LOCAL_TZ = booking_service.LOCAL_TZ
+_BOOKING_CUTOFF = booking_service.BOOKING_CUTOFF
 _STATE: Dict[int, Dict[str, Any]] = {}
 _NEW_CLIENT_STEPS: List[Dict[str, str]] = [
     {"key": "weight", "prompt": "Введите ваш вес в кг (например, 72.5)."},
@@ -166,6 +169,18 @@ def _handle_message_event(event, vk, greeting: str) -> None:
             _send_text(vk, peer_id, "Не понял запись. Попробуйте снова.")
             return
         _show_booking_details(peer_id, user_id, reservation_id, vk)
+    elif action == "cancel_page":
+        try:
+            page = int(payload.get("page", 0))
+        except Exception:
+            page = 0
+        _show_cancellable(peer_id, user_id, vk, page=page)
+    elif action == "booking_page":
+        try:
+            page = int(payload.get("page", 0))
+        except Exception:
+            page = 0
+        _show_future_bookings(peer_id, user_id, vk, page=page)
     elif action == "close":
         _reset_to_main(peer_id, vk)
     elif action == "how_to_get":
@@ -227,14 +242,30 @@ def _handle_stateful_message(peer_id: int, user_id: Optional[int], text: str, vk
     if lowered in {"что взять", "что взять с собой"}:
         _send_text(vk, peer_id, WHAT_TO_BRING_TEXT, keyboard=build_inline_keyboard())
         return True
-    if payload_data and payload_data.get("action") == "slots_page":
-        date_str = payload_data.get("date")
-        try:
-            page = int(payload_data.get("page", 0))
-        except Exception:
-            page = 0
-        _show_slots_for_day(peer_id, user_id or peer_id, date_str, vk, page=page)
-        return True
+    if payload_data:
+        action = payload_data.get("action")
+        if action == "slots_page":
+            date_str = payload_data.get("date")
+            try:
+                page = int(payload_data.get("page", 0))
+            except Exception:
+                page = 0
+            _show_slots_for_day(peer_id, user_id or peer_id, date_str, vk, page=page)
+            return True
+        if action == "cancel_page":
+            try:
+                page = int(payload_data.get("page", 0))
+            except Exception:
+                page = 0
+            _show_cancellable(peer_id, user_id or peer_id, vk, page=page)
+            return True
+        if action == "booking_page":
+            try:
+                page = int(payload_data.get("page", 0))
+            except Exception:
+                page = 0
+            _show_future_bookings(peer_id, user_id or peer_id, vk, page=page)
+            return True
 
     state = _get_state(peer_id)
     mode = state.get("mode")
@@ -320,18 +351,7 @@ def _reset_to_main(peer_id: int, vk) -> None:
 
 
 def _local_now() -> datetime:
-    return datetime.now(tz=_LOCAL_TZ)
-
-
-def _slot_start_datetime(slot: Dict[str, Any]) -> Optional[datetime]:
-    try:
-        slot_date = slot.get("slot_date")
-        start_time_val = slot.get("start_time")
-        if isinstance(slot_date, date) and isinstance(start_time_val, time):
-            return datetime.combine(slot_date, start_time_val, tzinfo=_LOCAL_TZ)
-    except Exception:
-        return None
-    return None
+    return booking_service.local_now()
 
 
 def _get_linked_client(peer_id: int) -> tuple[Optional[Dict], Optional[Dict]]:
@@ -604,6 +624,19 @@ def _finalize_new_client(peer_id: int, vk) -> None:
         state.pop("mode", None)
         return
 
+    # Persist notification about new client
+    try:
+        booking_notifications.notify_client_created(
+            booking_notifications.ClientCreatedNotification(
+                client_id=client.get("id") if isinstance(client.get("id"), int) else None,
+                client_name=format_client_name(client),
+                source="vkbot",
+                payload={"peer_id": peer_id},
+            )
+        )
+    except Exception:
+        log.debug("Failed to record client_created notification", exc_info=True)
+
     _link_client(peer_id, client, vk)
 
 
@@ -641,29 +674,11 @@ def _normalize_pedals_choice(text: str) -> Optional[str]:
 
 
 def _filter_slots() -> List[Dict[str, Any]]:
-    now_local = _local_now()
-    horizon = now_local + timedelta(days=21)
-    if horizon <= now_local + _BOOKING_CUTOFF:
-        horizon = now_local + _BOOKING_CUTOFF + timedelta(days=1)
-
     try:
-        slots_raw = schedule_repository.list_available_slots(
-            now_local.replace(tzinfo=None),
-            horizon.replace(tzinfo=None),
-        )
+        return booking_service.list_bookable_slots_for_horizon(now=_local_now())
     except Exception:
         log.exception("Failed to load available slots")
         return []
-
-    slots: List[Dict[str, Any]] = []
-    for slot in slots_raw:
-        start_dt = _slot_start_datetime(slot)
-        if start_dt is None:
-            continue
-        if start_dt - now_local < _BOOKING_CUTOFF:
-            continue
-        slots.append(slot)
-    return slots
 
 
 def _start_booking(peer_id: int, user_id: int, vk) -> None:
@@ -678,7 +693,7 @@ def _start_booking(peer_id: int, user_id: int, vk) -> None:
         return
 
     # Group by day
-    day_slots = _group_slots_by_day(slots)
+    day_slots = booking_service.group_slots_by_day(slots)
     if not day_slots:
         _send_text(vk, peer_id, "Свободных слотов пока нет. Попробуйте позже.")
         return
@@ -700,23 +715,7 @@ def _start_booking(peer_id: int, user_id: int, vk) -> None:
 
 
 def _group_slots_by_day(slots: List[Dict[str, Any]]) -> List[tuple[date, List[Dict[str, Any]]]]:
-    grouped: Dict[date, List[Dict[str, Any]]] = {}
-    for slot in slots:
-        slot_date = slot.get("slot_date")
-        if isinstance(slot_date, date):
-            grouped.setdefault(slot_date, []).append(slot)
-    # Sort by date, slots per date by start_time
-    result: List[tuple[date, List[Dict[str, Any]]]] = []
-    for day in sorted(grouped.keys()):
-        sorted_slots = sorted(
-            grouped[day],
-            key=lambda s: (
-                s.get("start_time") if isinstance(s.get("start_time"), time) else time.min,
-                s.get("id") or 0,
-            ),
-        )
-        result.append((day, sorted_slots))
-    return result
+    return booking_service.group_slots_by_day(slots)
 
 
 def _show_slots_for_day(peer_id: int, user_id: int, date_str: Optional[str], vk, *, page: int = 0) -> None:
@@ -782,13 +781,6 @@ def _send_slots_keyboard(peer_id: int, slots: List[Dict[str, Any]], vk, *, date_
     return current_page
 
 
-def _pick_available_reservation(slot: Dict[str, Any]) -> Optional[Dict]:
-    for res in slot.get("reservations") or []:
-        if (res.get("status") or "").lower() == "available":
-            return res
-    return None
-
-
 def _confirm_slot(peer_id: int, user_id: int, slot_id: int, vk) -> None:
     link, client = _get_linked_client(peer_id)
     if not link or not client:
@@ -801,51 +793,65 @@ def _confirm_slot(peer_id: int, user_id: int, slot_id: int, vk) -> None:
         return
 
     try:
-        slot = schedule_repository.get_slot_with_reservations(slot_id)
-    except Exception:
-        log.exception("Failed to load slot %s", slot_id)
-        _send_text(vk, peer_id, "Не удалось загрузить слот. Попробуйте снова.")
-        return
-
-    if not slot:
-        _send_text(vk, peer_id, "Слот не найден.")
-        return
-
-    # Prevent double-booking the same slot for this client
-    if _has_existing_booking(client_id, slot_id):
+        booking_result = booking_service.book_slot(slot_id, client_id, format_client_name(client), source="vkbot")
+    except booking_service.AlreadyBooked:
         _send_text(vk, peer_id, "У вас уже есть запись на этот слот.")
         return
-
-    reservation = _pick_available_reservation(slot)
-    if not reservation:
+    except booking_service.NoFreePlace:
         _send_text(vk, peer_id, "Свободных мест не осталось. Попробуйте другой слот.")
         return
-
-    client_name = format_client_name(client)
-    reservation_id = reservation.get("id")
-    if not isinstance(reservation_id, int):
-        _send_text(vk, peer_id, "Не удалось выбрать место в этом слоте.")
+    except booking_service.SlotNotFound:
+        _send_text(vk, peer_id, "Слот не найден.")
         return
-
-    try:
-        booked = schedule_repository.book_available_reservation(
-            reservation_id,
-            client_id=client_id,
-            client_name=client_name,
-            status="booked",
-            source="vkbot",
-        )
-    except Exception:
-        log.exception("Failed to book reservation %s for client %s", reservation_id, client_id)
+    except booking_service.BookingError:
         _send_text(vk, peer_id, "Не удалось записать. Попробуйте другой слот.")
         return
 
-    if not booked:
-        _send_text(vk, peer_id, "Не удалось записать: место уже занято.")
-        return
-
-    confirmation = _format_booking_confirmation(client_name, slot, reservation)
+    client_name = format_client_name(client)
+    confirmation = _format_booking_confirmation(client_name, booking_result.slot, booking_result.reservation)
     _send_text(vk, peer_id, confirmation, keyboard=build_inline_keyboard())
+    try:
+        slot_date = booking_result.slot.get("slot_date")
+        start_time = booking_result.slot.get("start_time")
+        stand_label = booking_result.reservation.get("stand_code") or booking_result.reservation.get("stand_id")
+        session_kind = booking_result.slot.get("session_kind") or booking_result.slot.get("slot_type") or "self_service"
+        bike_title = (booking_result.reservation.get("bike_title") or "").strip()
+        bike_owner = (booking_result.reservation.get("bike_owner") or "").strip()
+        bike_label = None
+        if bike_title and bike_owner:
+            bike_label = f"{bike_title} ({bike_owner})"
+        elif bike_title or bike_owner:
+            bike_label = bike_title or bike_owner
+        message = booking_notifications.format_booking_created_message(
+            client_name=client_name,
+            slot_date=slot_date if isinstance(slot_date, date) else None,
+            start_time=start_time if isinstance(start_time, time) else None,
+            stand_label=str(stand_label) if stand_label else None,
+            bike_label=bike_label,
+            session_kind=session_kind,
+            instructor_name=(booking_result.slot.get("instructor_name") or "").strip() or None,
+            source="vkbot",
+        )
+        _fanout_telegram_notification(
+            text=message,
+            instructor_id=booking_result.slot.get("instructor_id"),
+        )
+        booking_notifications.notify_booking_created(
+            booking_notifications.BookingNotification(
+                client_id=client_id,
+                client_name=client_name,
+                slot_date=slot_date if isinstance(slot_date, date) else None,
+                start_time=start_time if isinstance(start_time, time) else None,
+                slot_label=(booking_result.slot.get("label") or "").strip() or None,
+                stand_label=str(stand_label) if stand_label else None,
+                bike_label=bike_label,
+                source="vkbot",
+                message_text=message,
+                payload={"slot_id": booking_result.slot.get("id")},
+            )
+        )
+    except Exception:
+        log.debug("Failed to record booking notification", exc_info=True)
 
 
 def _format_booking_confirmation(client_name: str, slot: Dict[str, Any], reservation: Dict[str, Any]) -> str:
@@ -880,7 +886,7 @@ def _show_profile(peer_id: int, user_id: int, vk, greeting: str) -> None:
     _send_text(vk, peer_id, text, keyboard=build_inline_keyboard())
 
 
-def _show_cancellable(peer_id: int, user_id: int, vk) -> None:
+def _show_cancellable(peer_id: int, user_id: int, vk, *, page: int = 0) -> None:
     link, client = _get_linked_client(peer_id)
     if not link or not client:
         _prompt_link(peer_id, vk)
@@ -906,9 +912,16 @@ def _show_cancellable(peer_id: int, user_id: int, vk) -> None:
     state = _get_state(peer_id)
     state["mode"] = "cancel_select"
     state["cancel_map"] = {res["id"]: res for res in reservations if isinstance(res.get("id"), int)}
+    state["cancel_list"] = reservations
+
+    total_pages = max(1, (len(reservations) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * _PAGE_SIZE
+    end = start + _PAGE_SIZE
+    page_items = reservations[start:end]
 
     keyboard = VkKeyboard(inline=True)
-    for res in reservations[:10]:
+    for res in page_items:
         res_id = res.get("id")
         if not isinstance(res_id, int):
             continue
@@ -918,11 +931,17 @@ def _show_cancellable(peer_id: int, user_id: int, vk) -> None:
             payload={"action": "cancel_reservation", "reservation_id": res_id},
         )
         keyboard.add_line()
+
+    if total_pages > 1:
+        if page > 0:
+            keyboard.add_button("←", color=VkKeyboardColor.SECONDARY, payload={"action": "cancel_page", "page": page - 1})
+        if page < total_pages - 1:
+            keyboard.add_button("→", color=VkKeyboardColor.SECONDARY, payload={"action": "cancel_page", "page": page + 1})
     keyboard.add_button("Закрыть", color=VkKeyboardColor.NEGATIVE, payload={"action": "close"})
     _send_text(vk, peer_id, "Выберите запись для отмены:", keyboard=keyboard.get_keyboard())
 
 
-def _show_future_bookings(peer_id: int, user_id: int, vk) -> None:
+def _show_future_bookings(peer_id: int, user_id: int, vk, *, page: int = 0) -> None:
     link, client = _get_linked_client(peer_id)
     if not link or not client:
         _prompt_link(peer_id, vk)
@@ -948,9 +967,16 @@ def _show_future_bookings(peer_id: int, user_id: int, vk) -> None:
     state = _get_state(peer_id)
     state["mode"] = "booking_list"
     state["booking_map"] = {res["id"]: res for res in reservations if isinstance(res.get("id"), int)}
+    state["booking_list"] = reservations
+
+    total_pages = max(1, (len(reservations) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * _PAGE_SIZE
+    end = start + _PAGE_SIZE
+    page_items = reservations[start:end]
 
     keyboard = VkKeyboard(inline=True)
-    for idx, res in enumerate(reservations[:10]):
+    for idx, res in enumerate(page_items):
         res_id = res.get("id")
         if not isinstance(res_id, int):
             continue
@@ -959,9 +985,13 @@ def _show_future_bookings(peer_id: int, user_id: int, vk) -> None:
             color=VkKeyboardColor.PRIMARY,
             payload={"action": "booking_details", "reservation_id": res_id},
         )
-        if idx != len(reservations[:10]) - 1:
+        if idx != len(page_items) - 1:
             keyboard.add_line()
-    keyboard.add_line()
+    if total_pages > 1:
+        if page > 0:
+            keyboard.add_button("←", color=VkKeyboardColor.SECONDARY, payload={"action": "booking_page", "page": page - 1})
+        if page < total_pages - 1:
+            keyboard.add_button("→", color=VkKeyboardColor.SECONDARY, payload={"action": "booking_page", "page": page + 1})
     keyboard.add_button("Закрыть", color=VkKeyboardColor.NEGATIVE, payload={"action": "close"})
     _send_text(vk, peer_id, "Ваши будущие записи:", keyboard=keyboard.get_keyboard())
 
@@ -1011,6 +1041,41 @@ def _cancel_reservation(peer_id: int, user_id: int, reservation_id: int, vk) -> 
         return
 
     _send_text(vk, peer_id, "Запись отменена. Можете выбрать другой слот.", keyboard=build_inline_keyboard())
+    try:
+        slot_id = reservation.get("slot_id")
+        slot = None
+        if isinstance(slot_id, int):
+            slot = schedule_repository.get_slot_with_reservations(slot_id)
+        slot_date = slot.get("slot_date") if slot else reservation.get("slot_date")
+        start_time = slot.get("start_time") if slot else reservation.get("start_time")
+        stand_label = reservation.get("stand_code") or reservation.get("stand_id")
+        message = booking_notifications.format_booking_cancelled_message(
+            client_name=format_client_name(client),
+            slot_date=slot_date if isinstance(slot_date, date) else None,
+            start_time=start_time if isinstance(start_time, time) else None,
+            stand_label=str(stand_label) if stand_label else None,
+            source="vkbot",
+        )
+        booking_notifications.notify_booking_cancelled(
+            booking_notifications.BookingNotification(
+                client_id=client_id,
+                client_name=format_client_name(client),
+                slot_date=slot_date if isinstance(slot_date, date) else None,
+                start_time=start_time if isinstance(start_time, time) else None,
+                slot_label=(slot.get("label") if slot else reservation.get("label")) or None,
+                stand_label=str(stand_label) if stand_label else None,
+                bike_label=None,
+                source="vkbot",
+                message_text=message,
+                payload={"slot_id": slot_id, "reservation_id": reservation_id, "instructor_id": (slot or reservation).get("instructor_id")},
+            )
+        )
+        _fanout_telegram_notification(
+            text=message,
+            instructor_id=(slot or reservation).get("instructor_id"),
+        )
+    except Exception:
+        log.debug("Failed to record cancellation notification", exc_info=True)
     # Clear cancellation state
     state = _get_state(peer_id)
     state.pop("cancel_map", None)
@@ -1061,21 +1126,12 @@ def _show_booking_details(peer_id: int, user_id: int, reservation_id: int, vk) -
     keyboard.add_line()
     keyboard.add_button("Закрыть", color=VkKeyboardColor.SECONDARY, payload={"action": "close"})
     _send_text(vk, peer_id, details, keyboard=keyboard.get_keyboard())
-
-
-def _has_existing_booking(client_id: int, slot_id: int) -> bool:
-    """Check if client already has a booking for the given slot."""
-    now_naive = _local_now().replace(tzinfo=None)
-    try:
-        reservations = schedule_repository.list_future_reservations_for_client(client_id, now_naive)
-    except Exception:
-        log.exception("Failed to check existing bookings for client %s", client_id)
-        return False
-
-    for res in reservations:
-        if res.get("slot_id") != slot_id:
-            continue
-        status = (res.get("status") or "").lower()
-        if status not in {"cancelled", "legacy", "blocked"}:
-            return True
-    return False
+def _fanout_telegram_notification(*, text: str, instructor_id: Optional[int]) -> None:
+    """Send notification text to Telegram admins respecting instructor filtering."""
+    admin_ids = admin_notifications.resolve_admin_chat_ids(instructor_id=instructor_id)
+    if not admin_ids:
+        return
+    delivered = admin_notifications.notify_admins_blocking(text, admin_ids=admin_ids)
+    for admin_id in admin_ids:
+        if admin_id not in delivered:
+            log.debug("Failed to send admin notification to %s", admin_id)

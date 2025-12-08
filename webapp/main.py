@@ -41,6 +41,7 @@ from .routes.backup import router as backup_router
 from .routes.stats import router as stats_router
 from .routes.wattattack_accounts import router as wattattack_accounts_router
 from .routes.groups import router as groups_router
+from .routes.pulse import router as pulse_router
 
 
 BASE_DIR = Path(__file__).parent
@@ -94,6 +95,7 @@ api.include_router(backup_router)
 api.include_router(stats_router)
 api.include_router(wattattack_accounts_router)
 api.include_router(groups_router)
+api.include_router(pulse_router)
 
 
 def _apply_dev_favicon(html: str, *, enabled: bool) -> str:

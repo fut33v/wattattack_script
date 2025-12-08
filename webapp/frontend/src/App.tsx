@@ -14,12 +14,14 @@ import BikesPage from "./pages/BikesPage";
 import TrainersPage from "./pages/TrainersPage";
 import ClientLinksPage from "./pages/ClientLinksPage";
 import AdminsPage from "./pages/AdminsPage";
+import AdminDetailPage from "./pages/AdminDetailPage";
 import SchedulePage from "./pages/SchedulePage";
 import InstructorsPage from "./pages/InstructorsPage";
 import NotificationsPage from "./pages/NotificationsPage";
 import NotificationSettingsPage from "./pages/NotificationSettingsPage";
 import MessagingPage from "./pages/MessagingPage";
 import MessagesPage from "./pages/MessagesPage";
+import PulsePage from "./pages/PulsePage";
 import ActivitiesPage from "./pages/ActivitiesPage";
 import ActivityDetailPage from "./pages/ActivityDetailPage";
 import SyncPage from "./pages/SyncPage";
@@ -76,6 +78,7 @@ export default function App() {
           <Route path="/schedule/:slug" element={<ScheduleViewPage />} />
           <Route path="/schedule/manage" element={<SchedulePage />} />
           <Route path="/schedule/slot/:id" element={<SlotSeatingPage />} />
+          <Route path="/pulse" element={<PulsePage />} />
           <Route path="/schedule/notifications" element={<NotificationsPage />} />
           <Route path="/activities/:accountId/:activityId" element={<ActivityDetailPage />} />
           <Route path="/activities" element={<ActivitiesPage />} />
@@ -94,6 +97,7 @@ export default function App() {
           <Route path="/groups" element={<GroupsPage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="/admins" element={<AdminsPage />} />
+          <Route path="/admins/:id" element={<AdminDetailPage />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </AppShell>

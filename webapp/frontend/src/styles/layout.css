@@ -2365,6 +2365,21 @@ button.secondary:hover {
   width: 150px;
 }
 
+.admin-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.admin-actions--inline {
+  justify-content: flex-end;
+}
+
+.button.small {
+  padding: 6px 10px;
+  min-height: 32px;
+}
+
 .state-screen {
   display: grid;
   place-items: center;
