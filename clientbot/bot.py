@@ -3663,6 +3663,7 @@ def create_application(token: str, greeting: str = DEFAULT_GREETING) -> Applicat
         fallbacks=[CommandHandler("cancel", _booking_cancel_command)],
         name="schedule_booking",
         persistent=False,
+        allow_reentry=True,
     )
     application.add_handler(booking_conversation)
     race_conversation = ConversationHandler(
