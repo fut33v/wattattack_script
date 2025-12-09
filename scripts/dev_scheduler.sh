@@ -5,19 +5,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-if [ -f .env ]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
-fi
+. "$ROOT/scripts/dev_env.sh"
 
-export DB_HOST="${DB_HOST:-localhost}"
-export DB_PORT="${DB_PORT:-5432}"
-export DB_NAME="${DB_NAME:-wattattack}"
-export DB_USER="${DB_USER:-wattattack}"
-export DB_PASSWORD="${DB_PASSWORD:-wattattack}"
-export WATTATTACK_ACCOUNTS_FILE="${WATTATTACK_ACCOUNTS_FILE:-$ROOT/accounts.json}"
+# Stop previous scheduler instance to avoid duplicate runs
+pkill -fi "scheduler" >/dev/null 2>&1 || true
 
 STATE_DIR="${STATE_DIR:-$ROOT/notifier_state}"
 mkdir -p "$STATE_DIR"

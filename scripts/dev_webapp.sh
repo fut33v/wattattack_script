@@ -5,22 +5,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-if [ -f .env ]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
-fi
+. "$ROOT/scripts/dev_env.sh"
 
-export DB_HOST="${DB_HOST:-localhost}"
-export DB_PORT="${DB_PORT:-5432}"
-export DB_NAME="${DB_NAME:-wattattack}"
-export DB_USER="${DB_USER:-wattattack}"
-export DB_PASSWORD="${DB_PASSWORD:-wattattack}"
+# Stop previous webapp dev server to free the port
+pkill -fi "uvicorn webapp.main:app" >/dev/null 2>&1 || true
 
 if [ ! -x venv/bin/python ]; then
   echo "venv not found; create it with: python -m venv venv && source venv/bin/activate && pip install -r requirements.txt" >&2
   exit 1
 fi
 
-exec venv/bin/python -m uvicorn webapp.main:app --reload --host 0.0.0.0 --port "${PORT:-8000}"
+exec venv/bin/python -m uvicorn webapp.main:app --reload --host 0.0.0.0 --port "${PORT:-3002}"
