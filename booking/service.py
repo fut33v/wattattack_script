@@ -12,7 +12,7 @@ from repositories import schedule_repository
 log = logging.getLogger(__name__)
 
 LOCAL_TZ = ZoneInfo("Europe/Moscow")
-BOOKING_CUTOFF = timedelta(minutes=90)
+BOOKING_CUTOFF = timedelta(0)
 
 
 def local_now() -> datetime:

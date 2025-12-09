@@ -706,7 +706,7 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
     slot_start_dt = _slot_start_datetime(slot)
     if slot_start_dt is not None:
         if slot_start_dt - _local_now() < _BOOKING_CUTOFF:
-            await query.answer("До начала менее 1,5 часов, слот недоступен для брони.", show_alert=True)
+            await query.answer("Слот уже начался или закончился, выберите другой.", show_alert=True)
             success = await _edit_day_selection_message(query, context)
             if not success:
                 await query.edit_message_text("Выберите другой слот при следующей попытке.")
