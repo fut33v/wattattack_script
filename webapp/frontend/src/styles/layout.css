@@ -244,6 +244,25 @@
   gap: 1.2rem;
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.collapse-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.95rem;
+}
+
+.collapse-toggle .chevron {
+  font-size: 0.95rem;
+}
+
 .instructors-layout {
   display: grid;
   grid-template-columns: minmax(240px, 320px) 1fr;

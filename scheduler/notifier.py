@@ -29,6 +29,8 @@ from repositories.schedule_repository import (
     get_seen_activity_ids_for_account,
     record_account_assignment,
     was_account_assignment_done,
+    record_assignment_notification,
+    was_assignment_notification_sent,
     find_reservation_by_client_name,
     ensure_fit_files_dir,
     list_activities_missing_fit,
@@ -65,6 +67,9 @@ DEFAULT_ASSIGN_LEAD_MINUTES = int(os.environ.get("WATTATTACK_ASSIGN_LEAD_MINUTES
 DEFAULT_ASSIGN_WINDOW_MINUTES = int(os.environ.get("WATTATTACK_ASSIGN_WINDOW_MINUTES", "10"))
 ASSIGN_ENABLE = os.environ.get("WATTATTACK_ASSIGN_ENABLED", "false").lower() in {"1", "true", "yes"}
 LOCAL_TIMEZONE = ZoneInfo(os.environ.get("WATTATTACK_LOCAL_TZ", "Europe/Moscow"))
+DEV_BUILD = os.environ.get("DEV_BUILD", "").lower() in {"1", "true", "yes"}
+LAST_ASSIGNMENT_NOTIFICATION_KEYS: set[tuple[str, int]] = set()
+LAST_ASSIGNMENT_NOTIFICATION_STATUS: Optional[str] = None
 
 
 class TZFormatter(logging.Formatter):
@@ -372,6 +377,8 @@ def assign_clients_to_accounts(
         LOGGER.debug("Auto-assignment disabled (lead=%s, window=%s)", lead_minutes, window_minutes)
         return
 
+    notification_status_default = "observed" if dry_run or not ASSIGN_ENABLE or DEV_BUILD else "applied"
+
     stand_accounts: Dict[int, Dict[str, Any]] = {}
     for account_id, account in accounts.items():
         for stand_id in account.get("stand_ids") or []:
@@ -430,6 +437,16 @@ def assign_clients_to_accounts(
             )
             continue
 
+        notification_status = notification_status_default
+        if was_assignment_notification_sent(reservation_id, account_id, notification_status):
+            LOGGER.debug(
+                "Notification already sent for reservation %s to account %s with status %s",
+                reservation_id,
+                account_id,
+                notification_status,
+            )
+            continue
+
         try:
             client = get_client(client_id)
         except Exception:
@@ -465,7 +482,7 @@ def assign_clients_to_accounts(
             )
             continue
 
-        if ASSIGN_ENABLE and not dry_run:
+        if ASSIGN_ENABLE and not dry_run and not DEV_BUILD:
             try:
                 apply_wattattack_profile(
                     account_id=account_id,
@@ -497,6 +514,7 @@ def assign_clients_to_accounts(
         applied += 1
         notifications.append(
             {
+                "reservation_id": reservation_id,
                 "account_label": account_label,
                 "account_id": account_id,
                 "client_name": client_name,
@@ -511,8 +529,26 @@ def assign_clients_to_accounts(
     else:
         LOGGER.debug("No auto-assignments were performed in this cycle")
 
+    if notification_status_default == "observed" and DEV_BUILD:
+        status_note = "наблюдаем (DEV_BUILD)"
+    elif notification_status_default == "observed":
+        status_note = "наблюдаем"
+    else:
+        status_note = "назначили"
+    notification_keys = {(row["account_id"], row["reservation_id"]) for row in notifications}
+    global LAST_ASSIGNMENT_NOTIFICATION_KEYS, LAST_ASSIGNMENT_NOTIFICATION_STATUS
+    if (
+        notifications
+        and notification_keys == LAST_ASSIGNMENT_NOTIFICATION_KEYS
+        and status_note == LAST_ASSIGNMENT_NOTIFICATION_STATUS
+    ):
+        LOGGER.debug(
+            "Assignment notification already sent for %d reservations, skipping duplicate",
+            len(notification_keys),
+        )
+        return
+
     if notifications and bot_token and admin_ids:
-        status_note = "наблюдаем" if dry_run or not ASSIGN_ENABLE else "назначили"
         header = f"🕘 Ближайшие смены ({status_note}):"
         lines = []
         for row in notifications:
@@ -532,6 +568,21 @@ def assign_clients_to_accounts(
                 )
             except requests.HTTPError:
                 LOGGER.warning("Failed to notify admin %s about assignments list", chat_id)
+        for row in notifications:
+            try:
+                record_assignment_notification(
+                    row["reservation_id"],
+                    row["account_id"],
+                    notification_status_default,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "Failed to record assignment notification for reservation %s, account %s",
+                    row["reservation_id"],
+                    row["account_id"],
+                )
+    LAST_ASSIGNMENT_NOTIFICATION_KEYS = notification_keys
+    LAST_ASSIGNMENT_NOTIFICATION_STATUS = status_note
 
 
 def send_activity_fit(

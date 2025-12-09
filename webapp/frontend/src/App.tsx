@@ -22,6 +22,7 @@ import NotificationSettingsPage from "./pages/NotificationSettingsPage";
 import MessagingPage from "./pages/MessagingPage";
 import MessagesPage from "./pages/MessagesPage";
 import PulsePage from "./pages/PulsePage";
+import ServiceAssignmentsPage from "./pages/ServiceAssignmentsPage";
 import ActivitiesPage from "./pages/ActivitiesPage";
 import ActivityDetailPage from "./pages/ActivityDetailPage";
 import SyncPage from "./pages/SyncPage";
@@ -79,6 +80,7 @@ export default function App() {
           <Route path="/schedule/manage" element={<SchedulePage />} />
           <Route path="/schedule/slot/:id" element={<SlotSeatingPage />} />
           <Route path="/pulse" element={<PulsePage />} />
+          <Route path="/service/assignments" element={<ServiceAssignmentsPage />} />
           <Route path="/schedule/notifications" element={<NotificationsPage />} />
           <Route path="/activities/:accountId/:activityId" element={<ActivityDetailPage />} />
           <Route path="/activities" element={<ActivitiesPage />} />

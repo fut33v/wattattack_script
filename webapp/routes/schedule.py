@@ -765,6 +765,60 @@ def api_get_workout_notifications(page: int = 1, user=Depends(require_user)):
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch notifications") from exc
 
 
+@router.get("/assignment-notifications")
+def api_get_assignment_notifications(page: int = 1, user=Depends(require_admin)):
+    """List assignment notification rows."""
+
+    page = max(page, 1)
+    limit = 50
+    offset = (page - 1) * limit
+
+    try:
+        total_count = schedule_repository.count_assignment_notifications()
+        notifications = schedule_repository.list_assignment_notifications(limit=limit, offset=offset)
+        total_pages = max(math.ceil(total_count / limit), 1) if total_count > 0 else 1
+
+        return {
+            "items": jsonable_encoder(notifications),
+            "pagination": {
+                "page": page,
+                "pageSize": limit,
+                "total": total_count,
+                "totalPages": total_pages,
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Failed to fetch assignment notifications")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch assignment notifications") from exc
+
+
+@router.get("/account-assignments")
+def api_get_account_assignments(page: int = 1, user=Depends(require_admin)):
+    """List applied account assignments."""
+
+    page = max(page, 1)
+    limit = 50
+    offset = (page - 1) * limit
+
+    try:
+        total_count = schedule_repository.count_account_assignments()
+        assignments = schedule_repository.list_account_assignments(limit=limit, offset=offset)
+        total_pages = max(math.ceil(total_count / limit), 1) if total_count > 0 else 1
+
+        return {
+            "items": jsonable_encoder(assignments),
+            "pagination": {
+                "page": page,
+                "pageSize": limit,
+                "total": total_count,
+                "totalPages": total_pages,
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Failed to fetch account assignments")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch account assignments") from exc
+
+
 @router.get("/notification-settings")
 def api_get_notification_settings(user=Depends(require_admin)):
     """Get workout notification settings."""

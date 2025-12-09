@@ -1,11 +1,18 @@
-import { useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import dayjs from "dayjs";
 
 import Panel from "../components/Panel";
 import DataGrid from "../components/DataGrid";
 import { apiFetch } from "../lib/api";
-import type { PulseNotification, PulseNotificationListResponse } from "../lib/types";
+import { usePaginatedQuery } from "../lib/hooks";
+import type {
+  AccountAssignmentListResponse,
+  AccountAssignmentRow,
+  AssignmentNotificationListResponse,
+  AssignmentNotificationRow,
+  PulseNotification,
+  PulseNotificationListResponse
+} from "../lib/types";
 
 function formatDateTime(value: string | null | undefined) {
   if (!value) return "—";
@@ -19,93 +26,268 @@ function formatSlotDate(slotDate: string | null | undefined, startTime: string |
   return formatDateTime(ts);
 }
 
-export default function PulsePage() {
-  const [page, setPage] = useState(1);
+function formatSlot(slotDate: string | null | undefined, startTime: string | null | undefined) {
+  if (!slotDate) return "—";
+  const ts = startTime ? `${slotDate}T${startTime}` : slotDate;
+  return formatDateTime(ts);
+}
 
-  const listQuery = useQuery<PulseNotificationListResponse>({
-    queryKey: ["pulse-notifications", page],
-    queryFn: () => {
-      const params = new URLSearchParams({ page: String(page) });
+function renderPagination(
+  page: number,
+  totalPages: number,
+  setPage: (value: number) => void,
+  isFetching: boolean,
+  pageSize?: number
+) {
+  return (
+    <div className="pagination-controls">
+      <button className="button" disabled={page <= 1 || isFetching} onClick={() => setPage(Math.max(page - 1, 1))}>
+        ⟵ Назад
+      </button>
+      <div className="page-indicator">
+        Страница {page} из {totalPages}
+        {pageSize ? ` (по ${pageSize} на странице)` : ""}
+      </div>
+      <button className="button" disabled={page >= totalPages || isFetching} onClick={() => setPage(page + 1)}>
+        Вперед ⟶
+      </button>
+    </div>
+  );
+}
+
+export default function PulsePage() {
+  const [pulsePage, setPulsePage] = useState(1);
+  const [assignmentsPage, setAssignmentsPage] = useState(1);
+  const [notificationsPage, setNotificationsPage] = useState(1);
+
+  const [pulseCollapsed, setPulseCollapsed] = useState(true);
+  const [assignmentsCollapsed, setAssignmentsCollapsed] = useState(true);
+  const [notificationsCollapsed, setNotificationsCollapsed] = useState(true);
+
+  const pulseQuery = usePaginatedQuery<PulseNotificationListResponse>(
+    ["pulse-notifications"],
+    pulsePage,
+    () => {
+      const params = new URLSearchParams({ page: String(pulsePage) });
       return apiFetch<PulseNotificationListResponse>(`/api/pulse/notifications?${params.toString()}`);
     },
-    placeholderData: (prev) => prev
-  });
+    setPulsePage
+  );
 
-  const data = listQuery.data;
-  const pagination = data?.pagination;
-  const items = data?.items ?? [];
+  const assignmentsQuery = usePaginatedQuery<AccountAssignmentListResponse>(
+    ["account-assignments"],
+    assignmentsPage,
+    () => {
+      const params = new URLSearchParams({ page: String(assignmentsPage) });
+      return apiFetch<AccountAssignmentListResponse>(`/api/schedule/account-assignments?${params.toString()}`);
+    },
+    setAssignmentsPage
+  );
 
-  useEffect(() => {
-    if (pagination && page > 1 && items.length === 0 && !listQuery.isFetching) {
-      setPage((prev) => Math.max(prev - 1, 1));
-    }
-  }, [items.length, pagination, page, listQuery.isFetching]);
+  const assignmentNotificationsQuery = usePaginatedQuery<AssignmentNotificationListResponse>(
+    ["assignment-notifications"],
+    notificationsPage,
+    () => {
+      const params = new URLSearchParams({ page: String(notificationsPage) });
+      return apiFetch<AssignmentNotificationListResponse>(`/api/schedule/assignment-notifications?${params.toString()}`);
+    },
+    setNotificationsPage
+  );
 
-  const header = (
-    <div className="notifications-controls">
-      <div className="notifications-header">
-        <h3>Pulse</h3>
-        <p>Лента системных уведомлений: бронирования и новые анкеты</p>
-      </div>
-      {pagination && (
-        <div className="pagination-controls">
-          <button
-            className="button"
-            disabled={page <= 1 || listQuery.isFetching}
-            onClick={() => setPage((prev) => Math.max(prev - 1, 1))}
-            type="button"
-          >
-            ⟵ Назад
-          </button>
-          <div className="page-indicator">
-            Страница {pagination.page} из {pagination.totalPages} (по {pagination.pageSize} на странице)
-          </div>
-          <button
-            className="button"
-            disabled={page >= pagination.totalPages || listQuery.isFetching}
-            onClick={() => setPage((prev) => prev + 1)}
-            type="button"
-          >
-            Вперед ⟶
-          </button>
-        </div>
-      )}
+  const pulsePagination = pulseQuery.data?.pagination;
+  const assignmentsPagination = assignmentsQuery.data?.pagination;
+  const assignmentNotificationsPagination = assignmentNotificationsQuery.data?.pagination;
+
+  const pulseItems = pulseQuery.data?.items ?? [];
+  const assignments = assignmentsQuery.data?.items ?? [];
+  const assignmentNotifications = assignmentNotificationsQuery.data?.items ?? [];
+
+  const buildHeaderExtra = (
+    collapsed: boolean,
+    toggle: () => void,
+    pagination: { totalPages: number; pageSize?: number } | undefined,
+    page: number,
+    setPage: (value: number) => void,
+    isFetching: boolean
+  ) => (
+    <div className="panel-actions">
+      <button type="button" className="button ghost collapse-toggle" onClick={toggle}>
+        <span className="chevron">{collapsed ? "▶" : "▼"}</span>
+        {collapsed ? "Развернуть" : "Свернуть"}
+      </button>
+      {pagination && renderPagination(page, pagination.totalPages, setPage, isFetching, pagination.pageSize)}
     </div>
   );
 
   return (
-    <Panel title="Pulse" subtitle="Журнал уведомлений о бронированиях и клиентах" headerExtra={header}>
-      {listQuery.isLoading ? (
-        <div className="empty-state">Загружаем Pulse…</div>
-      ) : (
-        <DataGrid<PulseNotification>
-          items={items}
-          getRowKey={(item) => item.id}
-          emptyMessage={<div className="empty-state">Пока нет уведомлений.</div>}
-          columns={[
-            { key: "id", title: "ID", render: (item) => item.id },
-            { key: "event_type", title: "Тип", render: (item) => item.event_type },
-            { key: "client", title: "Клиент", render: (item) => item.client_name || "—" },
-            {
-              key: "slot",
-              title: "Слот",
-              render: (item) => formatSlotDate(item.slot_date, item.start_time)
-            },
-            { key: "stand_label", title: "Станок", render: (item) => item.stand_label || "—" },
-            { key: "source", title: "Источник", render: (item) => item.source || "—" },
-            {
-              key: "message_text",
-              title: "Текст",
-              render: (item) => item.message_text || "—"
-            },
-            {
-              key: "created_at",
-              title: "Создано",
-              render: (item) => formatDateTime(item.created_at)
-            }
-          ]}
-        />
-      )}
-    </Panel>
+    <div className="stack gap-lg">
+      <Panel
+        title="Pulse"
+        subtitle="Журнал уведомлений о бронированиях и клиентах"
+        headerExtra={buildHeaderExtra(
+          pulseCollapsed,
+          () => setPulseCollapsed((prev) => !prev),
+          pulsePagination,
+          pulsePage,
+          setPulsePage,
+          pulseQuery.isFetching
+        )}
+      >
+        {pulseCollapsed ? (
+          <div className="empty-state">Секция свернута.</div>
+        ) : pulseQuery.isLoading ? (
+          <div className="empty-state">Загружаем Pulse…</div>
+        ) : (
+          <DataGrid<PulseNotification>
+            items={pulseItems}
+            getRowKey={(item) => item.id}
+            emptyMessage={<div className="empty-state">Пока нет уведомлений.</div>}
+            columns={[
+              { key: "id", title: "ID", render: (item) => item.id },
+              { key: "event_type", title: "Тип", render: (item) => item.event_type },
+              { key: "client", title: "Клиент", render: (item) => item.client_name || "—" },
+              {
+                key: "slot",
+                title: "Слот",
+                render: (item) => formatSlotDate(item.slot_date, item.start_time)
+              },
+              { key: "stand_label", title: "Станок", render: (item) => item.stand_label || "—" },
+              { key: "source", title: "Источник", render: (item) => item.source || "—" },
+              {
+                key: "message_text",
+                title: "Текст",
+                render: (item) => item.message_text || "—"
+              },
+              {
+                key: "created_at",
+                title: "Создано",
+                render: (item) => formatDateTime(item.created_at)
+              }
+            ]}
+          />
+        )}
+      </Panel>
+
+      <Panel
+        title="Автоназначения аккаунтов"
+        subtitle="Журнал фактических применений клиентских профилей"
+        headerExtra={buildHeaderExtra(
+          assignmentsCollapsed,
+          () => setAssignmentsCollapsed((prev) => !prev),
+          assignmentsPagination,
+          assignmentsPage,
+          setAssignmentsPage,
+          assignmentsQuery.isFetching
+        )}
+      >
+        {assignmentsCollapsed ? (
+          <div className="empty-state">Секция свернута.</div>
+        ) : assignmentsQuery.isLoading ? (
+          <div className="empty-state">Загружаем историю назначений…</div>
+        ) : (
+          <DataGrid<AccountAssignmentRow>
+            items={assignments}
+            getRowKey={(item) => item.id}
+            emptyMessage={<div className="empty-state">Назначений ещё нет.</div>}
+            columns={[
+              { key: "id", title: "ID", render: (item) => item.id },
+              {
+                key: "account",
+                title: "Аккаунт",
+                render: (item) => item.account_name || item.account_id
+              },
+              {
+                key: "client",
+                title: "Клиент",
+                render: (item) => item.client_name || item.client_full_name || `ID ${item.client_id ?? "?"}`
+              },
+              {
+                key: "slot",
+                title: "Слот",
+                render: (item) => formatSlot(item.slot_date, item.start_time)
+              },
+              {
+                key: "stand",
+                title: "Станок",
+                render: (item) => item.stand_code || item.stand_title || "—"
+              },
+              {
+                key: "applied_at",
+                title: "Применено",
+                render: (item) => formatDateTime(item.applied_at)
+              },
+              {
+                key: "reservation",
+                title: "Бронь",
+                render: (item) => `#${item.reservation_id} (${item.reservation_status || "?"})`
+              }
+            ]}
+          />
+        )}
+      </Panel>
+
+      <Panel
+        title="Уведомления автоназначений"
+        subtitle="Когда и кому отправляли уведомления об автоназначении аккаунтов"
+        headerExtra={buildHeaderExtra(
+          notificationsCollapsed,
+          () => setNotificationsCollapsed((prev) => !prev),
+          assignmentNotificationsPagination,
+          notificationsPage,
+          setNotificationsPage,
+          assignmentNotificationsQuery.isFetching
+        )}
+      >
+        {notificationsCollapsed ? (
+          <div className="empty-state">Секция свернута.</div>
+        ) : assignmentNotificationsQuery.isLoading ? (
+          <div className="empty-state">Загружаем уведомления…</div>
+        ) : (
+          <DataGrid<AssignmentNotificationRow>
+            items={assignmentNotifications}
+            getRowKey={(item) => item.id}
+            emptyMessage={<div className="empty-state">Уведомлений ещё нет.</div>}
+            columns={[
+              { key: "id", title: "ID", render: (item) => item.id },
+              {
+                key: "account",
+                title: "Аккаунт",
+                render: (item) => item.account_name || item.account_id
+              },
+              {
+                key: "status",
+                title: "Статус",
+                render: (item) => item.status
+              },
+              {
+                key: "client",
+                title: "Клиент",
+                render: (item) => item.client_name || item.client_full_name || `ID ${item.client_id ?? "?"}`
+              },
+              {
+                key: "slot",
+                title: "Слот",
+                render: (item) => formatSlot(item.slot_date, item.start_time)
+              },
+              {
+                key: "stand",
+                title: "Станок",
+                render: (item) => item.stand_code || item.stand_title || "—"
+              },
+              {
+                key: "notified_at",
+                title: "Отправлено",
+                render: (item) => formatDateTime(item.notified_at)
+              },
+              {
+                key: "reservation",
+                title: "Бронь",
+                render: (item) => `#${item.reservation_id} (${item.reservation_status || "?"})`
+              }
+            ]}
+          />
+        )}
+      </Panel>
+    </div>
   );
 }

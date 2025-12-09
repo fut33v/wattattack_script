@@ -7,8 +7,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from pathlib import Path
 import os
 
+import psycopg2
 from .db_utils import db_connection, dict_cursor
-from . import trainers_repository, instructors_repository
+from . import trainers_repository, instructors_repository, wattattack_account_repository
 
 LOGGER = logging.getLogger(__name__)
 FIT_FILES_DIR = Path(os.environ.get("FIT_FILES_DIR", "data/fit_files")).resolve()
@@ -24,6 +25,20 @@ DEFAULT_TEMPLATE_SLOTS: Tuple[Tuple[str, str, str, Optional[str]], ...] = (
     ("18:30", "20:30", "self_service", None),
     ("20:30", "22:30", "self_service", None),
 )
+
+
+def ensure_schedule_tables_safe() -> None:
+    """Ensure schedule tables exist; swallow deadlocks to avoid user-facing errors.
+
+    The ensure helpers grab locks to backfill instructor rows, so concurrent calls can
+    deadlock under load. If a deadlock happens we skip the ensure attempt; tables should
+    already exist by then.
+    """
+
+    try:
+        ensure_schedule_tables()
+    except psycopg2.errors.DeadlockDetected:
+        LOGGER.warning("Skipping ensure_schedule_tables due to deadlock during ensure")
 
 
 def ensure_schedule_tables() -> None:
@@ -146,6 +161,29 @@ def ensure_schedule_tables() -> None:
             """
             CREATE INDEX IF NOT EXISTS schedule_account_assignments_account_idx
                 ON schedule_account_assignments (account_id)
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schedule_assignment_notifications (
+                id SERIAL PRIMARY KEY,
+                reservation_id INTEGER NOT NULL REFERENCES schedule_reservations (id) ON DELETE CASCADE,
+                account_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                notified_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS schedule_assignment_notifications_unique_idx
+                ON schedule_assignment_notifications (reservation_id, account_id, status)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS schedule_assignment_notifications_account_idx
+                ON schedule_assignment_notifications (account_id)
             """
         )
         conn.commit()
@@ -1321,6 +1359,110 @@ def list_workout_notifications(limit: int = 100, offset: int = 0) -> List[Dict]:
     return rows
 
 
+def count_assignment_notifications() -> int:
+    """Return total assignment notification rows."""
+
+    ensure_schedule_tables()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute("SELECT COUNT(*) AS cnt FROM schedule_assignment_notifications")
+        row = cur.fetchone() or {}
+    return int(row.get("cnt", 0))
+
+
+def list_assignment_notifications(limit: int = 100, offset: int = 0) -> List[Dict]:
+    """List assignment notification entries with reservation context."""
+
+    ensure_schedule_tables()
+    wattattack_account_repository.ensure_table()
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                an.*,
+                r.client_id,
+                r.client_name,
+                r.stand_id,
+                r.stand_code,
+                r.status AS reservation_status,
+                s.slot_date,
+                s.start_time,
+                s.end_time,
+                s.label,
+                s.session_kind,
+                c.first_name AS client_first_name,
+                c.last_name AS client_last_name,
+                c.full_name AS client_full_name,
+                t.code AS stand_code,
+                t.title AS stand_title,
+                wa.name AS account_name
+            FROM schedule_assignment_notifications AS an
+            JOIN schedule_reservations AS r ON r.id = an.reservation_id
+            JOIN schedule_slots AS s ON s.id = r.slot_id
+            LEFT JOIN clients AS c ON c.id = r.client_id
+            LEFT JOIN trainers AS t ON t.id = r.stand_id
+            LEFT JOIN wattattack_accounts AS wa ON wa.id = an.account_id
+            ORDER BY an.notified_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (limit, offset),
+        )
+        rows = cur.fetchall()
+    return rows
+
+
+def count_account_assignments() -> int:
+    """Return total account assignment rows."""
+
+    ensure_schedule_tables_safe()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute("SELECT COUNT(*) AS cnt FROM schedule_account_assignments")
+        row = cur.fetchone() or {}
+    return int(row.get("cnt", 0))
+
+
+def list_account_assignments(limit: int = 100, offset: int = 0) -> List[Dict]:
+    """List account assignment applications with reservation and account details."""
+
+    ensure_schedule_tables_safe()
+    wattattack_account_repository.ensure_table()
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT
+                aa.*,
+                r.client_id,
+                r.client_name,
+                r.stand_id,
+                r.stand_code,
+                r.status AS reservation_status,
+                s.slot_date,
+                s.start_time,
+                s.end_time,
+                s.label,
+                s.session_kind,
+                c.first_name AS client_first_name,
+                c.last_name AS client_last_name,
+                c.full_name AS client_full_name,
+                t.code AS stand_code,
+                t.title AS stand_title,
+                wa.name AS account_name
+            FROM schedule_account_assignments AS aa
+            JOIN schedule_reservations AS r ON r.id = aa.reservation_id
+            JOIN schedule_slots AS s ON s.id = r.slot_id
+            LEFT JOIN clients AS c ON c.id = r.client_id
+            LEFT JOIN trainers AS t ON t.id = r.stand_id
+            LEFT JOIN wattattack_accounts AS wa ON wa.id = aa.account_id
+            ORDER BY aa.applied_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (limit, offset),
+        )
+        rows = cur.fetchall()
+    return rows
+
+
 def get_workout_notification_settings() -> Dict[str, Any]:
     """Get workout notification settings from environment or database."""
     # For now, we'll just return the environment variable
@@ -2134,6 +2276,40 @@ def was_account_assignment_done(reservation_id: int, account_id: str) -> bool:
             WHERE reservation_id = %s AND account_id = %s
             """,
             (reservation_id, account_id),
+        )
+        row = cur.fetchone()
+    return bool(row)
+
+
+def record_assignment_notification(reservation_id: int, account_id: str, status: str) -> None:
+    """Remember that we sent a notification for this reservation/account/status."""
+
+    ensure_schedule_tables()
+    with db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO schedule_assignment_notifications (reservation_id, account_id, status, notified_at)
+            VALUES (%s, %s, %s, NOW())
+            ON CONFLICT (reservation_id, account_id, status)
+            DO UPDATE SET notified_at = NOW()
+            """,
+            (reservation_id, account_id, status),
+        )
+        conn.commit()
+
+
+def was_assignment_notification_sent(reservation_id: int, account_id: str, status: str) -> bool:
+    """Return True if a notification for this reservation/account/status was already sent."""
+
+    ensure_schedule_tables()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM schedule_assignment_notifications
+            WHERE reservation_id = %s AND account_id = %s AND status = %s
+            """,
+            (reservation_id, account_id, status),
         )
         row = cur.fetchone()
     return bool(row)

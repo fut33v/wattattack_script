@@ -397,6 +397,61 @@ export interface WorkoutNotificationListResponse {
   pagination: Pagination;
 }
 
+export interface AssignmentNotificationRow {
+  id: number;
+  reservation_id: number;
+  account_id: string;
+  account_name?: string | null;
+  status: string;
+  notified_at: string;
+  client_id?: number | null;
+  client_name?: string | null;
+  client_first_name?: string | null;
+  client_last_name?: string | null;
+  client_full_name?: string | null;
+  slot_date: string;
+  start_time: string;
+  end_time: string;
+  label?: string | null;
+  session_kind?: string | null;
+  stand_id?: number | null;
+  stand_code?: string | null;
+  stand_title?: string | null;
+  reservation_status?: string | null;
+}
+
+export interface AssignmentNotificationListResponse {
+  items: AssignmentNotificationRow[];
+  pagination: Pagination;
+}
+
+export interface AccountAssignmentRow {
+  id: number;
+  reservation_id: number;
+  account_id: string;
+  account_name?: string | null;
+  client_id?: number | null;
+  client_name?: string | null;
+  applied_at: string;
+  slot_date: string;
+  start_time: string;
+  end_time: string;
+  label?: string | null;
+  session_kind?: string | null;
+  stand_id?: number | null;
+  stand_code?: string | null;
+  stand_title?: string | null;
+  reservation_status?: string | null;
+  client_first_name?: string | null;
+  client_last_name?: string | null;
+  client_full_name?: string | null;
+}
+
+export interface AccountAssignmentListResponse {
+  items: AccountAssignmentRow[];
+  pagination: Pagination;
+}
+
 export interface PulseNotification {
   id: number;
   event_type: string;
