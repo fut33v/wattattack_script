@@ -377,7 +377,7 @@ def assign_clients_to_accounts(
         LOGGER.debug("Auto-assignment disabled (lead=%s, window=%s)", lead_minutes, window_minutes)
         return
 
-    notification_status_default = "observed" if dry_run or not ASSIGN_ENABLE or DEV_BUILD else "applied"
+    notification_status_default = "observed" if dry_run or not ASSIGN_ENABLE else "applied"
 
     stand_accounts: Dict[int, Dict[str, Any]] = {}
     for account_id, account in accounts.items():
@@ -482,7 +482,7 @@ def assign_clients_to_accounts(
             )
             continue
 
-        if ASSIGN_ENABLE and not dry_run and not DEV_BUILD:
+        if ASSIGN_ENABLE and not dry_run:
             try:
                 apply_wattattack_profile(
                     account_id=account_id,
@@ -529,9 +529,7 @@ def assign_clients_to_accounts(
     else:
         LOGGER.debug("No auto-assignments were performed in this cycle")
 
-    if notification_status_default == "observed" and DEV_BUILD:
-        status_note = "наблюдаем (DEV_BUILD)"
-    elif notification_status_default == "observed":
+    if notification_status_default == "observed":
         status_note = "наблюдаем"
     else:
         status_note = "назначили"

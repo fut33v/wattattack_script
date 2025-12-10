@@ -39,16 +39,36 @@ def _format_event_line(event: Dict) -> str:
     return f"{start_date} — {name}{duration_part}"
 
 
+def _sorted_events(events: List[Dict]) -> List[Dict]:
+    """Return events sorted deterministically to avoid hash churn."""
+
+    def _key(ev: Dict) -> tuple:
+        start = (ev.get("start_date_local") or "")[:10]
+        name = ev.get("name") or ""
+        try:
+            duration = int(ev.get("moving_time") or 0)
+        except Exception:
+            duration = 0
+        event_id = ev.get("id") or ev.get("event_id") or ""
+        return start, name, duration, event_id
+
+    return sorted(events, key=_key)
+
+
 def _hash_events(events: List[Dict]) -> str:
     """Build a stable hash for the plan to avoid resending unchanged data."""
     items = []
-    for ev in events:
+    for ev in _sorted_events(events):
+        try:
+            duration = int(ev.get("moving_time") or 0)
+        except Exception:
+            duration = 0
         items.append(
             {
                 "start": (ev.get("start_date_local") or "")[:10],
                 "name": ev.get("name") or "",
-                "duration": ev.get("moving_time") or 0,
-                "updated": ev.get("updated") or "",
+                "duration": duration,
+                "event_id": ev.get("id") or ev.get("event_id") or "",
             }
         )
     payload = json.dumps(items, ensure_ascii=False, sort_keys=True)
@@ -91,6 +111,7 @@ def notify_week_plan(*, bot_token: str, timeout: float) -> None:
             if not events:
                 LOGGER.debug("No planned workouts for user %s in next 7 days", tg_user_id)
                 continue
+            events = _sorted_events(events)
 
             plan_hash = _hash_events(events)
             previous_hash = plan_repo.get_plan_hash(int(tg_user_id))
@@ -102,6 +123,12 @@ def notify_week_plan(*, bot_token: str, timeout: float) -> None:
                 "📅 План на неделю (Intervals.icu):",
                 *[_format_event_line(ev) for ev in events],
             ]
+            try:
+                plan_repo.upsert_plan_hash(int(tg_user_id), plan_hash)
+            except Exception:  # noqa: BLE001
+                LOGGER.exception("Failed to persist Intervals plan hash for user %s; skipping send", tg_user_id)
+                continue
+
             text = "\n".join(lines)
             telegram_send_message(
                 bot_token,
@@ -110,7 +137,6 @@ def notify_week_plan(*, bot_token: str, timeout: float) -> None:
                 timeout=timeout,
                 parse_mode="HTML",
             )
-            plan_repo.upsert_plan_hash(int(tg_user_id), plan_hash)
             LOGGER.info("Sent Intervals plan to user %s (%d items)", tg_user_id, len(events))
         except Exception:  # noqa: BLE001
             LOGGER.exception("Failed to send Intervals plan to user %s", tg_user_id)
