@@ -43,9 +43,7 @@ const SERVICE_NAV_LINKS: readonly NavLinkConfig[] = [
 ] as const;
 
 const SETTINGS_NAV_LINKS: readonly NavLinkConfig[] = [
-  { to: "/schedule/settings", label: "⚙️ Настройки расписания", adminOnly: true },
-  { to: "/import", label: "📥 Импорт", adminOnly: true },
-  { to: "/wattattack/accounts", label: "⚡️ Аккаунты WattAttack", adminOnly: true }
+  { to: "/settings", label: "⚙️ Настройки", adminOnly: true }
 ] as const;
 
 const PUBLIC_NAV_LINKS: readonly NavLinkConfig[] = [
