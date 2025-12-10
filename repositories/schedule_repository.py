@@ -13,6 +13,8 @@ from . import trainers_repository, instructors_repository, wattattack_account_re
 
 LOGGER = logging.getLogger(__name__)
 FIT_FILES_DIR = Path(os.environ.get("FIT_FILES_DIR", "data/fit_files")).resolve()
+DEFAULT_INSTRUCTOR_PRICE_RUB = int(os.environ.get("BOOKING_PRICE_INSTRUCTOR", os.environ.get("BOOKING_PRICE_INSTRUCTOR_RUB", "700")))
+DEFAULT_SELF_SERVICE_PRICE_RUB = int(os.environ.get("BOOKING_PRICE_SELF_SERVICE", os.environ.get("BOOKING_PRICE_SELF_SERVICE_RUB", "500")))
 
 
 DEFAULT_TEMPLATE_SLOTS: Tuple[Tuple[str, str, str, Optional[str]], ...] = (
@@ -1482,6 +1484,90 @@ def update_workout_notification_settings(reminder_hours: int) -> bool:
         return False
     # In a real implementation, we would store this in the database
     return True
+
+
+def _clean_price_value(value: Any, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def ensure_booking_settings_table() -> None:
+    """Ensure the booking settings table exists and has a seed row."""
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schedule_booking_settings (
+                id SMALLINT PRIMARY KEY,
+                price_instructor_rub INTEGER NOT NULL DEFAULT 700,
+                price_self_service_rub INTEGER NOT NULL DEFAULT 500,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        cur.execute(
+            "ALTER TABLE schedule_booking_settings ADD COLUMN IF NOT EXISTS price_instructor_rub INTEGER NOT NULL DEFAULT 700"
+        )
+        cur.execute(
+            "ALTER TABLE schedule_booking_settings ADD COLUMN IF NOT EXISTS price_self_service_rub INTEGER NOT NULL DEFAULT 500"
+        )
+        cur.execute(
+            "ALTER TABLE schedule_booking_settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+        )
+        cur.execute(
+            "INSERT INTO schedule_booking_settings (id, price_instructor_rub, price_self_service_rub) VALUES (1, %s, %s) ON CONFLICT (id) DO NOTHING",
+            (DEFAULT_INSTRUCTOR_PRICE_RUB, DEFAULT_SELF_SERVICE_PRICE_RUB),
+        )
+        conn.commit()
+
+
+def get_booking_price_settings() -> Dict[str, int]:
+    """Return current booking prices with environment fallbacks."""
+
+    ensure_booking_settings_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            "SELECT price_instructor_rub, price_self_service_rub FROM schedule_booking_settings WHERE id = 1"
+        )
+        row = cur.fetchone() or {}
+
+    return {
+        "price_instructor_rub": _clean_price_value(row.get("price_instructor_rub"), DEFAULT_INSTRUCTOR_PRICE_RUB),
+        "price_self_service_rub": _clean_price_value(row.get("price_self_service_rub"), DEFAULT_SELF_SERVICE_PRICE_RUB),
+    }
+
+
+def update_booking_price_settings(*, price_instructor_rub: int, price_self_service_rub: int) -> Dict[str, int]:
+    """Persist booking prices; returns sanitized values."""
+
+    if price_instructor_rub <= 0 or price_self_service_rub <= 0:
+        raise ValueError("Booking prices must be positive")
+
+    ensure_booking_settings_table()
+
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            INSERT INTO schedule_booking_settings (id, price_instructor_rub, price_self_service_rub)
+            VALUES (1, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                price_instructor_rub = EXCLUDED.price_instructor_rub,
+                price_self_service_rub = EXCLUDED.price_self_service_rub,
+                updated_at = NOW()
+            RETURNING price_instructor_rub, price_self_service_rub
+            """,
+            (price_instructor_rub, price_self_service_rub),
+        )
+        row = cur.fetchone() or {}
+        conn.commit()
+
+    return {
+        "price_instructor_rub": _clean_price_value(row.get("price_instructor_rub"), DEFAULT_INSTRUCTOR_PRICE_RUB),
+        "price_self_service_rub": _clean_price_value(row.get("price_self_service_rub"), DEFAULT_SELF_SERVICE_PRICE_RUB),
+    }
 
 
 def ensure_fit_files_dir() -> Path:

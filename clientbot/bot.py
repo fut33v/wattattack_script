@@ -245,6 +245,37 @@ def _format_price_rub(value: Any) -> str:
     return f"{amount:,}".replace(",", " ")
 
 
+def _load_booking_prices() -> Dict[str, int]:
+    """Return current booking prices with safe fallbacks."""
+
+    try:
+        settings = schedule_repository.get_booking_price_settings()
+    except Exception:  # noqa: BLE001
+        LOGGER.exception("Failed to load booking price settings")
+        return {
+            "price_instructor_rub": schedule_repository.DEFAULT_INSTRUCTOR_PRICE_RUB,
+            "price_self_service_rub": schedule_repository.DEFAULT_SELF_SERVICE_PRICE_RUB,
+        }
+
+    instructor_price = settings.get("price_instructor_rub", schedule_repository.DEFAULT_INSTRUCTOR_PRICE_RUB)
+    self_service_price = settings.get("price_self_service_rub", schedule_repository.DEFAULT_SELF_SERVICE_PRICE_RUB)
+
+    try:
+        instructor_price_int = int(instructor_price)
+    except (TypeError, ValueError):
+        instructor_price_int = schedule_repository.DEFAULT_INSTRUCTOR_PRICE_RUB
+
+    try:
+        self_service_price_int = int(self_service_price)
+    except (TypeError, ValueError):
+        self_service_price_int = schedule_repository.DEFAULT_SELF_SERVICE_PRICE_RUB
+
+    return {
+        "price_instructor_rub": instructor_price_int,
+        "price_self_service_rub": self_service_price_int,
+    }
+
+
 def _format_slot_caption(slot: Dict[str, Any]) -> str:
     label_parts: List[str] = [_format_time_range(slot.get("start_time"), slot.get("end_time"))]
     slot_label = (slot.get("label") or "").strip()
@@ -853,17 +884,38 @@ async def _handle_booking_slot(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception:
         LOGGER.debug("Failed to edit confirmation message", exc_info=True)
 
+    prices = _load_booking_prices()
+    instructor_price_text = _format_price_rub(prices.get("price_instructor_rub"))
+    self_service_price_text = _format_price_rub(prices.get("price_self_service_rub"))
+    is_instructor_slot = (slot.get("session_kind") or "").lower() == "instructor"
+    booked_price_line = (
+        f"💳 Стоимость занятия с инструктором — {instructor_price_text} ₽."
+        if is_instructor_slot
+        else f"💳 Стоимость самокрутки — {self_service_price_text} ₽."
+    )
+    price_overview_line = (
+        f"Текущие цены: самокрутка — {self_service_price_text} ₽, с инструктором — {instructor_price_text} ₽."
+    )
+
+    payment_lines = [
+        booked_price_line,
+        price_overview_line,
+        "Если хотите купить абонемент — пишите в сообщения канала @krutilkavn.",
+        "",
+        "Оплата переводом по СБП на телефон",
+        "+7 911 602 5498 (ТБАНК). Евгений Б.",
+        "",
+        "Пожалуйста, оплатите заранее и покажите подтверждение перед тренировкой.",
+        "",
+        "Если планы изменились — отправьте /cancel, чтобы освободить слот.",
+        "",
+        "Нажмите /start, чтобы попасть в главное меню.",
+    ]
+
     try:
         await context.bot.send_message(
             chat_id=query.message.chat_id if query.message else user.id,
-            text=(
-                "💳 Стоимость занятия — 700 ₽.\n\n"
-                "Оплата переводом по СБП на телефон\n"
-                "+7 911 602 5498 (ТБАНК). Евгений Б.\n\n"
-                "Пожалуйста, оплатите заранее и покажите подтверждение перед тренировкой.\n\n"
-                "Если планы изменились — отправьте /cancel, чтобы освободить слот.\n\n"
-                "Нажмите /start, чтобы попасть в главное меню."
-            ),
+            text="\n".join(payment_lines),
         )
     except Exception:
         LOGGER.debug("Failed to send payment reminder", exc_info=True)

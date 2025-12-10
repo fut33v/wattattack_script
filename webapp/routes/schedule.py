@@ -859,6 +859,51 @@ async def api_update_notification_settings(request: Request, user=Depends(requir
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to update settings") from exc
 
 
+def _parse_price_field(field: str, value: object) -> int:
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):  # noqa: PERF203
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{field} должен быть целым числом")
+    if parsed <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{field} должен быть больше 0")
+    if parsed > 100_000:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{field} выглядит слишком большим")
+    return parsed
+
+
+@router.get("/booking-settings")
+def api_get_booking_price_settings(user=Depends(require_admin)):
+    """Return booking prices for self-service and instructor sessions."""
+
+    try:
+        settings = schedule_repository.get_booking_price_settings()
+        return {"settings": settings}
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Failed to fetch booking price settings")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch settings") from exc
+
+
+@router.post("/booking-settings")
+async def api_update_booking_price_settings(request: Request, user=Depends(require_admin)):
+    """Update booking prices for self-service and instructor sessions."""
+
+    try:
+        payload = await request.json()
+        price_instructor_rub = _parse_price_field("price_instructor_rub", payload.get("price_instructor_rub"))
+        price_self_service_rub = _parse_price_field("price_self_service_rub", payload.get("price_self_service_rub"))
+
+        settings = schedule_repository.update_booking_price_settings(
+            price_instructor_rub=price_instructor_rub,
+            price_self_service_rub=price_self_service_rub,
+        )
+        return {"settings": settings}
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Failed to update booking price settings")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to update settings") from exc
+
+
 @public_router.get("/schedule/{slug}")
 def schedule_week(slug: str, request: Request):
     week_start = _week_start_for_slug(slug)

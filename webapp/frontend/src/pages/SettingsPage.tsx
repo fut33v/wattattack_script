@@ -3,6 +3,7 @@ import { useState } from "react";
 import "../styles/settings.css";
 
 import ImportPage from "./ImportPage";
+import BookingPriceSettingsPage from "./BookingPriceSettingsPage";
 import NotificationSettingsPage from "./NotificationSettingsPage";
 import WattattackAccountsPage from "./WattattackAccountsPage";
 
@@ -20,6 +21,12 @@ export default function SettingsPage() {
       title: "Уведомления расписания",
       subtitle: "Время отправки напоминаний и запись в очередь",
       content: <NotificationSettingsPage />
+    },
+    {
+      id: "booking-pricing",
+      title: "Стоимость тренировок",
+      subtitle: "Цены для самокрутки и занятий с инструктором",
+      content: <BookingPriceSettingsPage />
     },
     {
       id: "backup-import",
