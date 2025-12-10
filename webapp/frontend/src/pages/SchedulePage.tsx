@@ -126,8 +126,8 @@ function formatWeekLabel(week: ScheduleWeekRow): string {
 
 function buildStandLookup(stands: ScheduleStandSummary[]): Map<number, string> {
   const map = new Map<number, string>();
-  stands.forEach((stand) => {
-    const label = stand.display_name || stand.code || `Станок ${stand.id}`;
+  stands.forEach((stand, index) => {
+    const label = `Станок ${index + 1}`;
     map.set(stand.id, label);
   });
   return map;
@@ -139,6 +139,7 @@ export default function SchedulePage() {
   const isAdmin = session.isAdmin;
 
   const [selectedWeekId, setSelectedWeekId] = useState<number | null>(null);
+  const [isWeekPickerOpen, setIsWeekPickerOpen] = useState(true);
   const [newWeekDate, setNewWeekDate] = useState<string>("");
   const [newWeekCopySource, setNewWeekCopySource] = useState<number | "">("");
   const [newWeekReplace, setNewWeekReplace] = useState<boolean>(false);
@@ -163,20 +164,17 @@ export default function SchedulePage() {
     if (!weeksQuery.data || selectedWeekId !== null) return;
 
     const today = new Date();
-    const currentWeek = weeksQuery.data.items.find((week) => {
+    const currentWeekRow = weeksQuery.data.items.find((week) => {
       const start = new Date(`${week.week_start_date}T00:00:00`);
       const end = new Date(start);
       end.setDate(start.getDate() + 7);
       return today >= start && today < end;
     });
 
-    if (currentWeek) {
-      setSelectedWeekId(currentWeek.id);
-      return;
-    }
-
-    if (weeksQuery.data.items.length > 0) {
-      setSelectedWeekId(weeksQuery.data.items[0].id);
+    const fallbackWeek = currentWeekRow ?? weeksQuery.data.items[0];
+    if (fallbackWeek) {
+      setSelectedWeekId(fallbackWeek.id);
+      setIsWeekPickerOpen(false);
     }
   }, [weeksQuery.data, selectedWeekId]);
 
@@ -314,6 +312,7 @@ export default function SchedulePage() {
           instructors: data.instructors ?? []
         });
         setSelectedWeekId(data.week.id);
+        setIsWeekPickerOpen(false);
       }
     },
     onError: (error) => {
@@ -366,6 +365,7 @@ export default function SchedulePage() {
       queryClient.invalidateQueries({ queryKey: ["schedule-weeks"] });
       setSelectedWeekId(null);
       setCopySourceWeekId("");
+      setIsWeekPickerOpen(true);
     },
     onError: (error) => {
       console.error("SchedulePage: failed to delete week", error);
@@ -886,35 +886,41 @@ export default function SchedulePage() {
           Публичное расписание
         </a>
       </div>
-      <div className="schedule-layout">
-        <aside className="schedule-sidebar">
-          <div className="schedule-sidebar-title">Недели</div>
-          {weeksQuery.isLoading ? (
-            <div className="schedule-empty">Загружаем недели…</div>
-          ) : weeksQuery.isError ? (
-            <div className="schedule-error">Не удалось загрузить список недель.</div>
-          ) : weeksQuery.data && weeksQuery.data.items.length > 0 ? (
-            <div className="schedule-week-list">
-              {weeksQuery.data.items.map((week) => (
-                <button
-                  key={week.id}
-                  type="button"
-                  onClick={() => setSelectedWeekId(week.id)}
-                  className={classNames("schedule-week-item", { active: week.id === selectedWeekId })}
-                >
-                  <span className="schedule-week-label">{formatWeekLabel(week)}</span>
-                  <span className="schedule-week-meta">
-                    {week.slots_count ?? 0} слотов · {week.week_start_date}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="schedule-empty">Недели не созданы.</div>
-          )}
+
+      {isWeekPickerOpen || selectedWeekId === null ? (
+        <div className="schedule-week-picker">
+          <div className="schedule-picker-card">
+            <div className="schedule-sidebar-title">Выберите неделю для редактирования</div>
+            {weeksQuery.isLoading ? (
+              <div className="schedule-empty">Загружаем недели…</div>
+            ) : weeksQuery.isError ? (
+              <div className="schedule-error">Не удалось загрузить список недель.</div>
+            ) : weeksQuery.data && weeksQuery.data.items.length > 0 ? (
+              <div className="schedule-week-list">
+                {weeksQuery.data.items.map((week) => (
+                  <button
+                    key={week.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedWeekId(week.id);
+                      setIsWeekPickerOpen(false);
+                    }}
+                    className={classNames("schedule-week-item", { active: week.id === selectedWeekId })}
+                  >
+                    <span className="schedule-week-label">{formatWeekLabel(week)}</span>
+                    <span className="schedule-week-meta">
+                      {week.slots_count ?? 0} слотов · {week.week_start_date}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="schedule-empty">Недели не созданы.</div>
+            )}
+          </div>
 
           {isAdmin ? (
-            <div className="schedule-sidebar-section">
+            <div className="schedule-picker-card">
               <div className="schedule-sidebar-subheader">Создать неделю</div>
               <form className="schedule-form" onSubmit={handleCreateWeek}>
                 <label>
@@ -956,11 +962,11 @@ export default function SchedulePage() {
               </form>
             </div>
           ) : null}
-        </aside>
-
+        </div>
+      ) : (
         <section className="schedule-content">
           {selectedWeekId === null ? (
-            <div className="schedule-empty">Выберите неделю слева.</div>
+            <div className="schedule-empty">Выберите неделю.</div>
           ) : weekDetailQuery.isLoading ? (
             <div className="schedule-empty">Загружаем слоты недели…</div>
           ) : weekDetailQuery.isError ? (
@@ -975,68 +981,89 @@ export default function SchedulePage() {
                     {currentWeek?.notes ? ` · ${currentWeek.notes}` : ""}
                   </div>
                 </div>
-                {isAdmin ? (
-                  <div className="schedule-toolbar-actions">
-                    <form className="schedule-form inline" onSubmit={handleCopyWeek}>
-                      <select
-                        value={copySourceWeekId === "" ? "" : String(copySourceWeekId)}
-                        onChange={(event) =>
-                          setCopySourceWeekId(event.target.value === "" ? "" : Number(event.target.value))
-                        }
-                      >
-                        <option value="">— Источник слотов —</option>
-                        {(weeksQuery.data?.items ?? [])
-                          .filter((week) => week.id !== selectedWeekId)
-                          .map((week) => (
-                            <option key={week.id} value={week.id}>
-                              {formatWeekLabel(week)}
-                            </option>
-                          ))}
-                      </select>
-                      <label className="schedule-checkbox">
-                        <input
-                          type="checkbox"
-                          checked={copyReplace}
-                          onChange={(event) => setCopyReplace(event.target.checked)}
-                        />
-                        Перезаписать слоты
-                      </label>
-                      <button type="submit" className="btn primary" disabled={copyWeekMutation.isPending}>
-                        Копировать слоты
-                      </button>
-                    </form>
-                    <button
-                      type="button"
-                      className="btn ghost"
-                      onClick={() => selectedWeekId && syncWeekMutation.mutate(selectedWeekId)}
-                      disabled={syncWeekMutation.isPending}
-                    >
-                      Синхронизировать станки
-                    </button>
-                    <button
-                      type="button"
-                      className="btn ghost"
-                      onClick={() =>
-                        selectedWeekId &&
-                        fillTemplateMutation.mutate({
-                          weekId: selectedWeekId,
-                          force: fillTemplateMutation.variables?.force ?? false
-                        })
+                <div className="schedule-toolbar-actions">
+                  <select
+                    value={selectedWeekId ?? ""}
+                    onChange={(event) => {
+                      const nextId = Number(event.target.value);
+                      if (!Number.isNaN(nextId)) {
+                        setSelectedWeekId(nextId);
                       }
-                      disabled={fillTemplateMutation.isPending || !selectedWeekId}
-                    >
-                      Заполнить по шаблону
-                    </button>
-                    <button
-                      type="button"
-                      className="btn danger"
-                      onClick={handleDeleteWeek}
-                      disabled={deleteWeekMutation.isPending || !selectedWeekId}
-                    >
-                      Удалить неделю
-                    </button>
-                  </div>
-                ) : null}
+                    }}
+                    className="week-switcher"
+                  >
+                    {(weeksQuery.data?.items ?? []).map((week) => (
+                      <option key={week.id} value={week.id}>
+                        {formatWeekLabel(week)}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" className="btn ghost" onClick={() => setIsWeekPickerOpen(true)}>
+                    Сменить неделю
+                  </button>
+                  {isAdmin ? (
+                    <>
+                      <form className="schedule-form inline" onSubmit={handleCopyWeek}>
+                        <select
+                          value={copySourceWeekId === "" ? "" : String(copySourceWeekId)}
+                          onChange={(event) =>
+                            setCopySourceWeekId(event.target.value === "" ? "" : Number(event.target.value))
+                          }
+                        >
+                          <option value="">— Источник слотов —</option>
+                          {(weeksQuery.data?.items ?? [])
+                            .filter((week) => week.id !== selectedWeekId)
+                            .map((week) => (
+                              <option key={week.id} value={week.id}>
+                                {formatWeekLabel(week)}
+                              </option>
+                            ))}
+                        </select>
+                        <label className="schedule-checkbox">
+                          <input
+                            type="checkbox"
+                            checked={copyReplace}
+                            onChange={(event) => setCopyReplace(event.target.checked)}
+                          />
+                          Перезаписать слоты
+                        </label>
+                        <button type="submit" className="btn primary" disabled={copyWeekMutation.isPending}>
+                          Копировать слоты
+                        </button>
+                      </form>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        onClick={() => selectedWeekId && syncWeekMutation.mutate(selectedWeekId)}
+                        disabled={syncWeekMutation.isPending}
+                      >
+                        Синхронизировать станки
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        onClick={() =>
+                          selectedWeekId &&
+                          fillTemplateMutation.mutate({
+                            weekId: selectedWeekId,
+                            force: fillTemplateMutation.variables?.force ?? false
+                          })
+                        }
+                        disabled={fillTemplateMutation.isPending || !selectedWeekId}
+                      >
+                        Заполнить по шаблону
+                      </button>
+                      <button
+                        type="button"
+                        className="btn danger"
+                        onClick={handleDeleteWeek}
+                        disabled={deleteWeekMutation.isPending || !selectedWeekId}
+                      >
+                        Удалить неделю
+                      </button>
+                    </>
+                  ) : null}
+                </div>
               </div>
 
               {isAdmin ? (
@@ -1153,7 +1180,7 @@ export default function SchedulePage() {
             </>
           )}
         </section>
-      </div>
+      )}
     </Panel>
   );
 }

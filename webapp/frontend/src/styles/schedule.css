@@ -6,6 +6,23 @@
   color: #f1f5ff;
 }
 
+.schedule-week-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 20px;
+}
+
+.schedule-picker-card {
+  padding: 18px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 16px;
+  background: linear-gradient(170deg, rgba(30, 41, 76, 0.8), rgba(9, 14, 33, 0.92));
+  box-shadow: 0 14px 34px rgba(8, 15, 40, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
 .schedule-sidebar {
   padding: 18px;
   border: 1px solid rgba(99, 102, 241, 0.25);
@@ -765,9 +782,63 @@
   font-size: 14px;
 }
 
-.slot-seating-actions {
+.slot-meta-controls {
   display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.slot-meta-controls .btn {
+  width: 100%;
+  display: block;
+}
+
+.slot-meta-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+  align-items: end;
+}
+
+.slot-meta-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.95rem;
+  color: rgba(226, 232, 255, 0.85);
+}
+
+.slot-meta-form input,
+.slot-meta-form select {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 255, 0.35);
+  background: rgba(15, 23, 42, 0.75);
+  color: #e2e8f0;
+}
+
+.slot-meta-section {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
+  margin: 12px 0 4px;
+}
+
+.slot-meta-panel {
+  border: 1px solid rgba(148, 163, 255, 0.35);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(15, 23, 42, 0.8);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.slot-meta-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .slot-seating-grid {
@@ -814,6 +885,37 @@
   border: 1px solid rgba(148, 163, 255, 0.35);
   background: rgba(15, 23, 42, 0.6);
   color: #e2e8ff;
+}
+
+@media (max-width: 768px) {
+  .slot-seating-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .slot-seating-title {
+    font-size: 1.1rem;
+  }
+
+  .slot-meta-form {
+    grid-template-columns: 1fr;
+  }
+
+  .slot-copy-section,
+  .slot-meta-controls,
+  .slot-meta-section {
+    width: 100%;
+  }
+
+  .slot-copy-panel,
+  .slot-meta-panel,
+  .slot-meta-form {
+    width: 100%;
+  }
+
+  .slot-meta-controls .btn {
+    width: 100%;
+  }
 }
 
 .slot-copy-weekdays {

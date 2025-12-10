@@ -1,4 +1,5 @@
 import { NavLink, useLocation } from "react-router-dom";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import classNames from "classnames";
 
@@ -24,7 +25,6 @@ const PRIMARY_NAV_LINKS: readonly NavLinkConfig[] = [
   { to: "/schedule", label: "📅 Расписание", adminOnly: true },
   { to: "/schedule/manage", label: "🗂 Недели", adminOnly: true },
   { to: "/races", label: "🏁 Гонки", adminOnly: true },
-  { to: "/schedule/settings", label: "⚙️ Настройки", adminOnly: true },
   { to: "/instructors", label: "🧑‍🏫 Инструкторы", adminOnly: true },
   { to: "/admins", label: "🔑 Админы", adminOnly: true }
 ] as const;
@@ -39,7 +39,11 @@ const SERVICE_NAV_LINKS: readonly NavLinkConfig[] = [
   { to: "/activities", label: "🚴 Активности", adminOnly: true },
   { to: "/sync", label: "🔄 Синхронизация", adminOnly: true },
   { to: "/links", label: "🧩 Связки", adminOnly: true },
-  { to: "/groups", label: "🏷 Группы", adminOnly: true },
+  { to: "/groups", label: "🏷 Группы", adminOnly: true }
+] as const;
+
+const SETTINGS_NAV_LINKS: readonly NavLinkConfig[] = [
+  { to: "/schedule/settings", label: "⚙️ Настройки расписания", adminOnly: true },
   { to: "/import", label: "📥 Импорт", adminOnly: true },
   { to: "/wattattack/accounts", label: "⚡️ Аккаунты WattAttack", adminOnly: true }
 ] as const;
@@ -56,10 +60,36 @@ const TECH_NAV_LINKS: readonly NavLinkConfig[] = [
 export default function AppShell({ session, children, hideSidebar = false }: AppShellProps) {
   const location = useLocation();
   const isAdmin = session.isAdmin;
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    function handleResize() {
+      setIsMobile(typeof window !== "undefined" && window.innerWidth < 960);
+    }
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  useEffect(() => {
+    if (isMobile) {
+      setSidebarOpen(false);
+    } else {
+      setSidebarOpen(true);
+    }
+  }, [isMobile]);
+
+  useEffect(() => {
+    if (isMobile) {
+      setSidebarOpen(false);
+    }
+  }, [location.pathname, isMobile]);
 
   const filteredPrimaryLinks = PRIMARY_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
   const filteredMessageLinks = MESSAGE_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
   const filteredServiceLinks = SERVICE_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
+  const filteredSettingsLinks = SETTINGS_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
   const filteredTechLinks = TECH_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
   const filteredPublicLinks = PUBLIC_NAV_LINKS.filter((link) => (link.adminOnly ? isAdmin : true));
 
@@ -73,7 +103,7 @@ export default function AppShell({ session, children, hideSidebar = false }: App
 
   return (
     <div className={shellClass}>
-      {!hideSidebar && (
+      {!hideSidebar && sidebarOpen && (
         <aside className="sidebar">
           <div className="brand">
             <span className="brand-accent" />
@@ -150,6 +180,24 @@ export default function AppShell({ session, children, hideSidebar = false }: App
                 ))}
               </div>
             )}
+            {filteredSettingsLinks.length > 0 && (
+              <div className="nav-section">
+                <div className="nav-section-title">Настройки</div>
+                {filteredSettingsLinks.map((link) => (
+                  <NavLink
+                    key={link.to}
+                    to={link.to}
+                    className={({ isActive }) =>
+                      classNames("nav-link", {
+                        active: isActive || location.pathname === link.to
+                      })
+                    }
+                  >
+                    {link.label}
+                  </NavLink>
+                ))}
+              </div>
+            )}
             {filteredPublicLinks.length > 0 && (
               <div className="nav-section">
                 <div className="nav-section-title">Публично</div>
@@ -198,10 +246,19 @@ export default function AppShell({ session, children, hideSidebar = false }: App
       <main className={mainClass}>
         {!hideSidebar && (
           <header className="main-header">
-            <h1>АДМИНКА КРУТИЛКИ</h1>
-            <div className="main-meta">
-              <span>Управление базой клиентов и инвентарем</span>
+            <div>
+              <h1>АДМИНКА КРУТИЛКИ</h1>
+              <div className="main-meta">
+                <span>Управление базой клиентов и инвентарем</span>
+              </div>
             </div>
+            {isMobile ? (
+              <div className="header-actions">
+                <button className="btn ghost" onClick={() => setSidebarOpen((prev) => !prev)}>
+                  {sidebarOpen ? "Скрыть меню" : "Открыть меню"}
+                </button>
+              </div>
+            ) : null}
           </header>
         )}
         <div className="main-content">{children}</div>

@@ -1,5 +1,5 @@
 import classNames from "classnames";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
@@ -196,11 +196,17 @@ export default function SlotSeatingPage() {
   const [assignStandId, setAssignStandId] = useState<number | null>(null);
   const [searchTerm, setSearchTerm] = useState<string>("");
   const [isCopyOpen, setIsCopyOpen] = useState<boolean>(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [selectedTargets, setSelectedTargets] = useState<number[]>([]);
   const [copyMessage, setCopyMessage] = useState<string | null>(null);
   const [weekdayFilters, setWeekdayFilters] = useState<number[]>([]);
   const [timeFilterStart, setTimeFilterStart] = useState<string>("");
   const [timeFilterEnd, setTimeFilterEnd] = useState<string>("");
+  const [slotEdit, setSlotEdit] = useState<{ label: string; sessionKind: string; instructorId: string }>({
+    label: "",
+    sessionKind: "self_service",
+    instructorId: ""
+  });
 
   const slotQuery = useQuery<ScheduleSlotDetailResponse>({
     queryKey: ["schedule-slot", slotId],
@@ -221,6 +227,41 @@ export default function SlotSeatingPage() {
     enabled: isCopyOpen && Number.isFinite(slotId),
     queryFn: () => apiFetch<SlotCopyTargetsResponse>(`/api/schedule/slots/${slotId}/copy-targets`),
     staleTime: 60_000
+  });
+
+  const slot = slotQuery.data?.slot;
+  const isAdmin = session.isAdmin;
+
+  useEffect(() => {
+    if (!slot) return;
+    setSlotEdit({
+      label: slot.label ?? "",
+      sessionKind: slot.session_kind,
+      instructorId: slot.instructorId ? String(slot.instructorId) : ""
+    });
+  }, [slot?.id, slot?.label, slot?.session_kind, slot?.instructorId]);
+
+  const slotUpdateMutation = useMutation<ScheduleSlotDetailResponse, ApiError, Partial<ScheduleSlot>>({
+    mutationFn: (payload) =>
+      apiFetch<ScheduleSlotDetailResponse>(`/api/schedule/slots/${slotId}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      }),
+    onSuccess: (data) => {
+      queryClient.setQueryData<ScheduleSlotDetailResponse>(["schedule-slot", slotId], (prev) => {
+        const mergedStands = data.stands ?? prev?.stands ?? [];
+        return { ...data, stands: mergedStands };
+      });
+      setSlotEdit({
+        label: data.slot.label ?? "",
+        sessionKind: data.slot.session_kind,
+        instructorId: data.slot.instructorId ? String(data.slot.instructorId) : ""
+      });
+      setErrorMessage(null);
+    },
+    onError: (error) => {
+      setErrorMessage(error?.message ?? "Не удалось обновить слот");
+    }
   });
 
   function applySlotUpdate(data: MoveResponse | { reservation: ScheduleReservation; slot?: ScheduleSlot }) {
@@ -333,7 +374,6 @@ export default function SlotSeatingPage() {
     }
   });
 
-  const slot = slotQuery.data?.slot;
   const stands = useMemo<ScheduleStandSummary[]>(() => {
     const items = slotQuery.data?.stands ?? [];
     return items.slice().sort((a, b) => {
@@ -479,26 +519,87 @@ export default function SlotSeatingPage() {
   const slotLabel = `${slot.slot_date} (${weekdayLabel}) · ${slot.start_time}-${slot.end_time}`;
   const instructorName = slot.instructorName ?? (slot.instructorId != null ? `#${slot.instructorId}` : null);
 
+  function handleSlotMetaSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!isAdmin) return;
+    const payload: Record<string, unknown> = {
+      label: slotEdit.label.trim(),
+      sessionKind: slotEdit.sessionKind,
+      instructorId:
+        slotEdit.sessionKind === "instructor" && slotEdit.instructorId ? Number(slotEdit.instructorId) : null
+    };
+    slotUpdateMutation.mutate(payload);
+  }
+
   return (
     <Panel title="Рассадка слота" subtitle="Перетащите карточки клиентов между станками">
       <div className="slot-seating-header">
         <div className="slot-seating-meta">
           <div className="slot-seating-title">{slotLabel}</div>
-          <div className="slot-seating-subtitle">
-            Неделя: {weekLabel || "—"}
-            {slot.label ? ` · ${slot.label}` : ""}
-            {instructorName ? ` · Инструктор: ${instructorName}` : ""}
-          </div>
-        </div>
-        <div className="slot-seating-actions">
-          <button type="button" className="btn ghost" onClick={() => navigate(-1)}>
-            Назад
-          </button>
-          <Link to="/schedule/manage" className="btn ghost">
-            К расписанию
-          </Link>
+          <div className="slot-seating-subtitle">Неделя: {weekLabel || "—"}</div>
+          {!isAdmin ? (
+            <div className="slot-seating-subtitle">
+              {slot.label ? `Метка: ${slot.label}` : ""}
+              {instructorName ? ` · Инструктор: ${instructorName}` : ""}
+              {slot.session_kind ? ` · Режим: ${slot.session_kind}` : ""}
+            </div>
+          ) : null}
         </div>
       </div>
+
+      {session.isAdmin ? (
+        <div className="slot-meta-section">
+          <button type="button" className="btn primary" onClick={() => setIsSettingsOpen((prev) => !prev)}>
+            {isSettingsOpen ? "Скрыть настройки" : "Настройки слота"}
+          </button>
+          {isSettingsOpen ? (
+            <div className="slot-meta-panel">
+              <form className="slot-meta-form" onSubmit={handleSlotMetaSubmit}>
+                <label>
+                  Метка слота
+                  <input
+                    type="text"
+                    value={slotEdit.label}
+                    onChange={(event) => setSlotEdit((prev) => ({ ...prev, label: event.target.value }))}
+                    placeholder="Например, Инструктор Петр"
+                  />
+                </label>
+                <label>
+                  Режим
+                  <select
+                    value={slotEdit.sessionKind}
+                    onChange={(event) => setSlotEdit((prev) => ({ ...prev, sessionKind: event.target.value }))}
+                  >
+                    <option value="self_service">Самокрутка</option>
+                    <option value="instructor">С инструктором</option>
+                    <option value="race">Гонка</option>
+                  </select>
+                </label>
+                <label>
+                  Инструктор
+                  <select
+                    value={slotEdit.instructorId}
+                    onChange={(event) => setSlotEdit((prev) => ({ ...prev, instructorId: event.target.value }))}
+                    disabled={slotEdit.sessionKind !== "instructor"}
+                  >
+                    <option value="">— Без инструктора —</option>
+                    {slotQuery.data?.instructors.map((inst) => (
+                      <option key={inst.id} value={inst.id}>
+                        {inst.full_name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="slot-meta-actions">
+                  <button type="submit" className="btn primary" disabled={slotUpdateMutation.isPending}>
+                    Сохранить
+                  </button>
+                </div>
+              </form>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {session.isAdmin ? (
         <div className="slot-copy-section">
