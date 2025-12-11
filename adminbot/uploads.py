@@ -422,12 +422,20 @@ async def process_workout_bytes(
     account_ids: List[str],
     reply_func: Callable[[str], Awaitable[Any]],
 ) -> Tuple[bool, str]:
-    def worker():
+    def worker() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        xml_text: str
+        if isinstance(raw_bytes, bytes):
+            try:
+                xml_text = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                xml_text = raw_bytes.decode("utf-8", errors="ignore")
+        else:
+            xml_text = str(raw_bytes)
         try:
-            workout = parse_zwo_workout(raw_bytes)
+            workout = parse_zwo_workout(xml_text)
         except Exception:
             LOGGER.exception("Failed to parse workout file %s", file_name)
-            return False, "⚠️ Не удалось разобрать ZWO файл."
+            return None, "⚠️ Не удалось разобрать ZWO файл."
 
         chart_data = zwo_to_chart_data(workout)
         ftp = workout.get("ftp")
@@ -435,9 +443,12 @@ async def process_workout_bytes(
             ftp = None
         metrics = calculate_workout_metrics(workout, ftp)
         payload = build_workout_payload(workout, chart_data, metrics)
-        return payload
+        return payload, None
 
-    payload = await asyncio.to_thread(worker)
+    payload, error = await asyncio.to_thread(worker)
+    if error:
+        await reply_func(error)
+        return False, "parse-error"
     if not payload:
         await reply_func("⚠️ Не удалось обработать файл.")
         return False, "parse-error"
@@ -457,9 +468,15 @@ async def process_workout_bytes(
 async def upload_workout_for_account(account_id: str, payload: Dict[str, Any]) -> Tuple[bool, str]:
     from wattattack_activities import WattAttackClient  # local import to avoid cycles
 
+    account = _account_registry.get(account_id)
+    if not account:
+        LOGGER.warning("Workout upload requested for unknown account %s", account_id)
+        return False, "Аккаунт не найден"
+
     def worker() -> Tuple[bool, str]:
         try:
-            client = WattAttackClient(account_id)
+            client = WattAttackClient()
+            client.login(account.email, account.password, timeout=_default_timeout)
             response = client.upload_workout(payload, timeout=_default_timeout)
             if isinstance(response, dict):
                 message = response.get("message") or "Загружено"

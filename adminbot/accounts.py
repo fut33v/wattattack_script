@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-from wattattack_activities import DEFAULT_BASE_URL
+from wattattack_activities import DEFAULT_BASE_URL, normalize_base_url
 from repositories import wattattack_account_repository
 
 LOGGER = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ def load_accounts(config_path: Path) -> Dict[str, AccountConfig]:
                 name=entry.get("name") or str(identifier),
                 email=entry["email"],
                 password=entry["password"],
-                base_url=entry.get("base_url") or DEFAULT_BASE_URL,
+                base_url=normalize_base_url(entry.get("base_url") or DEFAULT_BASE_URL),
                 stand_ids=tuple(entry.get("stand_ids") or ()),
             )
     except Exception:  # noqa: BLE001
@@ -86,7 +86,7 @@ def load_accounts(config_path: Path) -> Dict[str, AccountConfig]:
             name=entry.get("name", identifier),
             email=entry["email"],
             password=entry["password"],
-            base_url=entry.get("base_url", DEFAULT_BASE_URL),
+            base_url=normalize_base_url(entry.get("base_url", DEFAULT_BASE_URL)),
             stand_ids=_parse_stand_ids(entry),
         )
 

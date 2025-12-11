@@ -12,6 +12,7 @@ from datetime import datetime
 from getpass import getpass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Tuple
+from urllib.parse import urlparse
 
 import requests
 
@@ -20,11 +21,32 @@ API_PREFIX = "/api/v1"
 LOGGER = logging.getLogger(__name__)
 
 
+def normalize_base_url(value: str) -> str:
+    """Ensure base URL has a scheme and no trailing slash."""
+
+    raw = (value or DEFAULT_BASE_URL).strip()
+    if not raw:
+        return DEFAULT_BASE_URL
+
+    parsed = urlparse(raw)
+    if not parsed.scheme:
+        parsed = urlparse(f"https://{raw}")
+
+    if not parsed.netloc and parsed.path:
+        # Handle inputs like "example.com" that end up in path.
+        parsed = parsed._replace(netloc=parsed.path, path="")
+
+    normalized = parsed._replace(path="", params="", query="", fragment="").geturl()
+    if not normalized:
+        return DEFAULT_BASE_URL
+    return normalized.rstrip("/")
+
+
 class WattAttackClient:
     """Thin wrapper around the WattAttack web API."""
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_base_url(base_url)
         self.session = requests.Session()
         self.session.headers.update(
             {
