@@ -66,7 +66,10 @@ def _clear_state(context) -> None:
 
 def _build_cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("❌ Отмена", callback_data="events|cancel")]]
+        [
+            [InlineKeyboardButton("❌ Отмена", callback_data="events|cancel")],
+            [InlineKeyboardButton("↩️ В меню", callback_data="menu|start")],
+        ]
     )
 
 
@@ -78,6 +81,7 @@ def _build_type_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🏁 Гонка", callback_data="events|type|race"),
             ],
             [InlineKeyboardButton("❌ Закрыть", callback_data="events|cancel")],
+            [InlineKeyboardButton("↩️ В меню", callback_data="menu|start")],
         ]
     )
 
@@ -528,6 +532,7 @@ def _build_account_keyboard(accounts: Mapping[str, AccountConfig]) -> InlineKeyb
     if current_row:
         rows.append(current_row)
     rows.append([InlineKeyboardButton("❌ Отмена", callback_data="events|cancel")])
+    rows.append([InlineKeyboardButton("↩️ В меню", callback_data="menu|start")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -559,6 +564,7 @@ def _build_route_keyboard(routes: Iterable[Dict[str, object]]) -> InlineKeyboard
             InlineKeyboardButton("❌ Отмена", callback_data="events|cancel"),
         ]
     )
+    rows.append([InlineKeyboardButton("↩️ В меню", callback_data="menu|start")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -595,6 +601,7 @@ def _build_date_keyboard(state: EventFlowState, timezone) -> InlineKeyboardMarku
             InlineKeyboardButton("❌ Отмена", callback_data="events|cancel"),
         ]
     )
+    buttons.append([InlineKeyboardButton("↩️ В меню", callback_data="menu|start")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -619,6 +626,7 @@ def _build_time_keyboard(state: EventFlowState, timezone) -> Tuple[InlineKeyboar
         rows = [
             [InlineKeyboardButton("↩️ К датам", callback_data="events|back|date")],
             [InlineKeyboardButton("❌ Отмена", callback_data="events|cancel")],
+            [InlineKeyboardButton("↩️ В меню", callback_data="menu|start")],
         ]
         return InlineKeyboardMarkup(rows), False
 
@@ -652,6 +660,7 @@ def _build_time_keyboard(state: EventFlowState, timezone) -> Tuple[InlineKeyboar
             InlineKeyboardButton("❌ Отмена", callback_data="events|cancel"),
         ]
     )
+    rows.append([InlineKeyboardButton("↩️ В меню", callback_data="menu|start")])
     return InlineKeyboardMarkup(rows), True
 
 
@@ -665,6 +674,7 @@ def _build_measure_type_keyboard() -> InlineKeyboardMarkup:
             ],
             [InlineKeyboardButton("↩️ К времени", callback_data="events|back|time")],
             [InlineKeyboardButton("❌ Отмена", callback_data="events|cancel")],
+            [InlineKeyboardButton("↩️ В меню", callback_data="menu|start")],
         ]
     )
 
@@ -674,6 +684,7 @@ def _build_measure_value_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("↩️ Формат", callback_data="events|back|measure")],
             [InlineKeyboardButton("❌ Отмена", callback_data="events|cancel")],
+            [InlineKeyboardButton("↩️ В меню", callback_data="menu|start")],
         ]
     )
 
@@ -704,6 +715,7 @@ def _build_summary_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🕘 Изменить время", callback_data="events|back|time"),
                 InlineKeyboardButton("❌ Отмена", callback_data="events|cancel"),
             ],
+            [InlineKeyboardButton("↩️ В меню", callback_data="menu|start")],
         ]
     )
 

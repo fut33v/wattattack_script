@@ -30,6 +30,7 @@ from .routes.client_links import router as client_links_router
 from .routes.vk_client_links import router as vk_client_links_router
 from .routes.intervals_links import router as intervals_links_router
 from .routes.trainers import router as trainers_router
+from .routes.pedals import router as pedals_router
 from .routes.races import router as races_router, public_router as public_races_router
 from .routes.strava import router as strava_router
 from .routes.leaderboard import router as leaderboard_router
@@ -87,6 +88,7 @@ api.include_router(vk_client_links_router, dependencies=[Depends(require_admin)]
 api.include_router(intervals_links_router, dependencies=[Depends(require_admin)])
 api.include_router(races_router)
 api.include_router(trainers_router)
+api.include_router(pedals_router)
 api.include_router(messaging_router)
 api.include_router(schedule_router)
 api.include_router(schedule_slots_router)

@@ -169,6 +169,16 @@ export interface BikeListResponse {
   items: BikeRow[];
 }
 
+export interface PedalRow {
+  id: number;
+  name: string;
+  pedal_type: string;
+}
+
+export interface PedalListResponse {
+  items: PedalRow[];
+}
+
 export interface TrainerRow {
   id: number;
   code?: string | null;

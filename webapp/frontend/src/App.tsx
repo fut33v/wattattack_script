@@ -35,6 +35,7 @@ import StatsPage from "./pages/StatsPage";
 import WattattackAccountsPage from "./pages/WattattackAccountsPage";
 import GroupsPage from "./pages/GroupsPage";
 import SettingsPage from "./pages/SettingsPage";
+import PedalsPage from "./pages/PedalsPage";
 
 import "./styles/layout.css";
 import "./styles/messaging.css";
@@ -93,6 +94,7 @@ export default function App() {
           <Route path="/messages" element={<MessagesPage />} />
           <Route path="/instructors" element={<InstructorsPage />} />
           <Route path="/bikes" element={<BikesPage />} />
+          <Route path="/pedals" element={<PedalsPage />} />
           <Route path="/trainers" element={<TrainersPage />} />
           <Route path="/links" element={<ClientLinksPage />} />
           <Route path="/import" element={<ImportPage />} />

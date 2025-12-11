@@ -52,6 +52,7 @@ const PUBLIC_NAV_LINKS: readonly NavLinkConfig[] = [
 
 const TECH_NAV_LINKS: readonly NavLinkConfig[] = [
   { to: "/bikes", label: "🚲 Велосипеды", adminOnly: false },
+  { to: "/pedals", label: "🚴 Педали", adminOnly: false },
   { to: "/trainers", label: "💺 Тренажеры", adminOnly: false }
 ] as const;
 

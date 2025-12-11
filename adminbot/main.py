@@ -40,9 +40,6 @@ from repositories.link_requests_repository import get_link_request, delete_link_
 from repositories.admin_repository import (
     ensure_admin_table,
     seed_admins_from_env,
-    list_admins as db_list_admins,
-    add_admin as db_add_admin,
-    remove_admin as db_remove_admin,
     is_admin as db_is_admin,
 )
 from repositories.bikes_repository import (
@@ -62,6 +59,10 @@ from repositories.trainers_repository import (
     get_trainer,
     update_trainer_fields,
 )
+from repositories.pedals_repository import (
+    ensure_pedals_table,
+    list_pedals,
+)
 from repositories.schedule_repository import (
     book_available_reservation,
     get_reservation,
@@ -77,13 +78,6 @@ from repositories.layout_repository import (
     set_bike_assignment,
     clear_bike_assignment_for_bike,
 )
-from scripts.load_clients import load_clients_from_csv_bytes, export_clients_to_csv_bytes
-from scripts.load_bikes import load_bikes_from_csv_bytes
-from scripts.load_trainers import load_trainers_from_csv_bytes
-from scripts.import_schedule_from_xlsx import (
-    run_schedule_import_from_bytes,
-    format_import_report as format_schedule_import_report,
-)
 from wattattack_activities import WattAttackClient
 from wattattack_profiles import apply_client_profile as apply_wattattack_profile
 from wattattack_workouts import (
@@ -95,6 +89,10 @@ from wattattack_workouts import (
 from adminbot import events as events_admin
 from adminbot import intervals as intervals_admin
 from adminbot import wizard as wizard_admin
+from adminbot import menu as menu_admin
+from adminbot import accounts_view
+from adminbot import admins_view
+from adminbot import uploads as uploads_admin
 from adminbot.accounts import (
     AccountConfig,
     format_account_list as format_account_list_from_registry,
@@ -136,6 +134,16 @@ BOOKING_REASSIGN_LIMIT = max(3, int(os.environ.get("ADMINBOT_REASSIGN_OPTIONS", 
 CLIENT_BOOKINGS_LIMIT = max(5, int(os.environ.get("ADMINBOT_CLIENT_BOOKINGS_LIMIT", "10")))
 _CLIENT_BOT = None
 _CLIENT_BOT_WARNED = False
+START_MESSAGE = (
+    "👋 Это главное меню админа Крутилки.\n"
+    "Выберите действие в меню ниже или используйте команды напрямую."
+)
+
+
+def build_menu_return_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("↩️ В меню", callback_data="menu|start")]]
+    )
 
 
 def _get_client_bot() -> Bot | None:
@@ -898,34 +906,9 @@ async def cancel_client_reservation(
     notice = f"Бронь на {summary} отменена."
     await show_client_bookings(query, context, client_id, notice=notice)
 
-PENDING_UPLOAD_KEY = "pending_inventory_upload"
 PENDING_TRAINER_EDIT_KEY = "pending_trainer_edit"
 PENDING_BIKE_EDIT_KEY = "pending_bike_edit"
-PENDING_WORKOUT_UPLOAD_KEY = "pending_workout_upload"
-PENDING_WORKOUT_FILE_KEY = "pending_workout_file"
-PENDING_COMBINATE_KEY = "pending_combinate"
 LAST_BIKES_SEARCH_KEY = "adminbot:last_bikes_search"
-UPLOAD_COMMAND_TYPES = {
-    "/uploadclients": "clients",
-    "/uploadbikes": "bikes",
-    "/uploadstands": "stands",
-    "/uploadschedule": "schedule",
-}
-WORKOUT_UPLOAD_COMMAND = "/uploadworkout"
-UPLOADCLIENTS_PROMPT = (
-    "📄 Выберите режим импорта клиентов.\n"
-    "• «Обновление» — добавить новых и обновить существующих.\n"
-    "• «Перезаписать» — очистить таблицу и загрузить заново.\n"
-    "• «Dry run» — проверить файл без изменений в базе.\n"
-    "После выбора нажмите «Готово» и отправьте CSV документ."
-)
-UPLOADSCHEDULE_PROMPT = (
-    "📅 Выберите режим импорта расписания.\n"
-    "• «Keep» — не очищать существующие недели (добавление/обновление).\n"
-    "• Без keep — недели будут полностью заменены.\n"
-    "• «Dry run» — проверить файл без записи.\n"
-    "После выбора нажмите «Готово» и отправьте XLSX документ."
-)
 
 
 ACCOUNT_REGISTRY: Dict[str, AccountConfig] = {}
@@ -945,101 +928,6 @@ def format_account_list() -> str:
 
 def resolve_account_tokens(tokens: Iterable[str]) -> Tuple[List[str], List[str]]:
     return resolve_account_tokens_value(ACCOUNT_REGISTRY, tokens)
-
-
-def format_admin_list(admins: List[Dict[str, Any]]) -> str:
-    if not admins:
-        return "Администраторы не настроены."
-    lines = [format_admin_record(admin) for admin in admins]
-    return "\n".join(lines)
-
-
-def format_admin_record(record: Dict[str, Any]) -> str:
-    display_name = record.get("display_name")
-    username = record.get("username")
-    tg_id = record.get("tg_id")
-
-    parts: List[str] = []
-    if display_name:
-        parts.append(str(display_name))
-    if username:
-        handle = username if username.startswith("@") else f"@{username}"
-        parts.append(handle)
-    if tg_id:
-        parts.append(f"id={tg_id}")
-    return " ".join(parts) if parts else f"id={tg_id}" if tg_id else str(record.get("id"))
-
-
-def _set_pending_upload(
-    user_data: Dict,
-    upload_type: str,
-    *,
-    truncate: bool,
-    update: bool = False,
-    **extra: Any,
-) -> None:
-    payload: Dict[str, Any] = {"type": upload_type, "truncate": truncate, "update": update}
-    if extra:
-        payload.update(extra)
-    user_data[PENDING_UPLOAD_KEY] = payload
-
-
-def _pop_pending_upload(user_data: Dict) -> Optional[Dict[str, Any]]:
-    value = user_data.get(PENDING_UPLOAD_KEY)
-    if value is not None:
-        user_data.pop(PENDING_UPLOAD_KEY, None)
-    return value
-
-
-def _get_pending_upload(user_data: Dict) -> Optional[Dict[str, Any]]:
-    value = user_data.get(PENDING_UPLOAD_KEY)
-    if isinstance(value, dict):
-        return value
-    return None
-
-
-def _set_pending_workout_upload(user_data: Dict[str, Any], account_ids: List[str]) -> None:
-    unique_ids = list(dict.fromkeys(account_ids))
-    user_data[PENDING_WORKOUT_UPLOAD_KEY] = {"account_ids": unique_ids}
-
-
-def _pop_pending_workout_upload(user_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    value = user_data.get(PENDING_WORKOUT_UPLOAD_KEY)
-    if value is not None:
-        user_data.pop(PENDING_WORKOUT_UPLOAD_KEY, None)
-    return value
-
-
-def _set_pending_workout_file(
-    user_data: Dict[str, Any], *, data: bytes, file_name: str, chat_id: int, reply_to_message_id: Optional[int]
-) -> None:
-    user_data[PENDING_WORKOUT_FILE_KEY] = {
-        "data": data,
-        "file_name": file_name,
-        "chat_id": chat_id,
-        "reply_to_message_id": reply_to_message_id,
-    }
-
-
-def _get_pending_workout_file(user_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    value = user_data.get(PENDING_WORKOUT_FILE_KEY)
-    if not value:
-        return None
-    if not isinstance(value, dict):
-        return None
-    return value
-
-
-def _clear_pending_workout_file(user_data: Dict[str, Any]) -> None:
-    user_data.pop(PENDING_WORKOUT_FILE_KEY, None)
-
-
-def _set_pending_combinate(user_data: Dict[str, Any], chat_id: int) -> None:
-    user_data[PENDING_COMBINATE_KEY] = {"chat_id": chat_id}
-
-
-def _clear_pending_combinate(user_data: Dict[str, Any]) -> None:
-    user_data.pop(PENDING_COMBINATE_KEY, None)
 
 
 def _normalize_tokens(value: str) -> List[str]:
@@ -1652,17 +1540,6 @@ def build_trainer_edit_markup(trainer_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def parse_admin_identifier(value: str) -> Tuple[Optional[int], Optional[str]]:
-    value = value.strip()
-    if not value:
-        return None, None
-    if value.startswith("@"):
-        value = value[1:]
-    if value.isdigit():
-        return int(value), None
-    return None, value
-
-
 def is_admin_user(user) -> bool:
     if user is None:
         return False
@@ -1687,136 +1564,6 @@ async def ensure_admin_callback(query) -> bool:
         return True
     await query.edit_message_text("🚫 Недостаточно прав для выполнения действия.")
     return False
-
-
-async def process_clients_document(
-    document,
-    message: Message,
-    truncate: bool = False,
-    update_existing: bool = False,
-    dry_run: bool = False,
-) -> None:
-    try:
-        file = await document.get_file()
-        data = await file.download_as_bytearray()
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to download CSV file")
-        await message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
-        return
-
-    try:
-        inserted, updated = await asyncio.to_thread(
-            load_clients_from_csv_bytes,
-            bytes(data),
-            truncate,
-            update_existing,
-            dry_run,
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to import clients")
-        await message.reply_text(f"❌ Ошибка импорта: {exc}")
-        return
-
-    mode_suffix = " Режим обновления." if update_existing else ""
-    dry_run_suffix = " Режим предпросмотра (без изменений)." if dry_run else ""
-    await message.reply_text(
-        "✅ Импорт завершён. Добавлено: {0}, обновлено: {1}.{2}{3}".format(
-            inserted, updated, mode_suffix, dry_run_suffix
-        )
-    )
-
-
-async def process_bikes_document(
-    document, message: Message, truncate: bool = False
-) -> None:
-    try:
-        file = await document.get_file()
-        data = await file.download_as_bytearray()
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to download bikes CSV file")
-        await message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
-        return
-
-    try:
-        inserted, updated = await asyncio.to_thread(
-            load_bikes_from_csv_bytes,
-            bytes(data),
-            truncate,
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to import bikes")
-        await message.reply_text(f"❌ Ошибка импорта велосипедов: {exc}")
-        return
-
-    await message.reply_text(
-        "✅ Велосипеды импортированы. Добавлено: {0}, обновлено: {1}.".format(
-            inserted, updated
-        )
-    )
-
-
-async def process_trainers_document(
-    document, message: Message, truncate: bool = False
-) -> None:
-    try:
-        file = await document.get_file()
-        data = await file.download_as_bytearray()
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to download trainers CSV file")
-        await message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
-        return
-
-    try:
-        inserted, updated = await asyncio.to_thread(
-            load_trainers_from_csv_bytes,
-            bytes(data),
-            truncate,
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to import trainers")
-        await message.reply_text(f"❌ Ошибка импорта станков: {exc}")
-        return
-
-    await message.reply_text(
-        "✅ Станки импортированы. Добавлено: {0}, обновлено: {1}.".format(
-            inserted, updated
-        )
-    )
-
-
-async def process_schedule_document(
-    document,
-    message: Message,
-    *,
-    keep_existing: bool,
-    dry_run: bool,
-) -> None:
-    try:
-        file = await document.get_file()
-        data = await file.download_as_bytearray()
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to download schedule file")
-        await message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
-        return
-
-    try:
-        outcome = await asyncio.to_thread(
-            run_schedule_import_from_bytes,
-            bytes(data),
-            keep_existing=keep_existing,
-            dry_run=dry_run,
-        )
-    except ValueError as exc:
-        await message.reply_text(f"⚠️ {exc}")
-        return
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to import schedule from XLSX")
-        await message.reply_text(f"❌ Ошибка импорта расписания: {exc}")
-        return
-
-    report = format_schedule_import_report(outcome)
-    for chunk in _split_html_message(report):
-        await message.reply_text(chunk)
 
 
 def _make_reply_func(
@@ -1957,48 +1704,34 @@ async def upload_workout_to_account(
     return True, message
 
 
+def build_start_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🧙‍♂️ Волшебник", callback_data="menu|wizard"),
+                InlineKeyboardButton("🆕 Создать клиента", callback_data="menu|newclient"),
+            ],
+            [
+                InlineKeyboardButton("👤 Аккаунты", callback_data="menu|accounts"),
+                InlineKeyboardButton("🚲 Велосипеды", callback_data="menu|bikes"),
+            ],
+            [
+                InlineKeyboardButton("🛠 Станки", callback_data="menu|stands"),
+                InlineKeyboardButton("📅 События", callback_data="menu|events"),
+            ],
+        ]
+    )
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
     if not ensure_admin_message(update):
         return
     await update.message.reply_text(
-        "👋 Этот бот управляет профилями WattAttack и клиентской базой. "
-        "Для скачивания активностей используйте бота krutilkafitbot.",
+        START_MESSAGE,
+        reply_markup=menu_admin.build_start_menu_keyboard(),
     )
-
-
-async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-    message = (
-        "ℹ️ Использование:\n"
-        "/start — краткое описание возможностей\n"
-        "/setclient <аккаунт> — применить данные клиента из базы\n"
-        "/account <аккаунт> — показать текущие данные аккаунта\n"
-        "/combinate — подобрать велосипеды и станки; фамилии пришлите отдельным сообщением\n"
-        "/wizard — ближайшие слоты и массовая посадка на аккаунты\n"
-        "/bikes [поиск] — показать доступные велосипеды\n"
-        "/layout — показать текущую расстановку велосипедов\n"
-        "/stands [поиск] — показать доступные станки\n"
-        "/client <имя/фамилия> — найти клиента по БД\n"
-        "/stats — статистика по клиентской базе\n"
-        "/uploadclients [truncate] — загрузить CSV клиентов\n"
-        "/downloadclients — выгрузить клиентов в CSV\n"
-        "/uploadbikes [truncate] — загрузить CSV велосипедов\n"
-        "/uploadstands [truncate] — загрузить CSV станков\n"
-        "/uploadschedule [dry-run] [keep] — загрузить XLSX расписание\n"
-        "/uploadworkout [all|аккаунт] — загрузить тренировку ZWO в библиотеку\n"
-        "/newclient — создать новую запись клиента в базе\n"
-        "/events — создать заезд или (позже) гонку прямо из чата\n"
-        "/admins — показать список администраторов\n"
-        "/addadmin <id|@user> — добавить администратора (можно ответом на сообщение)\n"
-        "/removeadmin <id|@user> — удалить администратора"
-        "\n\nДля выгрузки активностей и FIT файлов используйте бота krutilkafitbot."
-    )
-    await update.message.reply_text(message)
 
 
 async def events_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2172,16 +1905,26 @@ async def _newclient_finalize_creation(
 
 
 async def newclient_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not update.message:
-        return ConversationHandler.END
-    if not ensure_admin_message(update):
+    query = update.callback_query
+    message = update.effective_message
+    if query:
+        await query.answer()
+        if not await ensure_admin_callback(query):
+            return ConversationHandler.END
+    else:
+        if not update.message:
+            return ConversationHandler.END
+        if not ensure_admin_message(update):
+            return ConversationHandler.END
+
+    if not message:
         return ConversationHandler.END
 
     _newclient_reset_form(context)
     form = _newclient_get_form(context)
     form["ftp"] = float(DEFAULT_CLIENT_FTP)
 
-    await update.message.reply_text(
+    await message.reply_text(
         "🆕 Создание новой анкеты клиента.\n"
         "🖊️ Введите имя клиента (команда /cancel для отмены)."
     )
@@ -2419,946 +2162,7 @@ async def newclient_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-    try:
-        stats = await asyncio.to_thread(get_clients_stats)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to load clients stats")
-        await update.message.reply_text(f"❌ Ошибка получения статистики клиентов: {exc}")
-        return
-
-    stats = stats or {}
-    total = int(stats.get("total") or 0)
-    lines = [
-        "📊 Статистика клиентов",
-        f"👥 Всего: {total}",
-        _format_metric_range("📏 Рост", stats.get("min_height"), stats.get("max_height"), "см"),
-        _format_metric_range("⚡ FTP", stats.get("min_ftp"), stats.get("max_ftp"), "Вт"),
-    ]
-    await update.message.reply_text("\n".join(lines))
-
-
-async def admins_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-    try:
-        admins = await asyncio.to_thread(db_list_admins)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to load admins")
-        await update.message.reply_text(f"❌ Ошибка получения списка администраторов: {exc}")
-        return
-
-    message = (
-        "👥 Администраторы:\n" + format_admin_list(admins)
-        if admins
-        else "⚠️ Администраторы не настроены."
-    )
-    await update.message.reply_text(message)
-
-
-async def _perform_addadmin(
-    message: Message,
-    context: ContextTypes.DEFAULT_TYPE,
-    *,
-    identifier: str,
-    display_name: Optional[str] = None,
-    target_user=None,
-) -> None:
-    if target_user is not None:
-        tg_id = target_user.id
-        username = target_user.username
-        display_name = display_name or target_user.full_name
-    else:
-        tg_id, username = parse_admin_identifier(identifier)
-
-    if tg_id is None and not username:
-        await message.reply_text("⚠️ Не удалось распознать ID или username. Попробуйте ещё раз.")
-        return
-
-    try:
-        created, record = await asyncio.to_thread(
-            db_add_admin,
-            tg_id=tg_id,
-            username=username,
-            display_name=display_name,
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to add admin")
-        await message.reply_text(f"❌ Ошибка добавления администратора: {exc}")
-        return
-
-    status = "Добавлен" if created else "Обновлён"
-    summary = format_admin_record(record)
-    await message.reply_text(f"✅ {status} администратор: {summary}")
-
-
-async def _perform_removeadmin(
-    message: Message,
-    identifier: str,
-    *,
-    target_user=None,
-) -> None:
-    if target_user is not None:
-        tg_id = target_user.id
-        username = target_user.username
-    else:
-        tg_id, username = parse_admin_identifier(identifier)
-
-    if tg_id is None and (not username):
-        await message.reply_text("⚠️ Некорректный идентификатор администратора.")
-        return
-
-    try:
-        removed = await asyncio.to_thread(
-            db_remove_admin,
-            tg_id=tg_id,
-            username=username,
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to remove admin")
-        await message.reply_text(f"❌ Ошибка удаления администратора: {exc}")
-        return
-
-    if removed:
-        await message.reply_text("🗑️ Администратор удалён.")
-    else:
-        await message.reply_text("🔍 Администратор не найден.")
-
-
-async def addadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-    context.user_data.pop("pending_addadmin", None)
-
-    identifier: Optional[str] = None
-    display_name: Optional[str] = None
-    target_user = None
-
-    if context.args:
-        identifier = context.args[0]
-        if len(context.args) > 1:
-            display_name = " ".join(context.args[1:])
-
-    if not identifier and update.message.reply_to_message:
-        target_user = update.message.reply_to_message.from_user
-        identifier = str(target_user.id)
-        display_name = display_name or target_user.full_name
-
-    if not identifier:
-        context.user_data["pending_addadmin"] = {
-            "chat_id": update.message.chat_id,
-        }
-        await update.message.reply_text(
-            "ℹ️ Укажите ID или @username (можно ответить на сообщение пользователя)."
-        )
-        return
-
-    await _perform_addadmin(
-        update.message,
-        context,
-        identifier=identifier,
-        display_name=display_name,
-        target_user=target_user,
-    )
-
-
-async def removeadmin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-    context.user_data.pop("pending_removeadmin", None)
-
-    identifier: Optional[str] = None
-    target_user = None
-
-    if context.args:
-        identifier = context.args[0]
-
-    if not identifier and update.message.reply_to_message:
-        target_user = update.message.reply_to_message.from_user
-        identifier = str(target_user.id)
-
-    if not identifier:
-        context.user_data["pending_removeadmin"] = {"chat_id": update.message.chat_id}
-        await update.message.reply_text(
-            "ℹ️ Укажите ID или @username (можно ответить на сообщение администратора)."
-        )
-        return
-
-    await _perform_removeadmin(update.message, identifier, target_user=target_user)
-
-
-def build_uploadclients_keyboard(state: Dict[str, Any]) -> InlineKeyboardMarkup:
-    update_on = state.get("update", True)
-    truncate_on = state.get("truncate", False)
-    dry_run_on = state.get("dry_run", False)
-
-    update_label = "🔁 Обновление (вкл)" if update_on else "🔁 Обновление (выкл)"
-    truncate_label = "🧹 Перезаписать (вкл)" if truncate_on else "🧹 Перезаписать (выкл)"
-    dry_label = "🧪 Dry run (вкл)" if dry_run_on else "🧪 Dry run (выкл)"
-
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(text=update_label, callback_data="uploadclients_mode|update"),
-                InlineKeyboardButton(text=truncate_label, callback_data="uploadclients_mode|truncate"),
-            ],
-            [
-                InlineKeyboardButton(text=dry_label, callback_data="uploadclients_mode|dry_toggle"),
-                InlineKeyboardButton(
-                    text="✅ Готово, жду файл",
-                    callback_data="uploadclients_mode|confirm",
-                ),
-            ],
-        ]
-    )
-
-
-async def handle_uploadclients_mode(query, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
-    state = _get_pending_upload(context.user_data)
-    if not state or state.get("type") != "clients":
-        await query.answer("Сначала вызовите /uploadclients.", show_alert=True)
-        return
-
-    if mode == "update":
-        state["update"] = True
-        state["truncate"] = False
-    elif mode == "truncate":
-        state["truncate"] = True
-        state["update"] = False
-    elif mode == "dry_toggle":
-        state["dry_run"] = not state.get("dry_run", False)
-    elif mode == "confirm":
-        mode_label = "перезапись" if state.get("truncate") else "обновление"
-        dry_label = "dry run" if state.get("dry_run") else "боевой режим"
-        await query.edit_message_text(
-            f"Режим выбран: {mode_label}, {dry_label}.\n"
-            "Пришлите CSV файл (как документ), чтобы выполнить импорт."
-        )
-        return
-    else:
-        await query.answer("Неизвестный вариант.", show_alert=True)
-        return
-
-    text = UPLOADCLIENTS_PROMPT
-    markup = build_uploadclients_keyboard(state)
-    try:
-        await query.edit_message_text(text, reply_markup=markup)
-    except Exception:
-        await query.message.reply_text(text, reply_markup=markup)
-
-
-def build_uploadschedule_keyboard(state: Dict[str, Any]) -> InlineKeyboardMarkup:
-    keep_on = state.get("keep_existing", False)
-    dry_on = state.get("dry_run", False)
-    keep_label = "📌 Keep (вкл)" if keep_on else "📌 Keep (выкл)"
-    dry_label = "🧪 Dry run (вкл)" if dry_on else "🧪 Dry run (выкл)"
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(text=keep_label, callback_data="uploadschedule_mode|keep_toggle"),
-                InlineKeyboardButton(text=dry_label, callback_data="uploadschedule_mode|dry_toggle"),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✅ Готово, жду файл",
-                    callback_data="uploadschedule_mode|confirm",
-                )
-            ],
-        ]
-    )
-
-
-async def handle_uploadschedule_mode(query, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
-    state = _get_pending_upload(context.user_data)
-    if not state or state.get("type") != "schedule":
-        await query.answer("Сначала вызовите /uploadschedule.", show_alert=True)
-        return
-
-    if mode == "keep_toggle":
-        state["keep_existing"] = not state.get("keep_existing", False)
-    elif mode == "dry_toggle":
-        state["dry_run"] = not state.get("dry_run", False)
-    elif mode == "confirm":
-        keep_label = "keep" if state.get("keep_existing") else "replace"
-        dry_label = "dry run" if state.get("dry_run") else "боевой режим"
-        await query.edit_message_text(
-            f"Режим выбран: {keep_label}, {dry_label}.\n"
-            "Пришлите XLSX файл расписания (как документ), чтобы выполнить импорт."
-        )
-        return
-    else:
-        await query.answer("Неизвестный вариант.", show_alert=True)
-        return
-
-    text = UPLOADSCHEDULE_PROMPT
-    markup = build_uploadschedule_keyboard(state)
-    try:
-        await query.edit_message_text(text, reply_markup=markup)
-    except Exception:
-        await query.message.reply_text(text, reply_markup=markup)
-
-
-async def uploadclients_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-
-    args_lower = [arg.lower() for arg in context.args or []]
-    truncate = any(arg in {"truncate", "--truncate"} for arg in args_lower)
-    update_mode = True
-    if truncate:
-        update_mode = False
-    if any(arg in {"update", "--update"} for arg in args_lower):
-        update_mode = True
-    dry_run = any(arg in {"dry-run", "dry", "--dry-run"} for arg in args_lower)
-
-    if update.message.reply_to_message and update.message.reply_to_message.document:
-        _pop_pending_upload(context.user_data)
-        await process_clients_document(
-            update.message.reply_to_message.document,
-            update.message,
-            truncate=truncate,
-            update_existing=update_mode,
-            dry_run=dry_run,
-        )
-        return
-
-    _set_pending_upload(
-        context.user_data,
-        "clients",
-        truncate=truncate,
-        update=update_mode,
-        dry_run=dry_run,
-    )
-    state = _get_pending_upload(context.user_data) or {}
-    await update.message.reply_text(
-        UPLOADCLIENTS_PROMPT,
-        reply_markup=build_uploadclients_keyboard(state),
-    )
-
-
-async def uploadbikes_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-
-    truncate = False
-    if context.args:
-        truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in context.args)
-
-    if update.message.reply_to_message and update.message.reply_to_message.document:
-        _pop_pending_upload(context.user_data)
-        await process_bikes_document(
-            update.message.reply_to_message.document,
-            update.message,
-            truncate=truncate,
-        )
-        return
-
-    _set_pending_upload(context.user_data, "bikes", truncate=truncate)
-    await update.message.reply_text(
-        "📄 Пришлите CSV файл (как документ). Можно указать /uploadbikes truncate для полной перезагрузки."
-    )
-
-
-async def uploadstands_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-
-    truncate = False
-    if context.args:
-        truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in context.args)
-
-    if update.message.reply_to_message and update.message.reply_to_message.document:
-        _pop_pending_upload(context.user_data)
-        await process_trainers_document(
-            update.message.reply_to_message.document,
-            update.message,
-            truncate=truncate,
-        )
-        return
-
-    _set_pending_upload(context.user_data, "stands", truncate=truncate)
-    await update.message.reply_text(
-        "📄 Пришлите CSV файл (как документ). Можно указать /uploadstands truncate для полной перезагрузки."
-    )
-
-
-async def uploadschedule_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-
-    args = [arg.lower() for arg in (context.args or [])]
-    dry_run = any(arg in {"dry-run", "dry", "--dry-run"} for arg in args)
-    keep_existing = any(arg in {"keep", "append", "--keep"} for arg in args)
-
-    if update.message.reply_to_message and update.message.reply_to_message.document:
-        _pop_pending_upload(context.user_data)
-        await process_schedule_document(
-            update.message.reply_to_message.document,
-            update.message,
-            keep_existing=keep_existing,
-            dry_run=dry_run,
-        )
-        return
-
-    _set_pending_upload(
-        context.user_data,
-        "schedule",
-        truncate=False,
-        keep_existing=keep_existing,
-        dry_run=dry_run,
-    )
-    state = _get_pending_upload(context.user_data) or {}
-    await update.message.reply_text(
-        UPLOADSCHEDULE_PROMPT,
-        reply_markup=build_uploadschedule_keyboard(state),
-    )
-
-
-async def downloadclients_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-
-    await update.message.reply_text("Готовлю выгрузку клиентов…")
-    try:
-        csv_bytes = await asyncio.to_thread(export_clients_to_csv_bytes)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to export clients CSV")
-        await update.message.reply_text(f"❌ Ошибка выгрузки: {exc}")
-        return
-
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    file_name = f"clients_{timestamp}.csv"
-    await update.message.reply_document(
-        document=csv_bytes,
-        filename=file_name,
-        caption="📥 Клиенты выгружены в формате загрузки.",
-    )
-
-
-async def uploadworkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-
-    tokens = context.args or []
-    account_ids, missing = resolve_account_tokens(tokens)
-    if missing:
-        await update.message.reply_text(
-            "⚠️ Не удалось распознать аккаунты: {0}".format(", ".join(missing))
-        )
-        return
-
-    reply_document = None
-    if update.message.reply_to_message and update.message.reply_to_message.document:
-        reply_document = update.message.reply_to_message.document
-
-    if reply_document and (reply_document.file_name or "").lower().endswith(".zwo"):
-        if not account_ids:
-            await update.message.reply_text(
-                "ℹ️ Укажите аккаунт или all, например: /uploadworkout all (в ответ на файл)."
-            )
-            return
-        _pop_pending_workout_upload(context.user_data)
-        await process_workout_document(reply_document, update.message, account_ids)
-        _clear_pending_workout_file(context.user_data)
-        return
-
-    if account_ids:
-        if len(account_ids) == len(ACCOUNT_REGISTRY):
-            target = "все аккаунты"
-        elif len(account_ids) == 1:
-            target = ACCOUNT_REGISTRY[account_ids[0]].name
-        else:
-            target = ", ".join(
-                ACCOUNT_REGISTRY[acc].name for acc in account_ids if acc in ACCOUNT_REGISTRY
-            )
-        pending_file = _get_pending_workout_file(context.user_data)
-        if pending_file and pending_file.get("data"):
-            try:
-                await process_workout_bytes(
-                    raw_bytes=bytes(pending_file.get("data")),
-                    file_name=pending_file.get("file_name") or "",
-                    account_ids=account_ids,
-                    reply_func=update.message.reply_text,
-                )
-            finally:
-                _clear_pending_workout_file(context.user_data)
-                _pop_pending_workout_upload(context.user_data)
-            return
-        _pop_pending_workout_upload(context.user_data)
-        _set_pending_workout_upload(context.user_data, account_ids)
-        await update.message.reply_text(
-            f"📄 Пришлите файл тренировки ZWO для загрузки в {target}."
-        )
-        return
-
-    await show_account_selection(message=update.message, kind="workout")
-
-
-async def setclient_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-
-    if not context.args:
-        await show_account_selection(message=update.message)
-        return
-
-    raw_account_id = context.args[0]
-    if raw_account_id.upper() == "ALL":
-        account_id = "ALL"
-    else:
-        account_id = resolve_account_identifier(raw_account_id)
-    if account_id is None:
-        account_list = format_account_list()
-        await update.message.reply_text(
-            f"⚠️ Аккаунт {raw_account_id} не найден. Доступные аккаунты:\n{account_list}"
-        )
-        return
-
-    await show_client_page(account_id, page=0, message=update.message)
-
-
-async def account_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-
-    if not context.args:
-        await show_account_selection(message=update.message, kind="account")
-        return
-
-    raw_account_id = context.args[0]
-    account_id = resolve_account_identifier(raw_account_id)
-    if account_id is None:
-        await show_account_selection(message=update.message, kind="account")
-        return
-
-    try:
-        profile, auth_user = await asyncio.to_thread(fetch_account_information, account_id)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to fetch account info for %s", account_id)
-        await update.message.reply_text(f"⚠️ Ошибка получения данных: {exc}")
-        return
-
-    text = format_account_details(account_id, profile, auth_user)
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
-
-async def combinate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-    if not ensure_admin_message(update):
-        return
-    _set_pending_combinate(context.user_data, update.message.chat_id)
-
-    prompt = (
-        "📝 Пришлите фамилии клиентов отдельным сообщением (по одной фамилии на строку).\n"
-        "Если передумали, нажмите «Отмена»."
-    )
-    markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(text="Отмена", callback_data="combinate_cancel")]]
-    )
-    await update.message.reply_text(prompt, reply_markup=markup)
-
-
-async def _process_combinate_text(
-    message: Message, context: ContextTypes.DEFAULT_TYPE, raw_text: str
-) -> bool:
-    cleaned = (raw_text or "").strip()
-    if not cleaned:
-        await message.reply_text("ℹ️ Укажите фамилии клиентов (по одной в строке).")
-        return False
-
-    candidate_lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
-    if not candidate_lines:
-        await message.reply_text("ℹ️ Укажите фамилии клиентов (по одной в строке).")
-        return False
-
-    unique_terms: List[str] = list(dict.fromkeys(candidate_lines))
-
-    selected_clients: List[Dict[str, Any]] = []
-    ambiguous_terms: List[Tuple[str, List[Dict[str, Any]]]] = []
-    missing_terms: List[str] = []
-
-    for index, term in enumerate(unique_terms):
-        term_lower = term.lower()
-        try:
-            results = await asyncio.to_thread(search_clients, term, 15)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Failed to search clients for %s", term)
-            await message.reply_text(f"❌ Ошибка поиска клиента «{term}»: {exc}")
-            return False
-
-        if not results:
-            missing_terms.append(term)
-            continue
-
-        scored_results: List[Tuple[int, Dict[str, Any]]] = []
-        for record in results:
-            last_name = (record.get("last_name") or "").strip().lower()
-            full_name = (record.get("full_name") or "").strip().lower()
-            score = 3
-            if last_name == term_lower or full_name == term_lower:
-                score = 0
-            elif term_lower and term_lower in last_name:
-                score = 1
-            elif term_lower and term_lower in full_name:
-                score = 2
-            scored_results.append((score, record))
-        scored_results.sort(key=lambda item: item[0])
-
-        if not scored_results:
-            missing_terms.append(term)
-            continue
-
-        best_score = scored_results[0][0]
-        best_matches = [record for score, record in scored_results if score == best_score]
-
-        if len(best_matches) == 1:
-            record = dict(best_matches[0])
-            record["_requested_term"] = term
-            record["_order_index"] = index
-            selected_clients.append(record)
-        else:
-            ambiguous_terms.append((term, best_matches[:5]))
-
-    if not selected_clients:
-        parts: List[str] = []
-        if missing_terms:
-            missing_text = ", ".join(missing_terms)
-            parts.append(f"🔍 Не найдено клиентов: {html.escape(missing_text)}.")
-        if ambiguous_terms:
-            lines = []
-            for term, matches in ambiguous_terms:
-                options = ", ".join(html.escape(client_display_name(item)) for item in matches)
-                lines.append(f"• {html.escape(term)} → {options}")
-            parts.append("❔ Уточните фамилии:\n" + "\n".join(lines))
-        if not parts:
-            parts.append("⚠️ Не удалось распознать ни одного клиента.")
-        await message.reply_text("\n".join(parts), parse_mode=ParseMode.HTML)
-        return False
-
-    try:
-        await asyncio.to_thread(ensure_bikes_table)
-        bikes = await asyncio.to_thread(list_bikes)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to load bikes for combinate command")
-        await message.reply_text(f"❌ Ошибка чтения базы велосипедов: {exc}")
-        return False
-    if not bikes:
-        await message.reply_text("⚠️ В базе нет зарегистрированных велосипедов.")
-        return False
-
-    layout_map: Dict[int, Dict[str, Any]] = {}
-    try:
-        await asyncio.to_thread(ensure_layout_table)
-        layout_rows = await asyncio.to_thread(list_layout_details)
-        layout_map = {
-            row.get("bike_id"): row
-            for row in layout_rows
-            if isinstance(row.get("bike_id"), int)
-        }
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Failed to load layout details for combinate: %s", exc)
-        layout_map = {}
-
-    try:
-        await asyncio.to_thread(ensure_trainers_table)
-        trainers = await asyncio.to_thread(list_trainers)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to load trainers for combinate command")
-        await message.reply_text(f"❌ Ошибка чтения базы станков: {exc}")
-        return False
-
-    trainer_suggestions_map = _build_trainer_suggestions(bikes, trainers) if trainers else {}
-
-    def _client_priority(record: Dict[str, Any]) -> Tuple[int, float]:
-        gender_value = record.get("gender")
-        gender_priority = 1
-        if isinstance(gender_value, str):
-            normalized = gender_value.strip().lower()
-            if normalized in {"f", "female", "ж", "жен", "женский"}:
-                gender_priority = 0
-        return (gender_priority, record.get("_order_index", 0))
-
-    clients_sorted = sorted(selected_clients, key=_client_priority)
-    clients_with_height: List[Tuple[Dict[str, Any], float]] = []
-    for record in clients_sorted:
-        height_value = _parse_height_cm(record.get("height"))
-        if height_value is not None:
-            clients_with_height.append((record, height_value))
-
-    height_map: Dict[int, float] = {}
-    for record, height_value in clients_with_height:
-        client_id = record.get("id")
-        if isinstance(client_id, int):
-            height_map[client_id] = height_value
-
-    def _format_bike_title(bike: Dict[str, Any]) -> str:
-        title = html.escape(bike.get("title") or "Без названия")
-        return title
-
-    def _format_trainer_label(trainer: Dict[str, Any]) -> str:
-        code = _format_trainer_code(trainer.get("code"))
-        display_name = trainer.get("display_name") or trainer.get("title")
-        if code and display_name:
-            return f"{code} — {display_name}"
-        if code:
-            return code
-        if display_name:
-            return str(display_name)
-        return "Без названия"
-
-    def _normalize_bike_name(value: Any) -> str:
-        if not value:
-            return ""
-        return re.sub(r"\s+", " ", str(value).strip().lower())
-
-    def _match_favorite_bike(preferred_raw: Any) -> Optional[Dict[str, Any]]:
-        normalized = _normalize_bike_name(preferred_raw)
-        if not normalized:
-            return None
-
-        best_match: Optional[Tuple[int, Dict[str, Any]]] = None
-        for bike in bikes:
-            title_norm = _normalize_bike_name(bike.get("title"))
-            owner_norm = _normalize_bike_name(bike.get("owner"))
-            combined_norm = _normalize_bike_name(
-                f"{bike.get('title') or ''} {bike.get('owner') or ''}"
-            )
-
-            score: Optional[int] = None
-            if normalized and normalized == title_norm:
-                score = 0
-            elif normalized and normalized == combined_norm:
-                score = 1
-            elif normalized and title_norm and normalized in title_norm:
-                score = 2
-            elif normalized and combined_norm and normalized in combined_norm:
-                score = 3
-            elif normalized and owner_norm and normalized == owner_norm:
-                score = 4
-
-            if score is None:
-                continue
-
-            if best_match is None or score < best_match[0]:
-                best_match = (score, bike)
-
-        return best_match[1] if best_match else None
-
-    def _prioritize_preferred_bike(
-        candidates: List[Dict[str, Any]], preferred: Optional[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        if preferred is None:
-            return candidates[:5]
-
-        result: List[Dict[str, Any]] = []
-        seen_ids: set[int] = set()
-
-        preferred_id = preferred.get("id") if isinstance(preferred, dict) else None
-        if isinstance(preferred_id, int):
-            seen_ids.add(preferred_id)
-        result.append(preferred)
-
-        for bike in candidates:
-            bike_id = bike.get("id")
-            if isinstance(bike_id, int) and bike_id in seen_ids:
-                continue
-            if bike is preferred:
-                continue
-            result.append(bike)
-            if len(result) >= 5:
-                break
-
-        return result[:5]
-
-    bike_candidates: Dict[int, List[Dict[str, Any]]] = {}
-    favorite_matches: Dict[int, Dict[str, Any]] = {}
-    for record, height_value in clients_with_height:
-        client_id = record.get("id")
-        if not isinstance(client_id, int):
-            continue
-        matching_bikes = [bike for bike in bikes if _bike_height_matches(bike, height_value)]
-        pool = matching_bikes if matching_bikes else bikes
-        sorted_candidates = sorted(
-            pool,
-            key=lambda bike: (
-                0 if isinstance(bike.get("id"), int) and bike.get("id") in layout_map else 1,
-                _bike_height_distance(bike, height_value),
-                1 if bike.get("position") is None else 0,
-                bike.get("position") or 0,
-                (bike.get("title") or "").lower(),
-            ),
-        )
-        preferred_bike_raw = record.get("favorite_bike")
-        preferred_bike = _match_favorite_bike(preferred_bike_raw) if preferred_bike_raw else None
-        if preferred_bike is not None:
-            favorite_matches[client_id] = preferred_bike
-        bike_candidates[client_id] = _prioritize_preferred_bike(sorted_candidates, preferred_bike)
-
-    assignments: Dict[int, Dict[str, Any]] = {}
-    used_bike_ids: set[int] = set()
-    for record, height_value in sorted(clients_with_height, key=lambda item: item[1], reverse=True):
-        client_id = record.get("id")
-        if not isinstance(client_id, int):
-            continue
-        preferred_bike = favorite_matches.get(client_id)
-        if preferred_bike:
-            bike_id = preferred_bike.get("id")
-            if isinstance(bike_id, int) and bike_id not in used_bike_ids:
-                assignments[client_id] = preferred_bike
-                used_bike_ids.add(bike_id)
-                continue
-
-        candidates = bike_candidates.get(client_id, [])
-        for bike in candidates:
-            bike_id = bike.get("id")
-            if isinstance(bike_id, int) and bike_id not in used_bike_ids:
-                assignments[client_id] = bike
-                used_bike_ids.add(bike_id)
-                break
-
-    lines: List[str] = []
-    lines.append("<b>🚲 Предложение рассадки</b>")
-
-    def structured_sort_key(position: Optional[int], name: str) -> Tuple[int, int, str]:
-        name_key = name.lower()
-        if position is not None:
-            return (0, position, name_key)
-        if name:
-            return (1, 0, name_key)
-        return (2, 0, "")
-
-    def _assignment_key(entry: Dict[str, Any]) -> Tuple[Tuple[int, int, str], int, int]:
-        client_id = entry.get("id")
-        assigned_bike = assignments.get(client_id) if isinstance(client_id, int) else None
-        bike_id = assigned_bike.get("id") if isinstance(assigned_bike, dict) else None
-        layout_row = layout_map.get(bike_id) if isinstance(bike_id, int) else None
-        stand_position = layout_row.get("stand_position") if layout_row else None
-        stand_title = layout_row.get("stand_display") or layout_row.get("stand_title") or layout_row.get("stand_code") if layout_row else ""
-
-        gender_value = entry.get("gender")
-        gender_priority = 1
-        if isinstance(gender_value, str) and gender_value.strip().lower() in {"f", "female", "ж", "жен", "женский"}:
-            gender_priority = 0
-
-        return (
-            structured_sort_key(stand_position, stand_title),
-            gender_priority,
-            entry.get("_order_index", 0),
-        )
-
-    sorted_for_output = sorted(clients_sorted, key=_assignment_key)
-    current_stand_key: Optional[str] = None
-
-    for record in sorted_for_output:
-        display_name = client_display_name(record)
-        requested = record.get("_requested_term")
-        header = f"<b>{html.escape(display_name)}</b>"
-        if requested and requested.lower() != (display_name or "").lower():
-            header += f" <i>(запрос «{html.escape(str(requested))}»)</i>"
-        client_id = record.get("id")
-        assigned_bike = assignments.get(client_id) if isinstance(client_id, int) else None
-        bike_id = assigned_bike.get("id") if isinstance(assigned_bike, dict) else None
-        layout_row = layout_map.get(bike_id) if isinstance(bike_id, int) else None
-        stand_label = None
-        if layout_row:
-            stand_stub = {
-                "code": layout_row.get("stand_code"),
-                "title": layout_row.get("stand_title"),
-                "display_name": layout_row.get("stand_display"),
-                "id": layout_row.get("stand_id"),
-            }
-            stand_label = format_trainer_button_label(stand_stub)
-
-        if stand_label:
-            if stand_label != current_stand_key:
-                current_stand_key = stand_label
-                lines.append("")
-                lines.append(f"<b>{html.escape(stand_label)}</b>")
-        else:
-            if current_stand_key != "__no_stand__":
-                current_stand_key = "__no_stand__"
-                lines.append("")
-                lines.append("<b>Без станка</b>")
-
-        lines.append(header)
-
-        client_id = record.get("id")
-        height_value = height_map.get(client_id) if isinstance(client_id, int) else None
-        if height_value is None:
-            lines.append("• ⚠️ В анкете нет роста, подбор велосипеда невозможен.")
-            continue
-
-        lines.append(f"• 📏 Рост: {height_value:g} см")
-
-        assigned_bike = assignments.get(client_id) if isinstance(client_id, int) else None
-        preferred_bike = favorite_matches.get(client_id) if isinstance(client_id, int) else None
-        assigned_is_preferred = assigned_bike is not None and assigned_bike is preferred_bike
-        if assigned_bike:
-            bike_title = _format_bike_title(assigned_bike)
-            suffix = " (любимый)" if assigned_is_preferred else ""
-            lines.append(f"• ✅ Основной вариант: {bike_title}{suffix}")
-
-            trainer_options = trainer_suggestions_map.get(assigned_bike.get("id")) or []
-            if trainer_options:
-                trainer_titles = [html.escape(_format_trainer_label(option)) for option in trainer_options[:3]]
-                lines.append(f"  └─ Станки: {', '.join(trainer_titles)}")
-        else:
-            if preferred_bike:
-                preferred_title = _format_bike_title(preferred_bike)
-                lines.append(f"• ⚠️ Любимый велосипед недоступен: {preferred_title}")
-            else:
-                lines.append("• ⚠️ Не удалось подобрать уникальный велосипед из доступных.")
-
-        alternatives = [
-            bike
-            for bike in bike_candidates.get(client_id, [])
-            if bike is not assignments.get(client_id)
-        ]
-        if alternatives:
-            alt_titles = [_format_bike_title(bike) for bike in alternatives[:3]]
-            lines.append(f"• 🔁 Альтернативы: {', '.join(alt_titles)}")
-
-    if missing_terms:
-        escaped = ", ".join(html.escape(term) for term in missing_terms)
-        lines.append(f"\n🔍 Не найдено клиентов по запросам: {escaped}.")
-
-    if ambiguous_terms:
-        lines.append("\n❔ Уточните следующие фамилии:")
-        for term, matches in ambiguous_terms:
-            options = ", ".join(html.escape(client_display_name(item)) for item in matches)
-            lines.append(f"• {html.escape(term)} → {options}")
-
-    full_text = "\n".join(lines)
-    for chunk in _split_html_message(full_text):
-        await message.reply_text(chunk, parse_mode=ParseMode.HTML)
-
-    return True
+    return
 
 
 async def client_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3412,6 +2216,21 @@ async def layout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     try:
+        text = await build_layout_overview()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to fetch layout")
+        await update.message.reply_text(f"❌ Ошибка получения расстановки: {exc}")
+        return
+
+    await update.message.reply_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_menu_return_markup(),
+    )
+
+
+async def build_layout_overview() -> str:
+    try:
         await asyncio.to_thread(ensure_layout_table)
         await asyncio.to_thread(ensure_trainers_table)
         await asyncio.to_thread(ensure_bikes_table)
@@ -3420,8 +2239,7 @@ async def layout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         bikes = await asyncio.to_thread(list_bikes, 200)
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Failed to fetch layout")
-        await update.message.reply_text(f"❌ Ошибка получения расстановки: {exc}")
-        return
+        raise
 
     assignment_by_stand = {
         row.get("stand_id"): row for row in assignments if row.get("stand_id") is not None
@@ -3441,9 +2259,9 @@ async def layout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             }
             stand_label = format_trainer_button_label(stand_stub)
             bike_title = row.get("bike_title") or f"id={row.get('bike_id')}"
-        lines.append(
-            f"• {html.escape(stand_label)} → {html.escape(str(bike_title))}"
-        )
+            lines.append(
+                f"• {html.escape(stand_label)} → {html.escape(str(bike_title))}"
+            )
     else:
         lines.append("• Нет назначенных велосипедов.")
 
@@ -3466,7 +2284,7 @@ async def layout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     free_bikes = [
         bike for bike in bikes if isinstance(bike.get("id"), int) and bike.get("id") not in assigned_bike_ids
     ]
-    if free_bikes:
+    if free_bikes and (free_stands or len(assignments) < len(trainers)):
         bike_labels = [_format_bike_choice_label(bike) for bike in free_bikes[:10]]
         extra = "…" if len(free_bikes) > len(bike_labels) else ""
         lines.append("")
@@ -3476,7 +2294,25 @@ async def layout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             + extra
         )
 
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    return "\n".join(lines)
+
+
+async def build_pedals_overview() -> str:
+    await asyncio.to_thread(ensure_pedals_table)
+    pedals = await asyncio.to_thread(list_pedals)
+
+    lines = ["🚴 Доступные педали:"]
+    if pedals:
+        for pedal in pedals:
+            pedal_type = pedal.get("pedal_type") or ""
+            type_label = PEDAL_OPTION_LABEL_BY_CODE.get(pedal_type, pedal_type)
+            lines.append(f"• {pedal.get('name')} — {type_label}")
+    else:
+        lines.append("• Список пуст.")
+
+    lines.append("")
+    lines.append("Используйте карточку клиента, чтобы задать/очистить педали.")
+    return "\n".join(lines)
 
 
 async def stands_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3522,22 +2358,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     parts = query.data.split("|")
     action = parts[0]
 
-    if action == "setclient" and len(parts) >= 3:
-        account_id = parts[1]
-        try:
-            client_id = int(parts[2])
-        except ValueError:
-            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
+    upload_handled = await uploads_admin.handle_upload_callback(action, parts, query, context)
+    if upload_handled:
+        return
+
+    admin_handled = await admins_view.handle_admin_callback(action, parts, query, context)
+    if admin_handled:
+        return
+
+    account_handled = await accounts_view.handle_account_callback(action, parts, query, context)
+    if account_handled:
+        return
+
+    if action == "menu" and len(parts) >= 2:
+        menu_action = parts[1]
+        handled = await menu_admin.handle_menu_action(
+            menu_action,
+            update,
+            context,
+            ACCOUNT_REGISTRY,
+            LOCAL_TIMEZONE,
+            show_account_selection=accounts_view.show_account_selection,
+            build_bikes_view=build_bikes_view,
+            build_stands_view=build_stands_view,
+            build_layout_overview=build_layout_overview,
+            build_pedals_overview=build_pedals_overview,
+            show_admin_menu=admins_view.show_admin_menu,
+            start_text=START_MESSAGE,
+        )
+        if handled:
             return
-        await assign_client_to_account(query, context, account_id, client_id)
-    elif action == "setclient_page" and len(parts) >= 3:
-        account_id = parts[1]
-        try:
-            page = max(0, int(parts[2]))
-        except ValueError:
-            page = 0
-        await show_client_page(account_id, page, query=query)
-    elif action == "events":
+
+    if action == "events":
         handled = await events_admin.handle_events_callback(
             update,
             context,
@@ -3559,50 +2411,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         if handled:
             return
-    elif action == "select_accounts" and len(parts) >= 2:
-        kind = parts[1]
-        await show_account_selection(query=query, kind=kind)
-    elif action == "workout_select" and len(parts) >= 2:
-        target = parts[1]
-        if target.upper() == "ALL":
-            account_ids = list(ACCOUNT_REGISTRY.keys())
-            if not account_ids:
-                await query.edit_message_text("⚠️ Аккаунты не настроены.")
-                return
-            label = "все аккаунты"
-        else:
-            account_id = resolve_account_identifier(target)
-            if account_id is None:
-                await query.edit_message_text("⚠️ Аккаунт не найден.")
-                return
-            account_ids = [account_id]
-            label = ACCOUNT_REGISTRY[account_id].name
-        pending_file = _get_pending_workout_file(context.user_data)
-        if pending_file and pending_file.get("data"):
-            await query.edit_message_text(f"📤 Загружаю тренировку в {label}…")
-            reply_func = _make_reply_func(
-                context.bot,
-                pending_file.get("chat_id") or query.message.chat_id,
-                pending_file.get("reply_to_message_id"),
-            )
-            try:
-                await process_workout_bytes(
-                    raw_bytes=bytes(pending_file.get("data")),
-                    file_name=pending_file.get("file_name") or "",
-                    account_ids=account_ids,
-                    reply_func=reply_func,
-                )
-            finally:
-                _clear_pending_workout_file(context.user_data)
-                _pop_pending_workout_upload(context.user_data)
-            return
-        _set_pending_workout_upload(context.user_data, account_ids)
-        await query.edit_message_text(
-            f"📄 Пришлите файл тренировки ZWO для загрузки в {label}."
-        )
-    elif action == "combinate_cancel":
-        _clear_pending_combinate(context.user_data)
-        await query.edit_message_text("⛔ Подбор рассадки отменён.")
     elif action == "client_close":
         pending_edit = context.user_data.get("pending_client_edit")
         if (
@@ -3619,12 +2427,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             except Exception:  # noqa: BLE001
                 LOGGER.debug("client_close action failed for message %s", query.message)
         return
-    elif action == "account_show" and len(parts) >= 2:
-        target = parts[1]
-        if target.upper() == "ALL":
-            await show_all_accounts_via_callback(query)
-        else:
-            await show_account_via_callback(query, target)
     elif action == "client_info" and len(parts) >= 2:
         try:
             client_id = int(parts[1])
@@ -3632,39 +2434,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
             return
         await show_client_info(query, context, client_id)
-    elif action == "client_assign_prepare" and len(parts) >= 2:
-        try:
-            client_id = int(parts[1])
-        except ValueError:
-            await query.edit_message_text("⚠️ Некорректный идентификатор клиента.")
-            return
-        try:
-            record = await asyncio.to_thread(get_client, client_id)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Failed to load client %s", client_id)
-            await query.edit_message_text(f"❌ Ошибка получения данных клиента: {exc}")
-            return
-
-        if not record:
-            await query.edit_message_text("🔍 Клиент не найден.")
-            return
-
-        client_name = html.escape(client_display_name(record))
-        account_list = format_account_list()
-        if account_list:
-            body = html.escape(account_list)
-        else:
-            body = "Аккаунты не настроены."
-        text = (
-            f"👤 <b>{client_name}</b>\n"
-            "Выберите аккаунт WattAttack для применения данных клиента:\n"
-            f"{body}"
-        )
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=build_client_assign_keyboard(client_id),
-        )
     elif action == "client_schedule_book" and len(parts) >= 2:
         try:
             client_id = int(parts[1])
@@ -4253,12 +3022,6 @@ def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    text="👥 Посадить на аккаунт",
-                    callback_data=f"client_assign_prepare|{client_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
                     text="🔑 Intervals.icu ключ",
                     callback_data=f"intervals_start|{client_id}",
                 )
@@ -4314,39 +3077,6 @@ def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="❌ Закрыть", callback_data="client_close")],
         ]
     )
-
-
-def build_client_assign_keyboard(client_id: int) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
-    for account_id in sorted(ACCOUNT_REGISTRY):
-        account = ACCOUNT_REGISTRY[account_id]
-        alias = normalize_account_id(account_id)
-        label = f"{alias} — {account.name}"
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=label,
-                    callback_data=f"setclient|{account_id}|{client_id}",
-                )
-            ]
-        )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="Все аккаунты",
-                callback_data=f"setclient|ALL|{client_id}",
-            )
-        ]
-    )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="↩️ Назад",
-                callback_data=f"client_info|{client_id}",
-            )
-        ]
-    )
-    return InlineKeyboardMarkup(rows)
 
 
 def build_client_edit_markup(client_id: int) -> InlineKeyboardMarkup:
@@ -6570,375 +5300,6 @@ async def process_pending_trainer_edit(
         await render_trainer_info_message(context, chat_id, message_id, trainer_id)
 
     return True
-def fetch_account_information(account_id: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    account = ACCOUNT_REGISTRY[account_id]
-    client = WattAttackClient(account.base_url)
-    client.login(account.email, account.password, timeout=DEFAULT_TIMEOUT)
-
-    profile: Dict[str, Any] = {}
-    try:
-        profile = client.fetch_profile(timeout=DEFAULT_TIMEOUT)
-        if not isinstance(profile, dict):
-            profile = {}
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Failed to fetch profile for %s: %s", account_id, exc)
-        profile = {}
-
-    auth_user: Dict[str, Any] = {}
-    try:
-        auth_info = client.auth_check(timeout=DEFAULT_TIMEOUT)
-        if isinstance(auth_info, dict) and isinstance(auth_info.get("user"), dict):
-            auth_user = auth_info["user"]
-            profile.setdefault("user", auth_user)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Failed to fetch auth info for %s: %s", account_id, exc)
-
-    return profile, auth_user
-
-
-def format_account_details(
-    account_id: str,
-    profile: Dict[str, Any],
-    auth_user: Dict[str, Any],
-) -> str:
-    account = ACCOUNT_REGISTRY[account_id]
-    lines = [f"<b>👤 {account.name}</b> ({account_id})"]
-
-    first = auth_user.get("firstName") if auth_user else None
-    last = auth_user.get("lastName") if auth_user else None
-    if first or last:
-        name_str = " ".join(part for part in [first, last] if part)
-        if name_str:
-            lines.append(f"🧑 Имя: {name_str}")
-    else:
-        name = extract_athlete_name(profile)
-        if name:
-            lines.append(f"🧑 Имя: {name}")
-
-    gender = extract_athlete_field(profile, "gender")
-    if gender:
-        gender_symbol = "🚹" if gender.upper().startswith("M") else "🚺"
-        lines.append(f"{gender_symbol} Пол: {'М' if gender.upper().startswith('M') else 'Ж'} ({gender})")
-
-    weight = extract_athlete_field(profile, "weight")
-    if weight:
-        try:
-            lines.append(f"⚖️ Вес: {float(weight):g} кг")
-        except (TypeError, ValueError):
-            lines.append(f"⚖️ Вес: {weight} кг")
-
-    height = extract_athlete_field(profile, "height")
-    if height:
-        try:
-            lines.append(f"📏 Рост: {float(height):g} см")
-        except (TypeError, ValueError):
-            lines.append(f"📏 Рост: {height} см")
-
-    ftp = extract_athlete_field(profile, "ftp")
-    if ftp:
-        try:
-            lines.append(f"⚡ FTP: {int(float(ftp))} Вт")
-        except (TypeError, ValueError):
-            lines.append(f"⚡ FTP: {ftp} Вт")
-
-    return "\n".join(lines)
-
-
-async def show_client_page(
-    account_id: str,
-    page: int,
-    *,
-    message: Optional[Message] = None,
-    query=None,
-) -> None:
-    is_all_accounts = account_id.upper() == "ALL"
-
-    if not is_all_accounts and account_id not in ACCOUNT_REGISTRY:
-        text = "⚠️ Аккаунт не найден."
-        if query:
-            await query.edit_message_text(text)
-        elif message:
-            await message.reply_text(text)
-        return
-
-    try:
-        total = await asyncio.to_thread(count_clients)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to count clients")
-        text = f"❌ Ошибка чтения базы клиентов: {exc}"
-        if query:
-            await query.edit_message_text(text)
-        elif message:
-            await message.reply_text(text)
-        return
-
-    if total <= 0:
-        text = "📭 Список клиентов пуст."
-        if query:
-            await query.edit_message_text(text)
-        elif message:
-            await message.reply_text(text)
-        return
-
-    page_size = CLIENTS_PAGE_SIZE
-    max_page = max(0, (total - 1) // page_size)
-    page = max(0, min(page, max_page))
-    offset = page * page_size
-
-    try:
-        clients = await asyncio.to_thread(list_clients, page_size, offset)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to load clients from DB")
-        text = f"❌ Ошибка чтения базы клиентов: {exc}"
-        if query:
-            await query.edit_message_text(text)
-        elif message:
-            await message.reply_text(text)
-        return
-
-    keyboard_rows: List[List[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(
-                text=client["full_name"],
-                callback_data=f"setclient|{account_id}|{client['id']}",
-            )
-        ]
-        for client in clients
-    ]
-
-    nav_row: List[InlineKeyboardButton] = [
-        InlineKeyboardButton(
-            text="← Выбор аккаунта",
-            callback_data="select_accounts|setclient",
-        )
-    ]
-    if page > 0:
-        nav_row.append(
-            InlineKeyboardButton(
-                text="← Назад",
-                callback_data=f"setclient_page|{account_id}|{page-1}",
-            )
-        )
-    if page < max_page:
-        nav_row.append(
-            InlineKeyboardButton(
-                text="Вперёд →",
-                callback_data=f"setclient_page|{account_id}|{page+1}",
-            )
-        )
-    if nav_row:
-        keyboard_rows.append(nav_row)
-
-    if is_all_accounts:
-        target_label = "ко всем аккаунтам"
-    else:
-        target_label = f"к {ACCOUNT_REGISTRY[account_id].name}"
-    text = (
-        f"👥 Выберите клиента для применения данных {target_label}:\n"
-        f"📄 Страница {page + 1} из {max_page + 1} (всего {total})"
-    )
-
-    markup = InlineKeyboardMarkup(keyboard_rows)
-    if query:
-        await query.edit_message_text(text, reply_markup=markup)
-    elif message:
-        await message.reply_text(text, reply_markup=markup)
-
-
-async def show_account_selection(
-    *, message: Optional[Message] = None, query=None, kind: str = "setclient", account_id: Optional[str] = None
-) -> None:
-    keyboard_rows: List[List[InlineKeyboardButton]] = []
-    for account_id in sorted(ACCOUNT_REGISTRY):
-        alias = normalize_account_id(account_id)
-        label = f"{alias} — {ACCOUNT_REGISTRY[account_id].name}"
-        if kind == "setclient":
-            callback = f"setclient_page|{account_id}|0"
-        elif kind == "workout":
-            callback = f"workout_select|{account_id}"
-        else:
-            callback = f"account_show|{account_id}"
-
-        keyboard_rows.append([InlineKeyboardButton(text=label, callback_data=callback)])
-
-    if kind == "account":
-        keyboard_rows.append(
-            [InlineKeyboardButton(text="Все аккаунты", callback_data="account_show|ALL")]
-        )
-    if kind == "setclient":
-        keyboard_rows.append(
-            [InlineKeyboardButton(text="Все аккаунты", callback_data="setclient_page|ALL|0")]
-        )
-    if kind == "workout":
-        keyboard_rows.append(
-            [InlineKeyboardButton(text="Все аккаунты", callback_data="workout_select|ALL")]
-        )
-        text = "📤 Выберите аккаунт для загрузки тренировки:"
-    elif kind == "setclient":
-        text = "👤 Выберите аккаунт для применения данных клиента:"
-    else:
-        text = "📊 Выберите аккаунт для просмотра данных:"
-    markup = InlineKeyboardMarkup(keyboard_rows)
-    if query:
-        await query.edit_message_text(text, reply_markup=markup)
-    elif message:
-        await message.reply_text(text, reply_markup=markup)
-
-
-async def assign_client_to_account(query, context, account_id: str, client_id: int) -> None:
-    if account_id.upper() == "ALL":
-        await assign_client_to_all_accounts(query, context, client_id)
-        return
-
-    if account_id not in ACCOUNT_REGISTRY:
-        await query.edit_message_text("⚠️ Аккаунт не найден.")
-        return
-
-    try:
-        client_record = await asyncio.to_thread(get_client, client_id)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to fetch client %s", client_id)
-        await query.edit_message_text(f"❌ Ошибка чтения клиента: {exc}")
-        return
-
-    if not client_record:
-        await query.edit_message_text("🔍 Клиент не найден.")
-        return
-
-    try:
-        await asyncio.to_thread(apply_client_profile, account_id, client_record)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to apply client %s to %s", client_id, account_id)
-        await query.edit_message_text(f"❌ Ошибка применения данных: {exc}")
-        return
-
-    summary = format_client_summary(client_record)
-    cache = context.user_data.get("account_cache")
-    if isinstance(cache, dict):
-        cache.pop(account_id, None)
-    await query.edit_message_text(
-        f"✅ Данные клиента применены к {ACCOUNT_REGISTRY[account_id].name}:\n{summary}",
-        parse_mode=ParseMode.HTML,
-    )
-
-
-async def assign_client_to_all_accounts(query, context, client_id: int) -> None:
-    if not ACCOUNT_REGISTRY:
-        await query.edit_message_text("⚠️ Аккаунты не настроены.")
-        return
-
-    try:
-        client_record = await asyncio.to_thread(get_client, client_id)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to fetch client %s", client_id)
-        await query.edit_message_text(f"❌ Ошибка чтения клиента: {exc}")
-        return
-
-    if not client_record:
-        await query.edit_message_text("🔍 Клиент не найден.")
-        return
-
-    successes: List[str] = []
-    failures: Dict[str, str] = {}
-
-    for account_id in sorted(ACCOUNT_REGISTRY):
-        try:
-            await asyncio.to_thread(apply_client_profile, account_id, client_record)
-            successes.append(account_id)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Failed to apply client %s to %s", client_id, account_id)
-            failures[account_id] = str(exc)
-
-    cache = context.user_data.get("account_cache")
-    if isinstance(cache, dict):
-        if not failures:
-            cache.clear()
-        else:
-            for account_id in successes:
-                cache.pop(account_id, None)
-
-    summary = format_client_summary(client_record)
-    lines: List[str] = []
-    if successes:
-        lines.append(f"✅ Данные клиента применены к {len(successes)} аккаунт(ам):")
-        lines.extend(f"• {ACCOUNT_REGISTRY[account_id].name}" for account_id in successes)
-    else:
-        lines.append("⚠️ Не удалось применить данные ни к одному аккаунту.")
-
-    if failures:
-        lines.append("")
-        lines.append("❌ Ошибки применения:")
-        lines.extend(
-            f"• {ACCOUNT_REGISTRY[account_id].name}: {error}"
-            for account_id, error in failures.items()
-        )
-
-    if summary:
-        lines.append("")
-        lines.append(summary)
-
-    await query.edit_message_text("\n".join(lines), parse_mode=ParseMode.HTML)
-
-
-async def show_account_via_callback(query, account_id: str) -> None:
-    account = resolve_account_identifier(account_id)
-    if account is None:
-        await query.edit_message_text("⚠️ Аккаунт не найден.")
-        return
-
-    try:
-        profile, auth_user = await asyncio.to_thread(fetch_account_information, account)
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to fetch account info for %s", account)
-        await query.edit_message_text(f"❌ Ошибка получения данных: {exc}")
-        return
-
-    text = format_account_details(account, profile, auth_user)
-    await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        text="← Выбор аккаунта",
-                        callback_data="select_accounts|account",
-                    )
-                ]
-            ]
-        ),
-    )
-
-
-async def show_all_accounts_via_callback(query) -> None:
-    if not ACCOUNT_REGISTRY:
-        await query.edit_message_text("⚠️ Аккаунты не настроены.")
-        return
-
-    summaries: List[str] = []
-    for account_id in sorted(ACCOUNT_REGISTRY):
-        account = ACCOUNT_REGISTRY[account_id]
-        try:
-            profile, auth_user = await asyncio.to_thread(fetch_account_information, account_id)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Failed to fetch account info for %s", account_id)
-            summaries.append(
-                f"<b>👤 {account.name}</b> ({account_id})\n"
-                f"⚠️ Ошибка получения данных: {html.escape(str(exc))}"
-            )
-            continue
-        summaries.append(format_account_details(account_id, profile, auth_user))
-
-    text = "\n\n".join(summaries) if summaries else "⚠️ Аккаунты не настроены."
-    await query.edit_message_text(
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton(text="← Выбор аккаунта", callback_data="select_accounts|account")]]
-        ),
-    )
-
-
 async def show_client_info(query, context: ContextTypes.DEFAULT_TYPE, client_id: int) -> None:
     context.user_data.pop("pending_client_edit", None)
     await render_client_info_message(
@@ -6966,27 +5327,8 @@ async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if handled_intervals:
         return
 
-    identifier_text = update.message.text.strip()
-    for pending_key, action in (
-        ("pending_addadmin", "add"),
-        ("pending_removeadmin", "remove"),
-    ):
-        pending = context.user_data.get(pending_key)
-        if pending and pending.get("chat_id") == update.message.chat_id:
-            context.user_data.pop(pending_key, None)
-            if not identifier_text:
-                await update.message.reply_text("⚠️ Укажите ID или @username.")
-                return
-            if action == "add":
-                await _perform_addadmin(update.message, context, identifier=identifier_text)
-            else:
-                await _perform_removeadmin(update.message, identifier_text)
-            return
-    combinate_pending = context.user_data.get(PENDING_COMBINATE_KEY)
-    if combinate_pending and combinate_pending.get("chat_id") == update.message.chat_id:
-        success = await _process_combinate_text(update.message, context, update.message.text)
-        if success:
-            _clear_pending_combinate(context.user_data)
+    handled_admins = await admins_view.handle_admin_text(update, context)
+    if handled_admins:
         return
     bike_pending = context.user_data.get(PENDING_BIKE_EDIT_KEY)
     if bike_pending:
@@ -7004,142 +5346,6 @@ async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if handled:
             return
     await process_client_search(update.message, update.message.text)
-
-
-async def workout_document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.message.document:
-        return
-    if not ensure_admin_message(update):
-        return
-
-    document = update.message.document
-    file_name = (document.file_name or "").lower()
-    if not file_name.endswith(".zwo"):
-        return
-
-    caption = update.message.caption or ""
-    command = None
-    args: List[str] = []
-    stripped = caption.strip()
-    if stripped.startswith("/"):
-        parts = stripped.split()
-        command = parts[0].lower()
-        args = parts[1:]
-
-    account_ids: List[str] = []
-    if command == WORKOUT_UPLOAD_COMMAND:
-        account_ids, missing = resolve_account_tokens(args)
-        if missing:
-            await update.message.reply_text(
-                "⚠️ Не удалось распознать аккаунты: {0}".format(", ".join(missing))
-            )
-            return
-        _pop_pending_workout_upload(context.user_data)
-    else:
-        pending = _pop_pending_workout_upload(context.user_data)
-        if pending:
-            account_ids = list(pending.get("account_ids") or [])
-
-    if account_ids:
-        await process_workout_document(document, update.message, account_ids)
-        _clear_pending_workout_file(context.user_data)
-        return
-
-    try:
-        file = await document.get_file()
-        data = await file.download_as_bytearray()
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to download workout file")
-        await update.message.reply_text(f"⚠️ Не удалось скачать файл: {exc}")
-        return
-
-    file_label = document.file_name or document.file_unique_id or "тренировка.zwo"
-    _set_pending_workout_file(
-        context.user_data,
-        data=bytes(data),
-        file_name=file_label,
-        chat_id=update.message.chat_id,
-        reply_to_message_id=update.message.message_id,
-    )
-
-    await show_account_selection(message=update.message, kind="workout")
-
-
-async def document_upload_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.message.document:
-        return
-    if not ensure_admin_message(update):
-        return
-
-    document = update.message.document
-    caption = update.message.caption or ""
-    command = None
-    args: List[str] = []
-
-    stripped = caption.strip()
-    if stripped.startswith("/"):
-        parts = stripped.split()
-        command = parts[0].lower()
-        args = parts[1:]
-
-    upload_type: Optional[str] = None
-    truncate = False
-    update_mode = True
-    keep_existing_schedule = False
-    dry_run_schedule = False
-    dry_run_clients = False
-
-    if command and command in UPLOAD_COMMAND_TYPES:
-        upload_type = UPLOAD_COMMAND_TYPES[command]
-        truncate = any(arg.lower() in {"truncate", "--truncate"} for arg in args)
-        if truncate:
-            update_mode = False
-        if any(arg.lower() in {"update", "--update"} for arg in args):
-            update_mode = True
-        if upload_type == "schedule":
-            keep_existing_schedule = any(
-                arg.lower() in {"keep", "--keep", "append"} for arg in args
-            )
-            dry_run_schedule = any(
-                arg.lower() in {"dry-run", "dry", "--dry-run"} for arg in args
-            )
-        if upload_type == "clients":
-            dry_run_clients = any(arg.lower() in {"dry-run", "dry", "--dry-run"} for arg in args)
-        _pop_pending_upload(context.user_data)
-    else:
-        pending = _pop_pending_upload(context.user_data)
-        if pending:
-            upload_type = pending.get("type")
-            truncate = pending.get("truncate", False)
-            update_mode = pending.get("update", True)
-            keep_existing_schedule = pending.get("keep_existing", False)
-            dry_run_schedule = pending.get("dry_run", False)
-            dry_run_clients = pending.get("dry_run", False)
-
-    if upload_type == "clients":
-        await process_clients_document(
-            document,
-            update.message,
-            truncate,
-            update_mode,
-            dry_run=dry_run_clients,
-        )
-    elif upload_type == "bikes":
-        await process_bikes_document(document, update.message, truncate)
-    elif upload_type == "stands":
-        await process_trainers_document(document, update.message, truncate)
-    elif upload_type == "schedule":
-        await process_schedule_document(
-            document,
-            update.message,
-            keep_existing=keep_existing_schedule,
-            dry_run=dry_run_schedule,
-        )
-    else:
-        await update.message.reply_text(
-            "ℹ️ Чтобы импортировать данные, используйте /uploadclients, /uploadbikes, /uploadstands, "
-            "/uploadschedule, /uploadworkout или добавьте команду в подпись к файлу."
-        )
 
 
 async def process_client_search(message: Message, term: str) -> None:
@@ -7211,31 +5417,13 @@ def build_application(token: str) -> Application:
     application = Application.builder().token(token).build()
 
     application.add_handler(CommandHandler("start", start_handler))
-    application.add_handler(CommandHandler("help", help_handler))
     application.add_handler(CommandHandler("events", events_handler))
     application.add_handler(CommandHandler("wizard", wizard_handler))
-    application.add_handler(
-        MessageHandler(filters.TEXT & (~filters.COMMAND), wizard_message_handler, block=False)
-    )
-    application.add_handler(CommandHandler("account", account_handler))
-    application.add_handler(CommandHandler("combinate", combinate_handler))
-    application.add_handler(CommandHandler("client", client_handler))
-    application.add_handler(CommandHandler("stats", stats_handler))
-    application.add_handler(CommandHandler("bikes", bikes_handler))
-    application.add_handler(CommandHandler("layout", layout_handler))
-    application.add_handler(CommandHandler("stands", stands_handler))
-    application.add_handler(CommandHandler("setclient", setclient_handler))
-    application.add_handler(CommandHandler("admins", admins_handler))
-    application.add_handler(CommandHandler("addadmin", addadmin_handler))
-    application.add_handler(CommandHandler("removeadmin", removeadmin_handler))
-    application.add_handler(CommandHandler("uploadclients", uploadclients_handler))
-    application.add_handler(CommandHandler("downloadclients", downloadclients_handler))
-    application.add_handler(CommandHandler("uploadbikes", uploadbikes_handler))
-    application.add_handler(CommandHandler("uploadstands", uploadstands_handler))
-    application.add_handler(CommandHandler("uploadschedule", uploadschedule_handler))
-    application.add_handler(CommandHandler("uploadworkout", uploadworkout_handler))
     newclient_conversation = ConversationHandler(
-        entry_points=[CommandHandler("newclient", newclient_start)],
+        entry_points=[
+            CommandHandler("newclient", newclient_start),
+            CallbackQueryHandler(newclient_start, pattern=r"^menu\|newclient$"),
+        ],
         states={
             NEWCLIENT_FIRST_NAME: [
                 MessageHandler(filters.TEXT & (~filters.COMMAND), newclient_first_name)
@@ -7277,27 +5465,17 @@ def build_application(token: str) -> Application:
         allow_reentry=True,
     )
     application.add_handler(newclient_conversation)
+    application.add_handler(
+        MessageHandler(filters.TEXT & (~filters.COMMAND), wizard_message_handler, block=False)
+    )
+    accounts_view.register_account_handlers(application)
+    application.add_handler(CommandHandler("client", client_handler))
+    application.add_handler(CommandHandler("bikes", bikes_handler))
+    application.add_handler(CommandHandler("layout", layout_handler))
+    application.add_handler(CommandHandler("stands", stands_handler))
+    admins_view.register_admin_handlers(application)
+    uploads_admin.register_upload_handlers(application)
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_search_handler))
-    workout_filter = (
-        filters.Document.FileExtension("zwo") | filters.Document.FileExtension("ZWO")
-    )
-    application.add_handler(
-        MessageHandler(workout_filter, workout_document_handler)
-    )
-    csv_filter = (
-        filters.Document.MimeType("text/csv")
-        | filters.Document.FileExtension("csv")
-        | filters.Document.FileExtension("CSV")
-    )
-    xlsx_filter = (
-        filters.Document.MimeType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        | filters.Document.FileExtension("xlsx")
-        | filters.Document.FileExtension("XLSX")
-    )
-    document_filter = csv_filter | xlsx_filter
-    application.add_handler(
-        MessageHandler(document_filter, document_upload_handler)
-    )
     application.add_handler(CallbackQueryHandler(_handle_link_request_callback, pattern=r"^link:(approve|reject):[0-9a-fA-F]+$"))
     application.add_handler(CallbackQueryHandler(noop_handler, pattern="^noop$"))
     application.add_handler(CallbackQueryHandler(callback_handler))
@@ -7326,6 +5504,21 @@ def main(argv: Iterable[str] | None = None) -> int:
     ACCOUNT_REGISTRY = load_accounts(accounts_path)
 
     LOGGER.info("Loaded %d WattAttack accounts", len(ACCOUNT_REGISTRY))
+
+    admins_view.configure_admins_view(ensure_admin_message=ensure_admin_message)
+    accounts_view.configure_accounts_view(
+        account_registry=ACCOUNT_REGISTRY,
+        ensure_admin_message=ensure_admin_message,
+        resolve_account_identifier=resolve_account_identifier,
+        format_account_list=format_account_list,
+        default_timeout=DEFAULT_TIMEOUT,
+    )
+    uploads_admin.configure_uploads(
+        ensure_admin_message=ensure_admin_message,
+        show_account_selection=accounts_view.show_account_selection,
+        account_registry=ACCOUNT_REGISTRY,
+        default_timeout=DEFAULT_TIMEOUT,
+    )
 
     application = build_application(token)
     application.run_polling()

@@ -425,6 +425,7 @@ async def _render_slots_overview(
     keyboard_rows.append(
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="wizard|refresh")]
     )
+    keyboard_rows.append([InlineKeyboardButton(text="↩️ В меню", callback_data="menu|start")])
 
     if query:
         await query.edit_message_text(
@@ -509,7 +510,10 @@ async def _send_slot_detail(
         await query.edit_message_text(
             "ℹ️ В этом слоте нет активных записей.",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(text="↩️ К слотам", callback_data="wizard|refresh")]]
+                [
+                    [InlineKeyboardButton(text="↩️ К слотам", callback_data="wizard|refresh")],
+                    [InlineKeyboardButton(text="↩️ В меню", callback_data="menu|start")],
+                ]
             ),
         )
         return
@@ -632,6 +636,7 @@ async def _send_slot_detail(
                 )
             ],
         )
+    buttons.append([InlineKeyboardButton(text="↩️ В меню", callback_data="menu|start")])
 
     await query.edit_message_text(
         "\n".join(lines),
