@@ -28,7 +28,6 @@ from telegram.ext import (
 
 from repositories.client_repository import (
     count_clients,
-    create_client,
     get_client,
     get_clients_stats,
     list_clients,
@@ -94,6 +93,7 @@ from adminbot import menu as menu_admin
 from adminbot import accounts_view
 from adminbot import admins_view
 from adminbot import uploads as uploads_admin
+from adminbot import new_client
 from adminbot.accounts import (
     AccountConfig,
     format_account_list as format_account_list_from_registry,
@@ -111,17 +111,11 @@ ACCOUNTS_ENV = "WATTATTACK_ACCOUNTS_FILE"
 DEFAULT_ACCOUNTS_PATH = Path("accounts.json")
 DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
 CLIENTS_PAGE_SIZE = int(os.environ.get("CLIENTS_PAGE_SIZE", "6"))
-DEFAULT_CLIENT_FTP = int(os.environ.get("WATTATTACK_DEFAULT_FTP", "150"))
+DEFAULT_CLIENT_FTP = new_client.DEFAULT_CLIENT_FTP
 CLIENT_BIKE_PICK_PAGE_SIZE = int(os.environ.get("CLIENT_BIKE_PAGE_SIZE", "6"))
 
-PEDAL_OPTIONS: List[Tuple[str, str]] = [
-    ("топталки (под кроссовки)", "platform"),
-    ("контакты шоссе Look", "road_look"),
-    ("контакты шоссе Shimano", "road_shimano"),
-    ("контакты MTB Shimano", "mtb_shimano"),
-    ("принесу свои", "own"),
-]
-PEDAL_OPTION_LABEL_BY_CODE: Dict[str, str] = {code: label for label, code in PEDAL_OPTIONS}
+PEDAL_OPTIONS = new_client.PEDAL_OPTIONS
+PEDAL_OPTION_LABEL_BY_CODE = new_client.PEDAL_OPTION_LABEL_BY_CODE
 
 LOCAL_TIMEZONE = ZoneInfo(os.environ.get("WATTATTACK_LOCAL_TZ", "Europe/Moscow"))
 BOOKING_LOOKAHEAD_DAYS = int(os.environ.get("ADMINBOT_BOOKING_LOOKAHEAD_DAYS", "21"))
@@ -256,51 +250,6 @@ async def _handle_link_request_callback(update: Update, context: ContextTypes.DE
         LOGGER.info("Skipping user notification for %s: client bot not configured", tg_user_id)
 
     await query.answer("Готово.")
-
-(
-    NEWCLIENT_FIRST_NAME,
-    NEWCLIENT_LAST_NAME,
-    NEWCLIENT_WEIGHT,
-    NEWCLIENT_HEIGHT,
-    NEWCLIENT_GENDER,
-    NEWCLIENT_FTP,
-    NEWCLIENT_PEDALS,
-    NEWCLIENT_GOAL,
-) = range(8)
-
-NEWCLIENT_FORM_KEY = "adminbot:newclient_form"
-
-def _newclient_get_form(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Any]:
-    form = context.user_data.get(NEWCLIENT_FORM_KEY)
-    if form is None:
-        form = {}
-        context.user_data[NEWCLIENT_FORM_KEY] = form
-    return form
-
-def _newclient_reset_form(context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop(NEWCLIENT_FORM_KEY, None)
-
-def _parse_optional_float_value(text: str) -> Tuple[bool, Optional[float]]:
-    normalized = text.replace(",", ".").strip()
-    if not normalized:
-        return True, None
-    try:
-        return True, float(normalized)
-    except ValueError:
-        return False, None
-
-def _parse_positive_float_value(text: str) -> Tuple[bool, Optional[float]]:
-    ok, value = _parse_optional_float_value(text)
-    if not ok or value is None:
-        return False, None
-    if value <= 0:
-        return False, None
-    return True, value
-
-def _format_optional_number(value: Optional[float]) -> str:
-    if value is None:
-        return "—"
-    return f"{value:g}"
 
 def _local_now() -> datetime:
     return datetime.now(tz=LOCAL_TIMEZONE)
@@ -1494,6 +1443,13 @@ async def ensure_admin_callback(query) -> bool:
     await query.edit_message_text("🚫 Недостаточно прав для выполнения действия.")
     return False
 
+
+# Configure new client flow with permission checks from this module.
+new_client.configure_new_client(
+    ensure_admin_message=ensure_admin_message,
+    ensure_admin_callback=ensure_admin_callback,
+)
+
 def _make_reply_func(
     bot,
     chat_id: int,
@@ -1686,380 +1642,6 @@ async def wizard_message_handler(update: Update, context: ContextTypes.DEFAULT_T
     )
     if not handled:
         await text_search_handler(update, context)
-
-async def _newclient_send_gender_prompt(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int
-) -> None:
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("М", callback_data="newclient:gender:male"),
-                InlineKeyboardButton("Ж", callback_data="newclient:gender:female"),
-            ]
-        ]
-    )
-    await context.bot.send_message(
-        chat_id,
-        "👤 Выберите пол клиента:",
-        reply_markup=keyboard,
-    )
-
-async def _newclient_send_ftp_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Оставить 150", callback_data="newclient:ftp:skip")]]
-    )
-    await context.bot.send_message(
-        chat_id,
-        "⚡ Введите FTP клиента в ваттах.\n"
-        "Отправьте число (например, 215) или нажмите «Оставить 150», чтобы использовать значение по умолчанию.",
-        reply_markup=keyboard,
-    )
-
-async def _newclient_send_pedals_prompt(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int
-) -> None:
-    rows = [
-        [InlineKeyboardButton(label, callback_data=f"newclient:pedals:{code}")]
-        for label, code in PEDAL_OPTIONS
-    ]
-    await context.bot.send_message(
-        chat_id,
-        "🚴 Выберите тип педалей из доступных вариантов:",
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
-
-async def _newclient_send_goal_prompt(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Пропустить", callback_data="newclient:goal:skip")]]
-    )
-    await context.bot.send_message(
-        chat_id,
-        "🎯 Укажите цель клиента (например, подготовка к старту).\n"
-        "Если цель не нужна, отправьте пустое сообщение или нажмите «Пропустить».",
-        reply_markup=keyboard,
-    )
-
-async def _newclient_finalize_creation(
-    *,
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    send_message: Callable[[str], Awaitable[Any]],
-) -> int:
-    form = _newclient_get_form(context)
-
-    first_name = (form.get("first_name") or "").strip()
-    last_name = (form.get("last_name") or "").strip()
-    weight = form.get("weight")
-    height = form.get("height")
-    gender = form.get("gender")
-    ftp = form.get("ftp", float(DEFAULT_CLIENT_FTP))
-    pedals = form.get("pedals")
-    goal = form.get("goal")
-
-    missing: List[str] = []
-    if not first_name:
-        missing.append("имя")
-    if not last_name:
-        missing.append("фамилия")
-    if weight is None:
-        missing.append("вес")
-    if height is None:
-        missing.append("рост")
-    if gender not in {"male", "female"}:
-        missing.append("пол")
-    if not pedals:
-        missing.append("педали")
-
-    if missing:
-        await send_message(
-            "⚠️ Анкета заполнена не полностью. Завершите команду и начните заново: "
-            + ", ".join(missing)
-        )
-        _newclient_reset_form(context)
-        return ConversationHandler.END
-
-    try:
-        client = await asyncio.to_thread(
-            create_client,
-            first_name=first_name,
-            last_name=last_name,
-            weight=weight,
-            height=height,
-            gender=gender,
-            ftp=ftp,
-            pedals=pedals,
-            goal=goal,
-        )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Failed to create client %s %s", first_name, last_name)
-        await send_message(f"❌ Не удалось создать запись: {exc}")
-        _newclient_reset_form(context)
-        return ConversationHandler.END
-
-    summary_lines = [
-        "🆕 Создан клиент:",
-        f"• Имя: {first_name}",
-        f"• Фамилия: {last_name}",
-        f"• Пол: {'М' if gender == 'male' else 'Ж'}",
-        f"• Вес: {_format_optional_number(weight)} кг",
-        f"• Рост: {_format_optional_number(height)} см",
-        f"• FTP: {_format_optional_number(ftp)} Вт",
-        f"• Педали: {pedals}",
-        f"• Цель: {goal or '—'}",
-    ]
-    await send_message("\n".join(summary_lines))
-
-    client_label = client_display_name(client)
-    await context.bot.send_message(
-        chat_id,
-        f"✅ Запись сохранена: {client_label} (ID {client['id']}).",
-    )
-
-    _newclient_reset_form(context)
-    return ConversationHandler.END
-
-async def newclient_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    message = update.effective_message
-    if query:
-        await query.answer()
-        if not await ensure_admin_callback(query):
-            return ConversationHandler.END
-    else:
-        if not update.message:
-            return ConversationHandler.END
-        if not ensure_admin_message(update):
-            return ConversationHandler.END
-
-    if not message:
-        return ConversationHandler.END
-
-    _newclient_reset_form(context)
-    form = _newclient_get_form(context)
-    form["ftp"] = float(DEFAULT_CLIENT_FTP)
-
-    await message.reply_text(
-        "🆕 Создание новой анкеты клиента.\n"
-        "🖊️ Введите имя клиента (команда /cancel для отмены)."
-    )
-    return NEWCLIENT_FIRST_NAME
-
-async def newclient_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not update.message:
-        return NEWCLIENT_FIRST_NAME
-    if not ensure_admin_message(update):
-        return ConversationHandler.END
-
-    value = update.message.text.strip()
-    if not value:
-        await update.message.reply_text("⚠️ Имя не должно быть пустым. Введите имя клиента.")
-        return NEWCLIENT_FIRST_NAME
-
-    form = _newclient_get_form(context)
-    form["first_name"] = value
-    await update.message.reply_text("🧾 Введите фамилию клиента.")
-    return NEWCLIENT_LAST_NAME
-
-async def newclient_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not update.message:
-        return NEWCLIENT_LAST_NAME
-    if not ensure_admin_message(update):
-        return ConversationHandler.END
-
-    value = update.message.text.strip()
-    if not value:
-        await update.message.reply_text("⚠️ Фамилия не должна быть пустой. Введите фамилию клиента.")
-        return NEWCLIENT_LAST_NAME
-
-    form = _newclient_get_form(context)
-    form["last_name"] = value
-    await update.message.reply_text(
-        "⚖️ Введите вес клиента в килограммах (например, 72.5)."
-    )
-    return NEWCLIENT_WEIGHT
-
-async def newclient_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not update.message:
-        return NEWCLIENT_WEIGHT
-    if not ensure_admin_message(update):
-        return ConversationHandler.END
-
-    ok, weight = _parse_positive_float_value(update.message.text or "")
-    if not ok or weight is None:
-        await update.message.reply_text(
-            "⚠️ Вес должен быть положительным числом (например, 72.5). Повторите ввод."
-        )
-        return NEWCLIENT_WEIGHT
-
-    form = _newclient_get_form(context)
-    form["weight"] = weight
-    await update.message.reply_text(
-        "📏 Введите рост клиента в сантиметрах (например, 178)."
-    )
-    return NEWCLIENT_HEIGHT
-
-async def newclient_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not update.message:
-        return NEWCLIENT_HEIGHT
-    if not ensure_admin_message(update):
-        return ConversationHandler.END
-
-    ok, height = _parse_positive_float_value(update.message.text or "")
-    if not ok or height is None:
-        await update.message.reply_text(
-            "⚠️ Рост должен быть положительным числом (например, 178). Повторите ввод."
-        )
-        return NEWCLIENT_HEIGHT
-
-    form = _newclient_get_form(context)
-    form["height"] = height
-    await _newclient_send_gender_prompt(context, update.message.chat_id)
-    return NEWCLIENT_GENDER
-
-async def newclient_gender_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    if query is None or query.message is None:
-        return NEWCLIENT_GENDER
-    if not await ensure_admin_callback(query):
-        return NEWCLIENT_GENDER
-
-    parts = (query.data or "").split(":")
-    if len(parts) != 3:
-        await query.answer("Неизвестный выбор.", show_alert=True)
-        return NEWCLIENT_GENDER
-    gender = parts[2]
-    if gender not in {"male", "female"}:
-        await query.answer("Неизвестный выбор.", show_alert=True)
-        return NEWCLIENT_GENDER
-
-    form = _newclient_get_form(context)
-    form["gender"] = gender
-
-    label = "М" if gender == "male" else "Ж"
-    try:
-        await query.edit_message_text(f"👤 Пол: {label}")
-    except Exception:
-        LOGGER.debug("Failed to edit gender selection message", exc_info=True)
-
-    await _newclient_send_ftp_prompt(context, query.message.chat_id)
-    return NEWCLIENT_FTP
-
-async def newclient_gender_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    message = update.effective_message
-    if message is not None:
-        await message.reply_text("👤 Пожалуйста, выберите пол с помощью кнопок.")
-    return NEWCLIENT_GENDER
-
-async def newclient_ftp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not update.message:
-        return NEWCLIENT_FTP
-    if not ensure_admin_message(update):
-        return ConversationHandler.END
-
-    ok, ftp = _parse_optional_float_value(update.message.text or "")
-    if not ok or (ftp is not None and ftp <= 0):
-        await update.message.reply_text(
-            "⚠️ Введите положительное число (например, 215) или нажмите кнопку, чтобы оставить значение по умолчанию."
-        )
-        return NEWCLIENT_FTP
-
-    form = _newclient_get_form(context)
-    form["ftp"] = float(DEFAULT_CLIENT_FTP) if ftp is None else ftp
-    await _newclient_send_pedals_prompt(context, update.message.chat_id)
-    return NEWCLIENT_PEDALS
-
-async def newclient_skip_ftp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    if query is None or query.message is None:
-        return NEWCLIENT_FTP
-    if not await ensure_admin_callback(query):
-        return NEWCLIENT_FTP
-
-    form = _newclient_get_form(context)
-    form["ftp"] = float(DEFAULT_CLIENT_FTP)
-    try:
-        await query.edit_message_text("ℹ️ FTP оставлен по умолчанию (150).")
-    except Exception:
-        LOGGER.debug("Failed to edit FTP skip message", exc_info=True)
-
-    await _newclient_send_pedals_prompt(context, query.message.chat_id)
-    return NEWCLIENT_PEDALS
-
-async def newclient_pedals_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    if query is None or query.message is None:
-        return NEWCLIENT_PEDALS
-    if not await ensure_admin_callback(query):
-        return NEWCLIENT_PEDALS
-
-    parts = (query.data or "").split(":")
-    if len(parts) != 3:
-        await query.answer("Неизвестный выбор.", show_alert=True)
-        return NEWCLIENT_PEDALS
-    code = parts[2]
-    label = PEDAL_OPTION_LABEL_BY_CODE.get(code)
-    if label is None:
-        await query.answer("Неизвестный выбор.", show_alert=True)
-        return NEWCLIENT_PEDALS
-
-    form = _newclient_get_form(context)
-    form["pedals"] = label
-    try:
-        await query.edit_message_text(f"🚴 Педали: {label}")
-    except Exception:
-        LOGGER.debug("Failed to edit pedals selection message", exc_info=True)
-
-    await _newclient_send_goal_prompt(context, query.message.chat_id)
-    return NEWCLIENT_GOAL
-
-async def newclient_pedals_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    message = update.effective_message
-    if message is not None:
-        await message.reply_text("🚴 Выберите вариант педалей при помощи кнопок.")
-    return NEWCLIENT_PEDALS
-
-async def newclient_goal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not update.message:
-        return NEWCLIENT_GOAL
-    if not ensure_admin_message(update):
-        return ConversationHandler.END
-
-    value = (update.message.text or "").strip()
-    form = _newclient_get_form(context)
-    form["goal"] = value or None
-
-    return await _newclient_finalize_creation(
-        context=context,
-        chat_id=update.message.chat_id,
-        send_message=update.message.reply_text,
-    )
-
-async def newclient_skip_goal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    if query is None or query.message is None:
-        return NEWCLIENT_GOAL
-    if not await ensure_admin_callback(query):
-        return NEWCLIENT_GOAL
-
-    form = _newclient_get_form(context)
-    form["goal"] = None
-    try:
-        await query.edit_message_text("ℹ️ Цель не указана.")
-    except Exception:
-        LOGGER.debug("Failed to edit goal skip message", exc_info=True)
-
-    return await _newclient_finalize_creation(
-        context=context,
-        chat_id=query.message.chat_id,
-        send_message=lambda text: context.bot.send_message(query.message.chat_id, text),
-    )
-
-async def newclient_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    _newclient_reset_form(context)
-    message = update.effective_message
-    if message is not None:
-        await message.reply_text("Создание клиента отменено.")
-    return ConversationHandler.END
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     return

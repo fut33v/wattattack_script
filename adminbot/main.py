@@ -91,6 +91,7 @@ from adminbot import intervals as intervals_admin
 from adminbot import wizard as wizard_admin
 from adminbot import menu as menu_admin
 from adminbot import clients_view
+from adminbot import new_client
 from adminbot import accounts_view
 from adminbot import admins_view
 from adminbot import uploads as uploads_admin
@@ -111,17 +112,7 @@ ACCOUNTS_ENV = "WATTATTACK_ACCOUNTS_FILE"
 DEFAULT_ACCOUNTS_PATH = Path("accounts.json")
 DEFAULT_TIMEOUT = float(os.environ.get("WATTATTACK_HTTP_TIMEOUT", "30"))
 CLIENTS_PAGE_SIZE = int(os.environ.get("CLIENTS_PAGE_SIZE", "6"))
-DEFAULT_CLIENT_FTP = int(os.environ.get("WATTATTACK_DEFAULT_FTP", "150"))
 CLIENT_BIKE_PICK_PAGE_SIZE = int(os.environ.get("CLIENT_BIKE_PAGE_SIZE", "6"))
-
-PEDAL_OPTIONS: List[Tuple[str, str]] = [
-    ("топталки (под кроссовки)", "platform"),
-    ("контакты шоссе Look", "road_look"),
-    ("контакты шоссе Shimano", "road_shimano"),
-    ("контакты MTB Shimano", "mtb_shimano"),
-    ("принесу свои", "own"),
-]
-PEDAL_OPTION_LABEL_BY_CODE: Dict[str, str] = {code: label for label, code in PEDAL_OPTIONS}
 
 LOCAL_TIMEZONE = ZoneInfo(os.environ.get("WATTATTACK_LOCAL_TZ", "Europe/Moscow"))
 BOOKING_LOOKAHEAD_DAYS = int(os.environ.get("ADMINBOT_BOOKING_LOOKAHEAD_DAYS", "21"))
@@ -283,46 +274,46 @@ def build_application(token: str) -> Application:
     application.add_handler(CommandHandler("wizard", clients_view.wizard_handler))
     newclient_conversation = ConversationHandler(
         entry_points=[
-            CommandHandler("newclient", clients_view.newclient_start),
-            CallbackQueryHandler(clients_view.newclient_start, pattern=r"^menu\|newclient$"),
+            CommandHandler("newclient", new_client.newclient_start),
+            CallbackQueryHandler(new_client.newclient_start, pattern=r"^menu\|newclient$"),
         ],
         states={
-            clients_view.NEWCLIENT_FIRST_NAME: [
-                MessageHandler(filters.TEXT & (~filters.COMMAND), clients_view.newclient_first_name)
+            new_client.NEWCLIENT_FIRST_NAME: [
+                MessageHandler(filters.TEXT & (~filters.COMMAND), new_client.newclient_first_name)
             ],
-            clients_view.NEWCLIENT_LAST_NAME: [
-                MessageHandler(filters.TEXT & (~filters.COMMAND), clients_view.newclient_last_name)
+            new_client.NEWCLIENT_LAST_NAME: [
+                MessageHandler(filters.TEXT & (~filters.COMMAND), new_client.newclient_last_name)
             ],
-            clients_view.NEWCLIENT_WEIGHT: [
-                MessageHandler(filters.TEXT & (~filters.COMMAND), clients_view.newclient_weight)
+            new_client.NEWCLIENT_WEIGHT: [
+                MessageHandler(filters.TEXT & (~filters.COMMAND), new_client.newclient_weight)
             ],
-            clients_view.NEWCLIENT_HEIGHT: [
-                MessageHandler(filters.TEXT & (~filters.COMMAND), clients_view.newclient_height)
+            new_client.NEWCLIENT_HEIGHT: [
+                MessageHandler(filters.TEXT & (~filters.COMMAND), new_client.newclient_height)
             ],
-            clients_view.NEWCLIENT_GENDER: [
+            new_client.NEWCLIENT_GENDER: [
                 CallbackQueryHandler(
-                    clients_view.newclient_gender_selection, pattern=r"^newclient:gender:(male|female)$"
+                    new_client.newclient_gender_selection, pattern=r"^newclient:gender:(male|female)$"
                 ),
-                MessageHandler(filters.TEXT & (~filters.COMMAND), clients_view.newclient_gender_prompt),
+                MessageHandler(filters.TEXT & (~filters.COMMAND), new_client.newclient_gender_prompt),
             ],
-            clients_view.NEWCLIENT_FTP: [
-                CallbackQueryHandler(clients_view.newclient_skip_ftp, pattern=r"^newclient:ftp:skip$"),
-                MessageHandler(filters.TEXT & (~filters.COMMAND), clients_view.newclient_ftp),
+            new_client.NEWCLIENT_FTP: [
+                CallbackQueryHandler(new_client.newclient_skip_ftp, pattern=r"^newclient:ftp:skip$"),
+                MessageHandler(filters.TEXT & (~filters.COMMAND), new_client.newclient_ftp),
             ],
-            clients_view.NEWCLIENT_PEDALS: [
+            new_client.NEWCLIENT_PEDALS: [
                 CallbackQueryHandler(
-                    clients_view.newclient_pedals_selection, pattern=r"^newclient:pedals:[^:]+$"
+                    new_client.newclient_pedals_selection, pattern=r"^newclient:pedals:[^:]+$"
                 ),
-                MessageHandler(filters.TEXT & (~filters.COMMAND), clients_view.newclient_pedals_prompt),
+                MessageHandler(filters.TEXT & (~filters.COMMAND), new_client.newclient_pedals_prompt),
             ],
-            clients_view.NEWCLIENT_GOAL: [
-                CallbackQueryHandler(clients_view.newclient_skip_goal, pattern=r"^newclient:goal:skip$"),
-                MessageHandler(filters.TEXT & (~filters.COMMAND), clients_view.newclient_goal),
+            new_client.NEWCLIENT_GOAL: [
+                CallbackQueryHandler(new_client.newclient_skip_goal, pattern=r"^newclient:goal:skip$"),
+                MessageHandler(filters.TEXT & (~filters.COMMAND), new_client.newclient_goal),
             ],
         },
         fallbacks=[
-            CommandHandler("cancel", clients_view.newclient_cancel),
-            CommandHandler("stop", clients_view.newclient_cancel),
+            CommandHandler("cancel", new_client.newclient_cancel),
+            CommandHandler("stop", new_client.newclient_cancel),
         ],
         allow_reentry=True,
     )
