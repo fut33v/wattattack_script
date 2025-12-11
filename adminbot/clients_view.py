@@ -1908,6 +1908,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.answer("Некорректный идентификатор.", show_alert=True)
             return
         await show_client_booking_days(query, context, client_id)
+    elif action == "client_apply_pick" and len(parts) >= 2:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.answer("Некорректный идентификатор.", show_alert=True)
+            return
+        await show_client_account_picker(query, context, client_id)
+    elif action == "client_apply" and len(parts) >= 3:
+        try:
+            client_id = int(parts[1])
+        except ValueError:
+            await query.answer("Некорректный идентификатор.", show_alert=True)
+            return
+        account_token = parts[2]
+        await apply_client_to_accounts(query, context, client_id, account_token)
     elif action == "client_schedule_refresh" and len(parts) >= 2:
         try:
             client_id = int(parts[1])
@@ -2509,6 +2524,12 @@ def build_client_info_markup(client_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="🚴 Подбор велосипедов",
                     callback_data=f"client_bikes|{client_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚀 Посадить на аккаунт",
+                    callback_data=f"client_apply_pick|{client_id}",
                 )
             ],
             [
@@ -4788,6 +4809,117 @@ async def show_client_info(query, context: ContextTypes.DEFAULT_TYPE, client_id:
         query.message.chat_id,
         query.message.message_id,
         client_id,
+    )
+
+
+async def show_client_account_picker(query, context: ContextTypes.DEFAULT_TYPE, client_id: int) -> None:
+    try:
+        client = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s", client_id)
+        await query.edit_message_text(f"❌ Не удалось получить данные клиента: {exc}")
+        return
+
+    if not client:
+        await query.edit_message_text("🔍 Клиент не найден.")
+        return
+
+    if not ACCOUNT_REGISTRY:
+        await query.edit_message_text("⚠️ Нет доступных WattAttack аккаунтов.")
+        return
+
+    display_name = client_display_name(client)
+    buttons: List[List[InlineKeyboardButton]] = []
+    for account_id in sorted(ACCOUNT_REGISTRY):
+        account = ACCOUNT_REGISTRY[account_id]
+        alias = normalize_account_id_value(account_id)
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{alias} — {account.name}",
+                    callback_data=f"client_apply|{client_id}|{account_id}",
+                )
+            ]
+        )
+
+    if len(ACCOUNT_REGISTRY) > 1:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="Все аккаунты",
+                    callback_data=f"client_apply|{client_id}|ALL",
+                )
+            ]
+        )
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="↩️ К клиенту",
+                callback_data=f"client_info|{client_id}",
+            ),
+            InlineKeyboardButton(text="↩️ В меню", callback_data="menu|start"),
+        ]
+    )
+
+    await query.edit_message_text(
+        f"🚀 Посадка клиента <b>{html.escape(display_name)}</b> на аккаунт.\n"
+        "Выберите аккаунт для применения анкеты:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def apply_client_to_accounts(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    client_id: int,
+    account_token: str,
+) -> None:
+    try:
+        client = await asyncio.to_thread(get_client, client_id)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.exception("Failed to load client %s for apply", client_id)
+        await query.edit_message_text(f"❌ Не удалось получить данные клиента: {exc}")
+        return
+
+    if not client:
+        await query.edit_message_text("🔍 Клиент не найден.")
+        return
+
+    if not ACCOUNT_REGISTRY:
+        await query.edit_message_text("⚠️ Нет доступных WattAttack аккаунтов.")
+        return
+
+    account_ids: List[str] = []
+    if account_token == "ALL":
+        account_ids = list(ACCOUNT_REGISTRY.keys())
+    else:
+        resolved = resolve_account_identifier(account_token)
+        if resolved is None:
+            await query.answer("Аккаунт не найден.", show_alert=True)
+            return
+        account_ids = [resolved]
+
+    lines: List[str] = []
+    for account_id in account_ids:
+        account = ACCOUNT_REGISTRY.get(account_id)
+        label = account.name if account else account_id
+        try:
+            await asyncio.to_thread(apply_client_profile, account_id, client)
+            lines.append(f"✅ {label}")
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to apply profile for %s", account_id)
+            lines.append(f"⚠️ {label}: {exc}")
+
+    text = (
+        f"🚀 Посадка клиента <b>{html.escape(client_display_name(client))}</b> завершена:\n"
+        + "\n".join(lines)
+    )
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=build_client_info_markup(client_id),
     )
 
 async def text_search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
