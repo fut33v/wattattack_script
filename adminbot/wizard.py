@@ -548,6 +548,7 @@ async def _send_slot_detail(
     assignable = 0
     non_platform_clients: List[str] = []
     free_stands = _free_stands_for_slot(slot)
+    all_platform_pedals = True
 
     for idx, reservation in enumerate(reservations, start=1):
         client_id = reservation.get("client_id")
@@ -588,11 +589,16 @@ async def _send_slot_detail(
             non_platform_clients.append(
                 f"{prefix} {html.escape(_format_client_short(client_record))}: {html.escape(pedals_label)}"
             )
+        if pedals_label == "—" or has_non_platform_pedals:
+            all_platform_pedals = False
 
     if non_platform_clients:
         lines.append("")
         lines.append("⚙️ Педали отличные от топталок:")
         lines.extend(non_platform_clients)
+    elif all_platform_pedals and reservations:
+        lines.append("")
+        lines.append("⚙️ У всех клиентов топталки, проверь что везде они и стоят.")
 
     buttons = [
         [
