@@ -20,6 +20,8 @@ def ensure_client_links_table() -> None:
                 strava_refresh_token TEXT,
                 strava_token_expires_at TIMESTAMP,
                 strava_athlete_id BIGINT,
+                is_blocked BOOLEAN DEFAULT FALSE,
+                last_failed_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT NOW(),
                 updated_at TIMESTAMP DEFAULT NOW()
             )
@@ -44,6 +46,12 @@ def ensure_client_links_table() -> None:
             "ALTER TABLE client_links ADD COLUMN IF NOT EXISTS strava_athlete_id BIGINT"
         )
         cur.execute(
+            "ALTER TABLE client_links ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE"
+        )
+        cur.execute(
+            "ALTER TABLE client_links ADD COLUMN IF NOT EXISTS last_failed_at TIMESTAMP"
+        )
+        cur.execute(
             "ALTER TABLE client_links ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()"
         )
         cur.execute(
@@ -65,7 +73,7 @@ def get_link_by_user(tg_user_id: int) -> Optional[Dict]:
         cur.execute(
             "SELECT client_id, tg_user_id, tg_username, tg_full_name, "
             "strava_access_token, strava_refresh_token, strava_token_expires_at, strava_athlete_id, "
-            "created_at, updated_at "
+            "is_blocked, last_failed_at, created_at, updated_at "
             "FROM client_links WHERE tg_user_id = %s",
             (tg_user_id,),
         )
@@ -80,7 +88,7 @@ def get_link_by_client(client_id: int) -> Optional[Dict]:
         cur.execute(
             "SELECT client_id, tg_user_id, tg_username, tg_full_name, "
             "strava_access_token, strava_refresh_token, strava_token_expires_at, strava_athlete_id, "
-            "created_at, updated_at "
+            "is_blocked, last_failed_at, created_at, updated_at "
             "FROM client_links WHERE client_id = %s",
             (client_id,),
         )
@@ -121,9 +129,9 @@ def link_user_to_client(
             INSERT INTO client_links (
                 client_id, tg_user_id, tg_username, tg_full_name,
                 strava_access_token, strava_refresh_token, strava_token_expires_at, strava_athlete_id,
-                created_at, updated_at
+                is_blocked, last_failed_at, created_at, updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE, NULL, NOW(), NOW())
             ON CONFLICT (client_id) DO UPDATE
             SET tg_user_id = EXCLUDED.tg_user_id,
                 tg_username = EXCLUDED.tg_username,
@@ -132,10 +140,12 @@ def link_user_to_client(
                 strava_refresh_token = EXCLUDED.strava_refresh_token,
                 strava_token_expires_at = EXCLUDED.strava_token_expires_at,
                 strava_athlete_id = EXCLUDED.strava_athlete_id,
+                is_blocked = FALSE,
+                last_failed_at = NULL,
                 updated_at = NOW()
             RETURNING client_id, tg_user_id, tg_username, tg_full_name,
                       strava_access_token, strava_refresh_token, strava_token_expires_at, strava_athlete_id,
-                      created_at, updated_at
+                      is_blocked, last_failed_at, created_at, updated_at
             """,
             (
                 client_id, tg_user_id, tg_username, tg_full_name,
@@ -194,6 +204,39 @@ def update_strava_tokens(
     return dict(record) if record else None
 
 
+def mark_link_blocked(tg_user_id: int) -> None:
+    """Mark a link as blocked after Telegram 403."""
+    ensure_client_links_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            UPDATE client_links
+            SET is_blocked = TRUE,
+                last_failed_at = NOW(),
+                updated_at = NOW()
+            WHERE tg_user_id = %s
+            """,
+            (tg_user_id,),
+        )
+        conn.commit()
+
+
+def mark_link_active(tg_user_id: int) -> None:
+    """Clear blocked flag when we successfully deliver a message."""
+    ensure_client_links_table()
+    with db_connection() as conn, dict_cursor(conn) as cur:
+        cur.execute(
+            """
+            UPDATE client_links
+            SET is_blocked = FALSE,
+                updated_at = NOW()
+            WHERE tg_user_id = %s
+            """,
+            (tg_user_id,),
+        )
+        conn.commit()
+
+
 def list_links(limit: int | None = None, offset: int = 0) -> List[Dict]:
     """Return all client links, optionally paginated."""
 
@@ -201,7 +244,7 @@ def list_links(limit: int | None = None, offset: int = 0) -> List[Dict]:
     query = (
         "SELECT cl.client_id, cl.tg_user_id, cl.tg_username, cl.tg_full_name, "
         "cl.strava_access_token, cl.strava_refresh_token, cl.strava_token_expires_at, cl.strava_athlete_id, "
-        "cl.created_at, cl.updated_at, "
+        "cl.is_blocked, cl.last_failed_at, cl.created_at, cl.updated_at, "
         "COALESCE(c.full_name, CONCAT_WS(' ', c.first_name, c.last_name)) AS client_name, "
         "c.gender AS gender "
         "FROM client_links cl "

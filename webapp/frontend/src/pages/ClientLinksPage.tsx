@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 
 import Panel from "../components/Panel";
 import DataGrid from "../components/DataGrid";
@@ -133,25 +134,23 @@ export default function ClientLinksPage() {
       title="Связки"
       subtitle="Привязка клиентов к мессенджерам"
       headerExtra={
-        <div className="tabs">
-          <button className={`tab ${activeTab === "tg" ? "tab--active" : ""}`} onClick={() => setActiveTab("tg")}>
-            Telegram
-          </button>
-          <button className={`tab ${activeTab === "vk" ? "tab--active" : ""}`} onClick={() => setActiveTab("vk")}>
-            ВКонтакте
-          </button>
-      <button
-        className={`tab ${activeTab === "strava" ? "tab--active" : ""}`}
-        onClick={() => setActiveTab("strava")}
-      >
-        Strava
-      </button>
-      <button
-        className={`tab ${activeTab === "intervals" ? "tab--active" : ""}`}
-        onClick={() => setActiveTab("intervals")}
-      >
-        Intervals.icu
-      </button>
+        <div className="segmented-control" role="tablist" aria-label="Связки">
+          {[
+            { key: "tg", label: "Telegram" },
+            { key: "vk", label: "ВКонтакте" },
+            { key: "strava", label: "Strava" },
+            { key: "intervals", label: "Intervals.icu" }
+          ].map((tab) => (
+            <button
+              key={tab.key}
+              role="tab"
+              aria-selected={activeTab === tab.key}
+              className={`segmented-control__item ${activeTab === tab.key ? "is-active" : ""}`}
+              onClick={() => setActiveTab(tab.key as typeof activeTab)}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
       }
     >
@@ -302,12 +301,11 @@ export default function ClientLinksPage() {
   function handleIntervalsUpdate(event: FormEvent<HTMLFormElement>, row: IntervalsLinkRow) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
-    const tgUserId = Number(formData.get("tg_user_id"));
     const apiKey = (formData.get("intervals_api_key") as string | null)?.trim();
     const athleteId = (formData.get("intervals_athlete_id") as string | null)?.trim();
-    if (!tgUserId || Number.isNaN(tgUserId) || !apiKey) return;
+    if (!row.tg_user_id || Number.isNaN(row.tg_user_id) || !apiKey) return;
     const payload: Record<string, unknown> = {
-      tg_user_id: tgUserId,
+      tg_user_id: row.tg_user_id,
       intervals_api_key: apiKey,
       intervals_athlete_id: athleteId || null
     };
@@ -358,64 +356,84 @@ function TelegramSection({
           getRowKey={(item) => item.client_id}
           emptyMessage={<div className="empty-state">Связок нет.</div>}
           actions={(item) => (
-            <div className="row-actions">
+            <div className="row-actions inline-actions">
               <form id={`link-${item.client_id}`} className="row-form" onSubmit={(event) => onUpdate(event, item)}>
-                <button type="submit" className="button">
-                  {updatePending ? "Сохраняю…" : "Сохранить"}
+                <button type="submit" className="icon-button" title="Сохранить">
+                  💾
                 </button>
               </form>
               <button
                 type="button"
-                className="button danger"
+                className="icon-button"
                 onClick={() => onDelete(item.client_id)}
                 disabled={deletePending}
+                title="Удалить"
               >
-                {deletePending ? "Удаляю…" : "Удалить"}
+                🗑️
               </button>
             </div>
           )}
           columns={[
             {
-              key: "client_id",
-              title: "Client ID",
-              className: "cell-id",
-              render: (item) => <div className="id-chip">#{item.client_id}</div>
+              key: "client",
+              title: "Клиент",
+              render: (item) => {
+                const label = item.client_name || `Клиент #${item.client_id}`;
+                return (
+                  <Link to={`/clients/${item.client_id}`} className="client-link">
+                    {label}
+                  </Link>
+                );
+              }
             },
             {
               key: "tg_user_id",
               title: "Telegram ID",
               render: (item) => (
-                <input type="number" name="tg_user_id" defaultValue={item.tg_user_id} form={`link-${item.client_id}`} />
+                <input
+                  type="number"
+                  name="tg_user_id"
+                  defaultValue={item.tg_user_id}
+                  form={`link-${item.client_id}`}
+                  className="input-compact"
+                />
               )
             },
             {
               key: "tg_username",
               title: "Username",
               render: (item) => (
-                <input type="text" name="tg_username" defaultValue={item.tg_username ?? ""} form={`link-${item.client_id}`} />
+                <input
+                  type="text"
+                  name="tg_username"
+                  defaultValue={item.tg_username ?? ""}
+                  form={`link-${item.client_id}`}
+                  className="input-compact"
+                />
               )
             },
             {
               key: "tg_full_name",
               title: "Имя",
               render: (item) => (
-                <input type="text" name="tg_full_name" defaultValue={item.tg_full_name ?? ""} form={`link-${item.client_id}`} />
+                <input
+                  type="text"
+                  name="tg_full_name"
+                  defaultValue={item.tg_full_name ?? ""}
+                  form={`link-${item.client_id}`}
+                  className="input-compact-wide"
+                />
               )
             },
             {
-              key: "strava",
-              title: "Strava",
-              render: (item) => (
-                <div>
-                  {item.strava_connected || item.strava_access_token ? (
-                    <span className="status-badge status-badge--success">
-                      Подключена{item.strava_athlete_name ? ` (${item.strava_athlete_name})` : ""}
-                    </span>
-                  ) : (
-                    <span className="status-badge status-badge--warning">Не подключена</span>
-                  )}
-                </div>
-              )
+              key: "blocked",
+              title: "Статус",
+              render: (item) =>
+                item.is_blocked ? (
+                  <span title={item.last_failed_at ? `Заблокирован · ${formatDate(item.last_failed_at)}` : "Заблокирован"}>🚫</span>
+                ) : (
+                  <span title="Активен">✅</span>
+                )
             },
             { key: "created_at", title: "Создано", render: (item) => formatDate(item.created_at) },
             { key: "updated_at", title: "Обновлено", render: (item) => formatDate(item.updated_at) }
@@ -463,28 +481,32 @@ function VkSection({
           getRowKey={(item) => item.client_id}
           emptyMessage={<div className="empty-state">VK-связок нет.</div>}
           actions={(item) => (
-            <div className="row-actions">
+            <div className="row-actions inline-actions">
               <form id={`vk-link-${item.client_id}`} className="row-form" onSubmit={(event) => onUpdate(event, item)}>
-                <button type="submit" className="button">
-                  {updatePending ? "Сохраняю…" : "Сохранить"}
+                <button type="submit" className="icon-button" title="Сохранить">
+                  💾
                 </button>
               </form>
               <button
                 type="button"
-                className="button danger"
+                className="icon-button"
                 onClick={() => onDelete(item.client_id)}
                 disabled={deletePending}
+                title="Удалить"
               >
-                {deletePending ? "Удаляю…" : "Удалить"}
+                🗑️
               </button>
             </div>
           )}
           columns={[
             {
-              key: "client_id",
-              title: "Client ID",
-              className: "cell-id",
-              render: (item) => <div className="id-chip">#{item.client_id}</div>
+              key: "client",
+              title: "Клиент",
+              render: (item) => (
+                <Link to={`/clients/${item.client_id}`} className="client-link">
+                  {item.client_name || `Клиент #${item.client_id}`}
+                </Link>
+              )
             },
             {
               key: "vk_user_id",
@@ -543,20 +565,19 @@ function StravaSection({ listQuery }: { listQuery: ReturnType<typeof useQuery<Cl
       emptyMessage={<div className="empty-state">Strava-связок нет.</div>}
       columns={[
         {
-          key: "client_id",
-          title: "Client ID",
-          className: "cell-id",
-          render: (item) => <div className="id-chip">#{item.client_id}</div>
+          key: "client",
+          title: "Клиент",
+          render: (item) => (
+            <Link to={`/clients/${item.client_id}`} className="client-link">
+              {item.client_name || `Клиент #${item.client_id}`}
+            </Link>
+          )
         },
         { key: "tg_user_id", title: "Telegram ID", render: (item) => item.tg_user_id ?? "—" },
         {
           key: "status",
           title: "Статус",
-          render: (item) => (
-            <span className="status-badge status-badge--success">
-              Подключена{item.strava_athlete_name ? ` (${item.strava_athlete_name})` : ""}
-            </span>
-          )
+          render: (item) => <span title={item.strava_athlete_name || "Strava"}>✅</span>
         },
         { key: "created_at", title: "Создано", render: (item) => formatDate(item.created_at) },
         { key: "updated_at", title: "Обновлено", render: (item) => formatDate(item.updated_at) }
@@ -601,37 +622,37 @@ function IntervalsSection({
           getRowKey={(item) => item.tg_user_id}
           emptyMessage={<div className="empty-state">Intervals-связок нет.</div>}
           actions={(item) => (
-            <div className="row-actions">
+            <div className="row-actions inline-actions">
               <form id={`intervals-${item.tg_user_id}`} className="row-form" onSubmit={(event) => onUpdate(event, item)}>
-                <button type="submit" className="button">
-                  {updatePending ? "Сохраняю…" : "Сохранить"}
+                <button type="submit" className="icon-button" title="Сохранить">
+                  💾
                 </button>
               </form>
               <button
                 type="button"
-                className="button danger"
+                className="icon-button"
                 onClick={() => onDelete(item.tg_user_id)}
                 disabled={deletePending}
+                title="Удалить"
               >
-                {deletePending ? "Удаляю…" : "Удалить"}
+                🗑️
               </button>
             </div>
           )}
           columns={[
-            { key: "tg_user_id", title: "Telegram ID", render: (item) => item.tg_user_id },
             {
               key: "client",
               title: "Клиент",
               render: (item) =>
                 item.client_id ? (
-                  <div>
-                    <div className="id-chip">#{item.client_id}</div>
-                    <div>{item.client_name ?? "—"}</div>
-                  </div>
+                  <Link to={`/clients/${item.client_id}`} className="client-link">
+                    {item.client_name || `Клиент #${item.client_id}`}
+                  </Link>
                 ) : (
                   "—"
                 )
             },
+            { key: "tg_user_id", title: "Telegram ID", render: (item) => item.tg_user_id },
             {
               key: "intervals_api_key",
               title: "API key",

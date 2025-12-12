@@ -542,10 +542,13 @@ async def api_broadcast_message(request: Request):
                         )
                         if last_status:
                             error_reasons.append(f"sendPhoto {last_status}: {last_text}")
+                            if int(last_status) == 403:
+                                client_link_repository.mark_link_blocked(int(tg_user_id))
                         failed_count += 1
                         continue
 
                     sent_count += 1
+                    client_link_repository.mark_link_active(int(tg_user_id))
 
                     if caption and not caption_allowed:
                         follow_data = {
@@ -565,6 +568,8 @@ async def api_broadcast_message(request: Request):
                                 response.text,
                             )
                             error_reasons.append(f"caption {response.status_code}: {response.text}")
+                            if response.status_code == 403:
+                                client_link_repository.mark_link_blocked(int(tg_user_id))
                             failed_count += 1
                     continue
 
@@ -580,6 +585,7 @@ async def api_broadcast_message(request: Request):
 
                 if response.status_code == 200:
                     sent_count += 1
+                    client_link_repository.mark_link_active(int(tg_user_id))
                 else:
                     log.warning(
                         "Failed to send message to user %s: %s %s",
@@ -588,6 +594,8 @@ async def api_broadcast_message(request: Request):
                         response.text,
                     )
                     error_reasons.append(f"sendMessage {response.status_code}: {response.text}")
+                    if response.status_code == 403:
+                        client_link_repository.mark_link_blocked(int(tg_user_id))
                     failed_count += 1
 
             except Exception as exc:

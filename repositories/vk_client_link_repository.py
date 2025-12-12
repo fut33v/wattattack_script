@@ -114,8 +114,12 @@ def list_links(limit: int | None = None, offset: int = 0) -> List[Dict]:
 
     ensure_vk_client_links_table()
     query = (
-        "SELECT client_id, vk_user_id, vk_username, vk_full_name, created_at, updated_at "
-        "FROM vk_client_links ORDER BY created_at DESC"
+        "SELECT v.client_id, v.vk_user_id, v.vk_username, v.vk_full_name, "
+        "v.created_at, v.updated_at, "
+        "COALESCE(c.full_name, CONCAT_WS(' ', c.first_name, c.last_name)) AS client_name "
+        "FROM vk_client_links v "
+        "LEFT JOIN clients c ON c.id = v.client_id "
+        "ORDER BY v.created_at DESC"
     )
     params: tuple = ()
     if limit is not None:

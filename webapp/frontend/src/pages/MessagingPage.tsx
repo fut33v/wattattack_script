@@ -81,6 +81,7 @@ export default function MessagingPage() {
   const [bookingSlotId, setBookingSlotId] = useState<number | null>(null);
   const [genderFilter, setGenderFilter] = useState<"all" | "male" | "female" | "unknown">("all");
   const [useMarkdownV2, setUseMarkdownV2] = useState(false);
+  const [includeBlocked, setIncludeBlocked] = useState(false);
 
   const linksQuery = useQuery({
     queryKey: ["client-links"],
@@ -210,6 +211,9 @@ export default function MessagingPage() {
     }
     if (genderFilter !== "all") {
       data.filterGender = genderFilter;
+    }
+    if (includeBlocked) {
+      // backend still attempts sends; UI filter controls inclusion
     }
 
     const shouldSendAsForm = Boolean(imageFile || imageUrl);
@@ -457,6 +461,7 @@ export default function MessagingPage() {
   const genderFilterLabel = formatGenderFilterLabel(genderFilter);
   const genderSummary = genderFilter === "all" ? "(любой)" : genderFilterLabel;
   const genderHint = genderFilter !== "all" ? ` — пол: ${genderFilterLabel}` : "";
+  const blockedSummary = includeBlocked ? "включая заблокированных" : "без заблокированных";
 
   const filteredLinks = useMemo(() => {
     let scoped = links;
@@ -473,6 +478,10 @@ export default function MessagingPage() {
         }
         return normalized === genderFilter;
       });
+    }
+
+    if (!includeBlocked) {
+      scoped = scoped.filter((link) => !link.is_blocked);
     }
 
     if (bookingIncludeSet) {
@@ -531,6 +540,9 @@ export default function MessagingPage() {
     if (genderFilter !== "all") {
       filters.push(`пол: ${genderFilterLabel}`);
     }
+    if (!includeBlocked) {
+      filters.push("без заблокированных");
+    }
     return filters;
   }, [
     raceFilterActive,
@@ -540,7 +552,8 @@ export default function MessagingPage() {
     filterNoBookingToday,
     filterNoBookingTomorrow,
     genderFilter,
-    genderFilterLabel
+    genderFilterLabel,
+    includeBlocked
   ]);
 
   useEffect(() => {
@@ -786,6 +799,19 @@ export default function MessagingPage() {
           </details>
 
           <div className="form-group">
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={includeBlocked}
+                onChange={(e) => setIncludeBlocked(e.target.checked)}
+                disabled={isSending}
+              />
+              <span>Включать заблокированных бота (обычно не нужно)</span>
+            </label>
+            {!includeBlocked && <div className="form-hint">По умолчанию исключаем клиентов с флагом “bot blocked”.</div>}
+          </div>
+
+          <div className="form-group">
             <label>Получатели</label>
             <div className="recipient-actions">
               <div className="recipient-summary">
@@ -848,8 +874,11 @@ export default function MessagingPage() {
                         disabled={isSending}
                       />
                       <div className="recipient-meta">
-                        <div className="recipient-name">{formatClientLabel(link)}</div>
-                        <div className="recipient-sub">ID {link.client_id}</div>
+                      <div className="recipient-name">{formatClientLabel(link)}</div>
+                        <div className="recipient-sub">
+                          ID {link.client_id}
+                          {link.is_blocked && <span className="pill pill-danger">Бот заблокирован</span>}
+                        </div>
                       </div>
                     </label>
                   );

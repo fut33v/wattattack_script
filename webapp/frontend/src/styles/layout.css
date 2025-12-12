@@ -567,8 +567,42 @@
   color: rgba(230, 237, 255, 0.8);
 }
 
+.pill-danger {
+  background: rgba(255, 107, 139, 0.2);
+  color: #ffd5de;
+  border: 1px solid rgba(255, 107, 139, 0.35);
+}
+
 .pill-action {
   gap: 0.4rem;
+}
+
+.segmented-control {
+  display: inline-flex;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.segmented-control__item {
+  border: none;
+  background: transparent;
+  color: rgba(233, 241, 255, 0.9);
+  padding: 0.5rem 0.9rem;
+  cursor: pointer;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.segmented-control__item:last-child {
+  border-right: none;
+}
+
+.segmented-control__item.is-active {
+  background: rgba(79, 155, 255, 0.18);
+  color: #e9f1ff;
 }
 
 .chip-row {
@@ -612,6 +646,29 @@
   font-size: 0.8rem;
 }
 
+.input-compact {
+  width: 120px !important;
+  max-width: 120px;
+}
+
+.input-compact-wide {
+  width: 180px !important;
+  max-width: 180px;
+}
+
+.client-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.client-cell-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
 .cell-metrics {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
@@ -652,9 +709,20 @@
 
 .row-actions {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  align-items: flex-end;
+  flex-direction: row;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.row-actions.inline-actions .row-form {
+  flex-direction: row;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.row-actions.inline-actions .row-form input {
+  width: auto;
+  max-width: 140px;
 }
 
 .trainers-layout,

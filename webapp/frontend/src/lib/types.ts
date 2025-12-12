@@ -219,6 +219,8 @@ export interface ClientLinkRow {
   tg_full_name?: string | null;
   client_name?: string | null;
   gender?: string | null;
+  is_blocked?: boolean | null;
+  last_failed_at?: string | null;
   strava_access_token?: string | null;
   strava_refresh_token?: string | null;
   strava_token_expires_at?: string | null;
@@ -238,6 +240,7 @@ export interface VkClientLinkRow {
   vk_user_id: number;
   vk_username?: string | null;
   vk_full_name?: string | null;
+  client_name?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }
