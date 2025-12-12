@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useMemo, useState, type ChangeEvent, type Clipboa
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import Panel from "../components/Panel";
-import { apiFetch } from "../lib/api";
+import { ApiError, apiFetch } from "../lib/api";
 import type {
   ClientLinkListResponse,
   ClientLinkRow,
@@ -17,13 +17,17 @@ interface BroadcastResponse {
   failed: number;
   total: number;
   message: string;
+  errors?: string[];
 }
 
 interface MessagingFilters {
   sendAt?: string;
   clientIds?: number[];
   raceId?: number;
+  useMarkdownV2?: boolean;
   imageUrl?: string;
+  filterRaceUnpaid?: boolean;
+  filterGender?: "male" | "female" | "unknown";
   filterNoBookingToday?: boolean;
   filterNoBookingTomorrow?: boolean;
   filterHasBookingToday?: boolean;
@@ -63,8 +67,10 @@ export default function MessagingPage() {
   const [selectedClientIds, setSelectedClientIds] = useState<number[]>([]);
   const [clientSearch, setClientSearch] = useState("");
   const [selectedRaceId, setSelectedRaceId] = useState<number | null>(null);
+  const [raceUnpaidOnly, setRaceUnpaidOnly] = useState(false);
   const [raceFilterOpen, setRaceFilterOpen] = useState(false);
   const [bookingFilterOpen, setBookingFilterOpen] = useState(false);
+  const [genderFilterOpen, setGenderFilterOpen] = useState(false);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState("");
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -73,6 +79,8 @@ export default function MessagingPage() {
   const [bookingIncludeMode, setBookingIncludeMode] = useState<BookingIncludeMode>("none");
   const [bookingDate, setBookingDate] = useState("");
   const [bookingSlotId, setBookingSlotId] = useState<number | null>(null);
+  const [genderFilter, setGenderFilter] = useState<"all" | "male" | "female" | "unknown">("all");
+  const [useMarkdownV2, setUseMarkdownV2] = useState(false);
 
   const linksQuery = useQuery({
     queryKey: ["client-links"],
@@ -137,7 +145,7 @@ export default function MessagingPage() {
       setImageUrl("");
     },
     onError: (error: any) => {
-      setSendError(error.message || "Не удалось отправить сообщение");
+      setSendError(formatSendError(error));
       setSendResult(null);
     },
     onSettled: () => {
@@ -173,6 +181,9 @@ export default function MessagingPage() {
 
     if (selectedRaceId) {
       data.raceId = selectedRaceId;
+      if (raceUnpaidOnly) {
+        data.filterRaceUnpaid = true;
+      }
     }
 
     if (filterNoBookingToday) {
@@ -194,6 +205,12 @@ export default function MessagingPage() {
     if (bookingIncludeMode === "slot" && bookingSlotId) {
       data.filterSlotId = bookingSlotId;
     }
+    if (useMarkdownV2) {
+      data.useMarkdownV2 = true;
+    }
+    if (genderFilter !== "all") {
+      data.filterGender = genderFilter;
+    }
 
     const shouldSendAsForm = Boolean(imageFile || imageUrl);
 
@@ -203,12 +220,15 @@ export default function MessagingPage() {
       if (data.sendAt) formData.append("sendAt", data.sendAt);
       if (data.clientIds) formData.append("clientIds", JSON.stringify(data.clientIds));
       if (data.raceId) formData.append("raceId", String(data.raceId));
+      if (data.filterRaceUnpaid) formData.append("filterRaceUnpaid", "true");
       if (data.filterNoBookingToday) formData.append("filterNoBookingToday", "true");
       if (data.filterNoBookingTomorrow) formData.append("filterNoBookingTomorrow", "true");
       if (data.filterHasBookingToday) formData.append("filterHasBookingToday", "true");
       if (data.filterHasBookingTomorrow) formData.append("filterHasBookingTomorrow", "true");
       if (data.filterBookingDate) formData.append("filterBookingDate", data.filterBookingDate);
       if (data.filterSlotId) formData.append("filterSlotId", String(data.filterSlotId));
+      if (data.filterGender) formData.append("filterGender", data.filterGender);
+      if (data.useMarkdownV2) formData.append("markdownV2", "true");
       if (imageFile) formData.append("image", imageFile);
       if (imageUrl) formData.append("imageUrl", imageUrl.trim());
       broadcastMutation.mutate(formData);
@@ -216,6 +236,20 @@ export default function MessagingPage() {
     }
 
     broadcastMutation.mutate(data);
+  }
+
+  function formatSendError(error: unknown) {
+    if (error instanceof ApiError) {
+      const detail =
+        typeof error.body === "string"
+          ? error.body
+          : (error.body as any)?.detail || (error.body as any)?.message || error.message;
+      return `Ошибка отправки (${error.status}): ${detail}`;
+    }
+    if (error instanceof Error) {
+      return `Ошибка отправки: ${error.message}`;
+    }
+    return "Не удалось отправить сообщение";
   }
 
   function formatScheduledTime() {
@@ -248,8 +282,8 @@ export default function MessagingPage() {
   }
 
   function handleSelectAllClients() {
-    if (!linksQuery.data?.items) return;
-    const allIds = linksQuery.data.items.map((item) => item.client_id);
+    if (filteredLinks.length === 0) return;
+    const allIds = filteredLinks.map((item) => item.client_id);
     setSelectedClientIds(allIds);
   }
 
@@ -324,6 +358,23 @@ export default function MessagingPage() {
     return extras.length > 0 ? `${base} (${extras.join(" · ")})` : base;
   }
 
+  function normalizeGender(value: string | null | undefined) {
+    return (value ?? "").trim().toLowerCase();
+  }
+
+  function formatGenderFilterLabel(value: "all" | "male" | "female" | "unknown") {
+    switch (value) {
+      case "male":
+        return "мужчины";
+      case "female":
+        return "женщины";
+      case "unknown":
+        return "без указания пола";
+      default:
+        return "все";
+    }
+  }
+
   const links = linksQuery.data?.items ?? [];
   const linkedUsersCount = links.length;
   const normalizedSearch = clientSearch.trim().toLowerCase();
@@ -338,16 +389,17 @@ export default function MessagingPage() {
 
   const raceParticipantIds = useMemo(() => {
     const registrations = raceDetailQuery.data?.item?.registrations || [];
+    const allowedStatuses = raceUnpaidOnly ? ["pending"] : ["approved", "pending"];
     return new Set(
       registrations
         .filter((reg) => {
           const status = (reg.status || "").toLowerCase();
-          return status === "approved" || status === "pending";
+          return allowedStatuses.includes(status);
         })
         .map((reg) => reg.client_id)
         .filter((id): id is number => Boolean(id))
     );
-  }, [raceDetailQuery.data]);
+  }, [raceDetailQuery.data, raceUnpaidOnly]);
 
   const bookedToday = useMemo(() => new Set(bookingFiltersQuery.data?.todayIds ?? []), [bookingFiltersQuery.data]);
   const bookedTomorrow = useMemo(() => new Set(bookingFiltersQuery.data?.tomorrowIds ?? []), [bookingFiltersQuery.data]);
@@ -402,11 +454,25 @@ export default function MessagingPage() {
     (bookingIncludeMode === "date" && Boolean(bookingDate) && bookingFiltersQuery.isFetching) ||
     (bookingIncludeMode === "slot" && Boolean(bookingSlotId) && bookingFiltersQuery.isFetching);
 
+  const genderFilterLabel = formatGenderFilterLabel(genderFilter);
+  const genderSummary = genderFilter === "all" ? "(любой)" : genderFilterLabel;
+  const genderHint = genderFilter !== "all" ? ` — пол: ${genderFilterLabel}` : "";
+
   const filteredLinks = useMemo(() => {
     let scoped = links;
     const applyRaceFilter = raceFilterActive && raceFilterLoaded && raceParticipantIds.size > 0;
     if (applyRaceFilter) {
       scoped = scoped.filter((link) => raceParticipantIds.has(link.client_id));
+    }
+
+    if (genderFilter !== "all") {
+      scoped = scoped.filter((link) => {
+        const normalized = normalizeGender(link.gender);
+        if (genderFilter === "unknown") {
+          return normalized !== "male" && normalized !== "female";
+        }
+        return normalized === genderFilter;
+      });
     }
 
     if (bookingIncludeSet) {
@@ -430,6 +496,7 @@ export default function MessagingPage() {
     raceFilterActive,
     raceFilterLoaded,
     raceParticipantIds,
+    genderFilter,
     bookingIncludeSet,
     filterNoBookingToday,
     filterNoBookingTomorrow,
@@ -442,7 +509,11 @@ export default function MessagingPage() {
   const activeRecipientFilters = useMemo(() => {
     const filters: string[] = [];
     if (raceFilterActive && selectedRace) {
-      filters.push(`гонка: ${formatRaceLabel(selectedRace.title, selectedRace.race_date)}`);
+      filters.push(
+        `гонка: ${formatRaceLabel(selectedRace.title, selectedRace.race_date)}${
+          raceUnpaidOnly ? " (только не оплатившие)" : ""
+        }`
+      );
     }
     if (bookingIncludeMode !== "none") {
       if (bookingSummaryLabel) {
@@ -457,12 +528,30 @@ export default function MessagingPage() {
     if (filterNoBookingTomorrow) {
       filters.push("без брони завтра");
     }
+    if (genderFilter !== "all") {
+      filters.push(`пол: ${genderFilterLabel}`);
+    }
     return filters;
-  }, [raceFilterActive, selectedRace, bookingIncludeMode, bookingSummaryLabel, filterNoBookingToday, filterNoBookingTomorrow]);
+  }, [
+    raceFilterActive,
+    selectedRace,
+    bookingIncludeMode,
+    bookingSummaryLabel,
+    filterNoBookingToday,
+    filterNoBookingTomorrow,
+    genderFilter,
+    genderFilterLabel
+  ]);
 
   useEffect(() => {
     setSelectedClientIds((prev) => prev.filter((id) => filteredLinks.some((link) => link.client_id === id)));
   }, [filteredLinks]);
+
+  useEffect(() => {
+    if (!selectedRaceId) {
+      setRaceUnpaidOnly(false);
+    }
+  }, [selectedRaceId]);
 
   useEffect(() => {
     if (bookingIncludeMode !== "none") {
@@ -487,7 +576,9 @@ export default function MessagingPage() {
               Фильтр по гонке
               <span className="summary-hint">
                 {raceFilterActive && selectedRace
-                  ? `Активен: ${formatRaceLabel(selectedRace.title, selectedRace.race_date)}`
+                  ? `Активен: ${formatRaceLabel(selectedRace.title, selectedRace.race_date)}${
+                      raceUnpaidOnly ? " · только не оплатившие" : ""
+                    }`
                   : "(опционально)"}
               </span>
             </summary>
@@ -513,7 +604,19 @@ export default function MessagingPage() {
               {raceFilterActive && selectedRace && (
                 <div className="form-hint">
                   Активен фильтр гонки: {formatRaceLabel(selectedRace.title, selectedRace.race_date)}
+                  {raceUnpaidOnly ? " · только не оплатившие" : ""}
                 </div>
+              )}
+              {raceFilterActive && (
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={raceUnpaidOnly}
+                    onChange={(e) => setRaceUnpaidOnly(e.target.checked)}
+                    disabled={isSending || raceDetailQuery.isLoading}
+                  />
+                  <span>Только не оплатившие (статус pending)</span>
+                </label>
               )}
             </div>
           </details>
@@ -648,6 +751,40 @@ export default function MessagingPage() {
             </div>
           </details>
 
+          <details
+            className="form-group collapsible"
+            open={genderFilterOpen}
+            onToggle={(e) => setGenderFilterOpen(e.currentTarget.open)}
+          >
+            <summary>
+              Фильтр по полу
+              <span className="summary-hint">{genderSummary}</span>
+            </summary>
+            <div className="collapsible-content">
+              <div className="form-hint">Сузьте рассылку по полу клиента.</div>
+              <div className="filter-buttons">
+                {[
+                  { value: "all", label: "Все" },
+                  { value: "male", label: "Мужчины" },
+                  { value: "female", label: "Женщины" },
+                  { value: "unknown", label: "Без указания" }
+                ].map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`button toggle ${genderFilter === option.value ? "active" : ""}`}
+                    onClick={() => setGenderFilter(option.value as typeof genderFilter)}
+                    aria-pressed={genderFilter === option.value}
+                    disabled={isSending}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <div className="form-hint">Данные берутся из карточки клиента.</div>
+            </div>
+          </details>
+
           <div className="form-group">
             <label>Получатели</label>
             <div className="recipient-actions">
@@ -658,6 +795,7 @@ export default function MessagingPage() {
                     ? "Нет получателей"
                     : `Без выбора — всем ${filteredLinks.length} пользователям`}
                 {raceFilterActive && selectedRace ? ` · Гонка: ${formatRaceLabel(selectedRace.title, selectedRace.race_date)}` : ""}
+                {genderFilter !== "all" ? ` · Пол: ${genderFilterLabel}` : ""}
               </div>
               {activeRecipientFilters.length > 0 && (
                 <div className="filter-badges">
@@ -769,8 +907,8 @@ export default function MessagingPage() {
               Текст сообщения
               <div className="form-hint">
                 {selectedClientIds.length > 0
-                  ? `Сообщение получат ${selectedCount} выбранных клиентов${raceFilterActive ? " (участники выбранной гонки)" : ""}${bookingIncludeMode !== "none" ? ` — ${bookingSummaryLabel || "фильтр по брони"}` : ""}`
-                  : `Сообщение будет отправлено всем ${filteredLinks.length} получателям${raceFilterActive ? " — участникам гонки" : ""}${bookingIncludeMode !== "none" ? ` — ${bookingSummaryLabel || "фильтр по брони"}` : ""}`}
+                  ? `Сообщение получат ${selectedCount} выбранных клиентов${raceFilterActive ? " (участники выбранной гонки)" : ""}${bookingIncludeMode !== "none" ? ` — ${bookingSummaryLabel || "фильтр по брони"}` : ""}${genderHint}`
+                  : `Сообщение будет отправлено всем ${filteredLinks.length} получателям${raceFilterActive ? " — участникам гонки" : ""}${bookingIncludeMode !== "none" ? ` — ${bookingSummaryLabel || "фильтр по брони"}` : ""}${genderHint}`}
               </div>
             </label>
             <textarea
@@ -797,6 +935,19 @@ export default function MessagingPage() {
                 disabled
               />
               Отправить по расписанию
+            </label>
+
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={useMarkdownV2}
+                onChange={(e) => setUseMarkdownV2(e.target.checked)}
+                disabled={isSending}
+              />
+              <span>
+                Использовать MarkdownV2 (Telegram)
+                <div className="form-hint">Переключает parse_mode; текст должен быть корректно экранирован под MarkdownV2.</div>
+              </span>
             </label>
             
             {isScheduled && (
@@ -841,7 +992,12 @@ export default function MessagingPage() {
             
             {sendResult && (
               <div className="form-message success">
-                {sendResult.message}
+                <div>{sendResult.message}</div>
+                {sendResult.errors && sendResult.errors.length > 0 && (
+                  <div className="form-hint">
+                    Детали: {sendResult.errors.join(" | ")}
+                  </div>
+                )}
               </div>
             )}
             

@@ -103,6 +103,34 @@ def _parse_id_list(raw_value: object, field_name: str) -> set[int] | None:
     return result
 
 
+def _normalize_gender(value: object | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip().lower()
+    return str(value).strip().lower()
+
+
+def _gender_matches(filter_gender: str, candidate: object | None) -> bool:
+    normalized = _normalize_gender(candidate)
+    if filter_gender == "unknown":
+        return normalized not in {"male", "female"}
+    return normalized == filter_gender
+
+
+def _parse_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    try:
+        return bool(int(value))  # type: ignore[arg-type]
+    except Exception:
+        return bool(value)
+
+
 def _collect_clients_with_bookings_on_date(target_date: date) -> FilterClientSet:
     """Return client IDs that have bookings on a specific date."""
 
@@ -264,6 +292,10 @@ async def api_broadcast_message(request: Request):
         filter_has_booking_tomorrow = payload.get("filterHasBookingTomorrow")
         filter_booking_date_raw = payload.get("filterBookingDate")
         filter_slot_id_raw = payload.get("filterSlotId") or payload.get("slotId")
+        filter_race_unpaid_raw = payload.get("filterRaceUnpaid") or payload.get("raceUnpaid")
+        filter_gender_raw = payload.get("filterGender")
+        parse_mode_raw = payload.get("parseMode")
+        markdown_v2_raw = payload.get("markdownV2") or payload.get("useMarkdownV2")
         image_url = payload.get("imageUrl") or payload.get("image_url")
         log.info(
             "broadcast: parsed message_len=%s image_upload=%s image_url=%s",
@@ -302,6 +334,9 @@ async def api_broadcast_message(request: Request):
                 race_repository.RACE_STATUS_APPROVED,
                 race_repository.RACE_STATUS_PENDING,
             }
+            unpaid_only = _parse_bool(filter_race_unpaid_raw)
+            if unpaid_only:
+                allowed_statuses = {race_repository.RACE_STATUS_PENDING}
             race_client_ids = {
                 int(reg["client_id"])
                 for reg in registrations or []
@@ -332,6 +367,47 @@ async def api_broadcast_message(request: Request):
             links = [link for link in links if int(link.get("client_id") or 0) in race_client_ids]
             if not links:
                 return {"sent": 0, "message": "Нет получателей среди участников гонки"}
+
+        normalized_gender = None
+        if filter_gender_raw is not None:
+            if isinstance(filter_gender_raw, (list, tuple)):
+                candidate = filter_gender_raw[0]
+            else:
+                candidate = filter_gender_raw
+
+            if candidate is None:
+                normalized_gender = None
+            elif not isinstance(candidate, str):
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "filterGender must be a string")
+            else:
+                normalized_gender = candidate.strip().lower()
+                if normalized_gender in {"all", "any", ""}:
+                    normalized_gender = None
+                elif normalized_gender not in {"male", "female", "unknown"}:
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        "filterGender must be one of male, female, unknown, or omitted",
+                    )
+
+        if normalized_gender:
+            links = [link for link in links if _gender_matches(normalized_gender, link.get("gender"))]
+            if not links:
+                return {"sent": 0, "message": "Нет получателей указанного пола"}
+
+        parse_mode = "HTML"
+        if isinstance(parse_mode_raw, str):
+            normalized_mode = parse_mode_raw.strip().lower()
+            if normalized_mode in {"markdownv2", "markdown_v2"}:
+                parse_mode = "MarkdownV2"
+            elif normalized_mode in {"", "html"}:
+                parse_mode = "HTML"
+            else:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST,
+                    "parseMode must be HTML or MarkdownV2",
+                )
+        elif _parse_bool(markdown_v2_raw):
+            parse_mode = "MarkdownV2"
 
         inclusion_ids: set[int] | None = None
 
@@ -412,6 +488,7 @@ async def api_broadcast_message(request: Request):
         sent_count = 0
         failed_count = 0
         total_recipients = len(links)
+        error_reasons: list[str] = []
 
         for link in links:
             tg_user_id = link.get("tg_user_id")
@@ -437,7 +514,7 @@ async def api_broadcast_message(request: Request):
                         }
                         if caption_allowed:
                             payload["caption"] = caption
-                            payload["parse_mode"] = "HTML"
+                            payload["parse_mode"] = parse_mode
                         response = requests.post(photo_url, data=payload, timeout=20)
                         last_status = response.status_code
                         last_text = response.text
@@ -449,7 +526,7 @@ async def api_broadcast_message(request: Request):
                         data = {"chat_id": str(tg_user_id)}
                         if caption_allowed:
                             data["caption"] = caption
-                            data["parse_mode"] = "HTML"
+                            data["parse_mode"] = parse_mode
                         response = requests.post(photo_url, data=data, files=files, timeout=30)
                         last_status = response.status_code
                         last_text = response.text
@@ -463,6 +540,8 @@ async def api_broadcast_message(request: Request):
                             last_status,
                             last_text,
                         )
+                        if last_status:
+                            error_reasons.append(f"sendPhoto {last_status}: {last_text}")
                         failed_count += 1
                         continue
 
@@ -472,7 +551,7 @@ async def api_broadcast_message(request: Request):
                         follow_data = {
                             "chat_id": str(tg_user_id),
                             "text": caption,
-                            "parse_mode": "HTML",
+                            "parse_mode": parse_mode,
                             "disable_web_page_preview": True,
                         }
                         response = requests.post(
@@ -485,6 +564,7 @@ async def api_broadcast_message(request: Request):
                                 response.status_code,
                                 response.text,
                             )
+                            error_reasons.append(f"caption {response.status_code}: {response.text}")
                             failed_count += 1
                     continue
 
@@ -492,7 +572,7 @@ async def api_broadcast_message(request: Request):
                 data = {
                     "chat_id": str(tg_user_id),
                     "text": message_text,
-                    "parse_mode": "HTML",
+                    "parse_mode": parse_mode,
                     "disable_web_page_preview": True,
                 }
 
@@ -507,17 +587,24 @@ async def api_broadcast_message(request: Request):
                         response.status_code,
                         response.text,
                     )
+                    error_reasons.append(f"sendMessage {response.status_code}: {response.text}")
                     failed_count += 1
 
-            except Exception:
+            except Exception as exc:
                 log.exception("Failed to send message to user %s", tg_user_id)
+                error_reasons.append(str(exc))
                 failed_count += 1
+
+        detail_message = f"Отправлено {sent_count} из {total_recipients} пользователей, ошибок: {failed_count}"
+        if error_reasons:
+            detail_message += f". Пример ошибки: {error_reasons[0][:240]}"
 
         return {
             "sent": sent_count,
             "failed": failed_count,
             "total": total_recipients,
-            "message": f"Отправлено {sent_count} из {total_recipients} пользователей, ошибок: {failed_count}",
+            "message": detail_message,
+            "errors": error_reasons[:5],
         }
 
     except HTTPException:
