@@ -16,6 +16,7 @@ export interface ConfigResponse {
   loginBotUsername: string;
   clientsPageSize: number;
   baseUrl?: string | null;
+  vkBroadcastEnabled?: boolean;
 }
 
 export interface Pagination {
@@ -241,6 +242,7 @@ export interface VkClientLinkRow {
   vk_username?: string | null;
   vk_full_name?: string | null;
   client_name?: string | null;
+  gender?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
 }

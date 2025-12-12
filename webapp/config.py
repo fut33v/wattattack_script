@@ -28,6 +28,8 @@ class Settings:
     session_secret_key: str
     telegram_login_bot_token: str
     krutilkavn_bot_token: str
+    vk_community_key: Optional[str] = None
+    vk_api_version: str = "5.199"
     dev_build: bool = False
     base_url: Optional[str] = None
     public_url: Optional[str] = None
@@ -57,6 +59,8 @@ def get_settings() -> Settings:
         telegram_login_bot_username=_env("TELEGRAM_LOGIN_BOT_USERNAME", required=True),
         telegram_login_bot_token=login_token,
         krutilkavn_bot_token=krutilkavn_token,
+        vk_community_key=os.environ.get("VK_API_COMMUNITY_KEY"),
+        vk_api_version=os.environ.get("VK_API_VERSION") or "5.199",
         session_secret_key=_env("WEBAPP_SECRET_KEY", required=True),
         dev_build=_env_bool("DEV_BUILD") or _env_bool("WEBAPP_DEV_BUILD"),
         base_url=os.environ.get("WEBAPP_BASE_URL"),

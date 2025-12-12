@@ -3,11 +3,12 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 
 import Panel from "../components/Panel";
 import { ApiError, apiFetch } from "../lib/api";
+import { useConfig } from "../lib/hooks";
 import type {
   ClientLinkListResponse,
-  ClientLinkRow,
   RaceListResponse,
-  RaceDetailResponse
+  RaceDetailResponse,
+  VkClientLinkListResponse
 } from "../lib/types";
 
 import "../styles/messaging.css";
@@ -18,6 +19,8 @@ interface BroadcastResponse {
   total: number;
   message: string;
   errors?: string[];
+  sentTelegram?: number;
+  sentVk?: number;
 }
 
 interface MessagingFilters {
@@ -57,6 +60,21 @@ interface BookingSlotOption {
 
 type BookingIncludeMode = "none" | "today" | "tomorrow" | "date" | "slot";
 
+type RecipientLink = {
+  client_id: number;
+  client_name?: string | null;
+  gender?: string | null;
+  tg_user_id?: number | null;
+  tg_username?: string | null;
+  tg_full_name?: string | null;
+  vk_user_id?: number | null;
+  vk_username?: string | null;
+  vk_full_name?: string | null;
+  is_blocked?: boolean | null;
+  hasTelegram: boolean;
+  hasVk: boolean;
+};
+
 export default function MessagingPage() {
   const [message, setMessage] = useState("");
   const [isScheduled, setIsScheduled] = useState(false);
@@ -82,11 +100,23 @@ export default function MessagingPage() {
   const [genderFilter, setGenderFilter] = useState<"all" | "male" | "female" | "unknown">("all");
   const [useMarkdownV2, setUseMarkdownV2] = useState(false);
   const [includeBlocked, setIncludeBlocked] = useState(false);
+  const [sendTelegram, setSendTelegram] = useState(true);
+  const [sendVk, setSendVk] = useState(false);
+  const [vkToggleTouched, setVkToggleTouched] = useState(false);
+
+  const configQuery = useConfig();
+  const vkBroadcastEnabled = configQuery.data?.vkBroadcastEnabled ?? false;
 
   const linksQuery = useQuery({
     queryKey: ["client-links"],
     queryFn: () => apiFetch<ClientLinkListResponse>("/api/client-links"),
     staleTime: 60000 // 1 minute
+  });
+
+  const vkLinksQuery = useQuery({
+    queryKey: ["vk-client-links"],
+    queryFn: () => apiFetch<VkClientLinkListResponse>("/api/vk-client-links"),
+    staleTime: 60000
   });
 
   const racesQuery = useQuery({
@@ -164,12 +194,19 @@ export default function MessagingPage() {
       return;
     }
 
+    if (!sendTelegram && !sendVkActive) {
+      setSendError("Выберите хотя бы один канал отправки");
+      return;
+    }
+
     setIsSending(true);
     setSendResult(null);
     setSendError(null);
 
-    const data: MessagingFilters & { message: string } = {
-      message: message.trim()
+    const data: MessagingFilters & { message: string; sendTelegram: boolean; sendVk: boolean } = {
+      message: message.trim(),
+      sendTelegram,
+      sendVk: sendVkActive
     };
 
     if (isScheduled && scheduledTime) {
@@ -233,6 +270,8 @@ export default function MessagingPage() {
       if (data.filterSlotId) formData.append("filterSlotId", String(data.filterSlotId));
       if (data.filterGender) formData.append("filterGender", data.filterGender);
       if (data.useMarkdownV2) formData.append("markdownV2", "true");
+      formData.append("sendTelegram", sendTelegram ? "true" : "false");
+      formData.append("sendVk", sendVkActive ? "true" : "false");
       if (imageFile) formData.append("image", imageFile);
       if (imageUrl) formData.append("imageUrl", imageUrl.trim());
       broadcastMutation.mutate(formData);
@@ -266,17 +305,29 @@ export default function MessagingPage() {
     }
   }
 
-  function matchesSearch(link: ClientLinkRow, normalized: string) {
-    const clientName = (link.client_name || link.tg_full_name || "").toLowerCase();
-    const username = (link.tg_username || "").toLowerCase();
+  function matchesSearch(link: RecipientLink, normalized: string) {
+    const clientName = (link.client_name || link.tg_full_name || link.vk_full_name || "").toLowerCase();
+    const usernameParts = [link.tg_username, link.vk_username]
+      .filter(Boolean)
+      .map((value) => String(value).toLowerCase());
     const idValue = String(link.client_id);
-    return clientName.includes(normalized) || username.includes(normalized) || idValue.includes(normalized);
+    return (
+      clientName.includes(normalized) ||
+      usernameParts.some((part) => part?.includes(normalized)) ||
+      idValue.includes(normalized)
+    );
   }
 
-  function formatClientLabel(link: ClientLinkRow) {
-    const name = link.client_name || link.tg_full_name || "Без имени";
-    const username = link.tg_username ? `@${link.tg_username}` : null;
-    return [name, username].filter(Boolean).join(" · ");
+  function formatClientLabel(link: RecipientLink) {
+    const name = link.client_name || link.tg_full_name || link.vk_full_name || "Без имени";
+    const usernames: string[] = [];
+    if (link.tg_username) usernames.push(`@${link.tg_username}`);
+    if (link.vk_username) usernames.push(`vk.com/${link.vk_username}`);
+    const channels: string[] = [];
+    if (link.hasTelegram) channels.push("TG");
+    if (link.hasVk) channels.push("VK");
+    const details = [...usernames, channels.length ? channels.join("/") : null].filter(Boolean).join(" · ");
+    return details ? `${name} · ${details}` : name;
   }
 
   function toggleClient(clientId: number) {
@@ -286,8 +337,8 @@ export default function MessagingPage() {
   }
 
   function handleSelectAllClients() {
-    if (filteredLinks.length === 0) return;
-    const allIds = filteredLinks.map((item) => item.client_id);
+    if (deliverableRecipients.length === 0) return;
+    const allIds = deliverableRecipients.map((item) => item.client_id);
     setSelectedClientIds(allIds);
   }
 
@@ -380,8 +431,83 @@ export default function MessagingPage() {
   }
 
   const links = linksQuery.data?.items ?? [];
-  const linkedUsersCount = links.length;
+  const vkLinks = vkLinksQuery.data?.items ?? [];
   const normalizedSearch = clientSearch.trim().toLowerCase();
+
+  const recipients = useMemo<RecipientLink[]>(() => {
+    const map = new Map<number, RecipientLink>();
+
+    links.forEach((link) => {
+      const id = link.client_id;
+      const existing = map.get(id);
+      const baseName = link.client_name || link.tg_full_name;
+      if (existing) {
+        existing.hasTelegram = existing.hasTelegram || Boolean(link.tg_user_id);
+        existing.tg_user_id = existing.tg_user_id ?? link.tg_user_id;
+        existing.tg_username = existing.tg_username ?? link.tg_username;
+        existing.tg_full_name = existing.tg_full_name ?? link.tg_full_name;
+        existing.client_name = existing.client_name || baseName;
+        existing.gender = existing.gender || link.gender;
+        existing.is_blocked = existing.is_blocked ?? link.is_blocked;
+      } else {
+        map.set(id, {
+          client_id: id,
+          client_name: baseName,
+          gender: link.gender,
+          tg_user_id: link.tg_user_id,
+          tg_username: link.tg_username,
+          tg_full_name: link.tg_full_name,
+          vk_user_id: null,
+          vk_username: null,
+          vk_full_name: null,
+          is_blocked: link.is_blocked,
+          hasTelegram: Boolean(link.tg_user_id),
+          hasVk: false
+        });
+      }
+    });
+
+    vkLinks.forEach((link) => {
+      const id = link.client_id;
+      const existing = map.get(id);
+      const baseName = link.client_name || link.vk_full_name;
+      if (existing) {
+        existing.hasVk = existing.hasVk || Boolean(link.vk_user_id);
+        existing.vk_user_id = existing.vk_user_id ?? link.vk_user_id;
+        existing.vk_username = existing.vk_username ?? link.vk_username;
+        existing.vk_full_name = existing.vk_full_name ?? link.vk_full_name;
+        existing.client_name = existing.client_name || baseName;
+        existing.gender = existing.gender || link.gender;
+      } else {
+        map.set(id, {
+          client_id: id,
+          client_name: baseName,
+          gender: link.gender,
+          tg_user_id: null,
+          tg_username: null,
+          tg_full_name: null,
+          vk_user_id: link.vk_user_id,
+          vk_username: link.vk_username,
+          vk_full_name: link.vk_full_name,
+          is_blocked: false,
+          hasTelegram: false,
+          hasVk: Boolean(link.vk_user_id)
+        });
+      }
+    });
+
+    return Array.from(map.values()).sort((a, b) => {
+      const aName = (a.client_name || a.tg_full_name || a.vk_full_name || "").toLowerCase();
+      const bName = (b.client_name || b.tg_full_name || b.vk_full_name || "").toLowerCase();
+      if (aName && bName) return aName.localeCompare(bName);
+      if (aName) return -1;
+      if (bName) return 1;
+      return a.client_id - b.client_id;
+    });
+  }, [links, vkLinks]);
+
+  const tgLinkedCount = links.length;
+  const vkLinkedCount = vkLinks.length;
 
   const races = racesQuery.data?.items ?? [];
   const sortedRaces = useMemo(() => {
@@ -461,10 +587,12 @@ export default function MessagingPage() {
   const genderFilterLabel = formatGenderFilterLabel(genderFilter);
   const genderSummary = genderFilter === "all" ? "(любой)" : genderFilterLabel;
   const genderHint = genderFilter !== "all" ? ` — пол: ${genderFilterLabel}` : "";
-  const blockedSummary = includeBlocked ? "включая заблокированных" : "без заблокированных";
 
-  const filteredLinks = useMemo(() => {
-    let scoped = links;
+  const sendVkActive = sendVk && vkBroadcastEnabled;
+  const recipientsLoading = linksQuery.isLoading || vkLinksQuery.isLoading;
+
+  const filteredRecipients = useMemo(() => {
+    let scoped = recipients;
     const applyRaceFilter = raceFilterActive && raceFilterLoaded && raceParticipantIds.size > 0;
     if (applyRaceFilter) {
       scoped = scoped.filter((link) => raceParticipantIds.has(link.client_id));
@@ -500,7 +628,7 @@ export default function MessagingPage() {
     if (!normalizedSearch) return scoped;
     return scoped.filter((link) => matchesSearch(link, normalizedSearch));
   }, [
-    links,
+    recipients,
     normalizedSearch,
     raceFilterActive,
     raceFilterLoaded,
@@ -513,7 +641,18 @@ export default function MessagingPage() {
     bookedTomorrow
   ]);
 
-  const selectedCount = selectedClientIds.length > 0 ? selectedClientIds.length : filteredLinks.length;
+  const deliverableRecipients = useMemo(
+    () =>
+      filteredRecipients.filter((link) => {
+        const viaTelegram = sendTelegram && link.hasTelegram;
+        const viaVk = sendVkActive && link.hasVk;
+        return viaTelegram || viaVk;
+      }),
+    [filteredRecipients, sendTelegram, sendVkActive]
+  );
+
+  const linkedUsersCount = deliverableRecipients.length;
+  const selectedCount = selectedClientIds.length > 0 ? selectedClientIds.length : deliverableRecipients.length;
 
   const activeRecipientFilters = useMemo(() => {
     const filters: string[] = [];
@@ -557,8 +696,18 @@ export default function MessagingPage() {
   ]);
 
   useEffect(() => {
-    setSelectedClientIds((prev) => prev.filter((id) => filteredLinks.some((link) => link.client_id === id)));
-  }, [filteredLinks]);
+    setSelectedClientIds((prev) => prev.filter((id) => deliverableRecipients.some((link) => link.client_id === id)));
+  }, [deliverableRecipients]);
+
+  useEffect(() => {
+    if (!vkBroadcastEnabled) {
+      setSendVk(false);
+      return;
+    }
+    if (!vkToggleTouched && (vkLinksQuery.data?.items?.length ?? 0) > 0) {
+      setSendVk(true);
+    }
+  }, [vkBroadcastEnabled, vkLinksQuery.data, vkToggleTouched]);
 
   useEffect(() => {
     if (!selectedRaceId) {
@@ -578,8 +727,21 @@ export default function MessagingPage() {
       <div className="messaging-page">
         <div className="messaging-stats">
           <div className="stat-card">
-            <div className="stat-label">Подключенные пользователи</div>
+            <div className="stat-label">Получатели по фильтрам</div>
             <div className="stat-value">{linkedUsersCount}</div>
+            <div className="stat-hint form-hint">С учетом выбранных каналов</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">Telegram</div>
+            <div className="stat-value">{tgLinkedCount}</div>
+            <div className="stat-hint form-hint">{sendTelegram ? "включено" : "выключено"}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">VK</div>
+            <div className="stat-value">{vkLinkedCount}</div>
+            <div className="stat-hint form-hint">
+              {vkBroadcastEnabled ? (sendVkActive ? "включено" : "выключено") : "токен не настроен"}
+            </div>
           </div>
         </div>
 
@@ -812,14 +974,48 @@ export default function MessagingPage() {
           </div>
 
           <div className="form-group">
+            <label>Каналы отправки</label>
+            <div className="channel-toggles">
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={sendTelegram}
+                  onChange={(e) => setSendTelegram(e.target.checked)}
+                  disabled={isSending}
+                />
+                <span>Telegram</span>
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={sendVkActive}
+                  onChange={(e) => {
+                    setVkToggleTouched(true);
+                    setSendVk(e.target.checked);
+                  }}
+                  disabled={isSending || !vkBroadcastEnabled || vkLinkedCount === 0}
+                />
+                <span>ВКонтакте {vkBroadcastEnabled ? "" : "(недоступно)"}</span>
+              </label>
+            </div>
+            <div className="form-hint">
+              {sendVkActive
+                ? "Сообщение уйдет и в Telegram, и в VK (если клиент подключен)."
+                : vkBroadcastEnabled
+                  ? "Отправка в VK выключена."
+                  : "Добавьте VK токен, чтобы включить отправку."}
+            </div>
+          </div>
+
+          <div className="form-group">
             <label>Получатели</label>
             <div className="recipient-actions">
               <div className="recipient-summary">
                 {selectedClientIds.length > 0
-                  ? `Выбрано ${selectedClientIds.length} из ${filteredLinks.length}`
-                  : filteredLinks.length === 0
+                  ? `Выбрано ${selectedClientIds.length} из ${deliverableRecipients.length}`
+                  : deliverableRecipients.length === 0
                     ? "Нет получателей"
-                    : `Без выбора — всем ${filteredLinks.length} пользователям`}
+                    : `Без выбора — всем ${deliverableRecipients.length} пользователям`}
                 {raceFilterActive && selectedRace ? ` · Гонка: ${formatRaceLabel(selectedRace.title, selectedRace.race_date)}` : ""}
                 {genderFilter !== "all" ? ` · Пол: ${genderFilterLabel}` : ""}
               </div>
@@ -854,16 +1050,16 @@ export default function MessagingPage() {
               placeholder="Поиск по клиенту или username"
               value={clientSearch}
               onChange={(e) => setClientSearch(e.target.value)}
-              disabled={isSending || linksQuery.isLoading}
+              disabled={isSending || recipientsLoading}
               className="recipient-search"
             />
             <div className="recipient-list">
-              {linksQuery.isLoading ? (
+              {recipientsLoading ? (
                 <div className="recipient-empty">Загрузка подключенных пользователей...</div>
-              ) : filteredLinks.length === 0 ? (
-                <div className="recipient-empty">Не нашлись клиенты по фильтру</div>
+              ) : deliverableRecipients.length === 0 ? (
+                <div className="recipient-empty">Не нашлись клиенты по фильтру или каналам</div>
               ) : (
-                filteredLinks.map((link) => {
+                deliverableRecipients.map((link) => {
                   const isSelected = selectedClientIds.includes(link.client_id);
                   return (
                     <label key={link.client_id} className="recipient-row">
@@ -877,6 +1073,8 @@ export default function MessagingPage() {
                       <div className="recipient-name">{formatClientLabel(link)}</div>
                         <div className="recipient-sub">
                           ID {link.client_id}
+                          {link.hasTelegram && <span className="pill">TG</span>}
+                          {link.hasVk && <span className="pill">VK</span>}
                           {link.is_blocked && <span className="pill pill-danger">Бот заблокирован</span>}
                         </div>
                       </div>
@@ -937,7 +1135,7 @@ export default function MessagingPage() {
               <div className="form-hint">
                 {selectedClientIds.length > 0
                   ? `Сообщение получат ${selectedCount} выбранных клиентов${raceFilterActive ? " (участники выбранной гонки)" : ""}${bookingIncludeMode !== "none" ? ` — ${bookingSummaryLabel || "фильтр по брони"}` : ""}${genderHint}`
-                  : `Сообщение будет отправлено всем ${filteredLinks.length} получателям${raceFilterActive ? " — участникам гонки" : ""}${bookingIncludeMode !== "none" ? ` — ${bookingSummaryLabel || "фильтр по брони"}` : ""}${genderHint}`}
+                  : `Сообщение будет отправлено всем ${deliverableRecipients.length} получателям${raceFilterActive ? " — участникам гонки" : ""}${bookingIncludeMode !== "none" ? ` — ${bookingSummaryLabel || "фильтр по брони"}` : ""}${genderHint}`}
               </div>
             </label>
             <textarea
@@ -1007,6 +1205,7 @@ export default function MessagingPage() {
                 isSending ||
                 broadcastMutation.isPending ||
                 linkedUsersCount === 0 ||
+                (!sendTelegram && !sendVkActive) ||
                 bookingFilterPending ||
                 bookingFilterInvalid
               }
@@ -1041,8 +1240,8 @@ export default function MessagingPage() {
           <div className="messaging-info">
             <h3>Информация</h3>
             <ul>
-            <li>Сообщения отправляются через бота для записи в Крутилку</li>
-            <li>Пользователи получают сообщения как личные сообщения в Telegram</li>
+            <li>Сообщения отправляются через бота для записи в Крутилку и в VK (при включенной опции)</li>
+            <li>Получатели берутся из связок клиента с Telegram/VK; фильтры и выбор применяются одинаково</li>
             <li>Отправка по расписанию будет реализована в следующих версиях</li>
             </ul>
           </div>

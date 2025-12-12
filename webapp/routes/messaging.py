@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, stat
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from repositories import client_link_repository, message_repository, race_repository, schedule_repository
+from repositories import client_link_repository, message_repository, race_repository, schedule_repository, vk_client_link_repository
 
 from ..config import get_settings
 from ..dependencies import require_admin
@@ -172,6 +172,39 @@ def _collect_clients_with_bookings_for_slot(slot_id: int) -> FilterClientSet:
     return booked_ids, note
 
 
+def _filter_links(
+    links: list[dict],
+    *,
+    client_id_filter: set[int] | None,
+    race_client_ids: set[int] | None,
+    normalized_gender: str | None,
+    inclusion_ids: set[int] | None,
+    exclusion_ids: set[int],
+    include_blocked: bool = True,
+) -> list[dict]:
+    """Apply recipient filters to provided link rows."""
+
+    filtered: list[dict] = []
+    for link in links:
+        client_id = int(link.get("client_id") or 0)
+        if client_id <= 0:
+            continue
+        if client_id_filter is not None and client_id not in client_id_filter:
+            continue
+        if race_client_ids is not None and client_id not in race_client_ids:
+            continue
+        if normalized_gender and not _gender_matches(normalized_gender, link.get("gender")):
+            continue
+        if inclusion_ids is not None and client_id not in inclusion_ids:
+            continue
+        if exclusion_ids and client_id in exclusion_ids:
+            continue
+        if not include_blocked and link.get("is_blocked"):
+            continue
+        filtered.append(link)
+    return filtered
+
+
 @router.get("/booking-filters")
 def api_booking_filters(filter_date: Optional[date] = None, slot_id: Optional[int] = None):
     """Return client IDs grouped by booking selectors (today/tomorrow/date/slot)."""
@@ -253,7 +286,7 @@ def _store_uploaded_image(image_upload: UploadFile, *, request: Request, image_b
 
 @router.post("/broadcast")
 async def api_broadcast_message(request: Request):
-    """Broadcast a message to linked Telegram users."""
+    """Broadcast a message to linked users (Telegram and VK)."""
     try:
         log.info(
             "broadcast: incoming content-type=%s length=%s",
@@ -261,6 +294,7 @@ async def api_broadcast_message(request: Request):
             request.headers.get("content-length"),
         )
         payload, image_upload = await _parse_broadcast_payload(request)
+        settings = get_settings()
         log.debug("broadcast: payload keys=%s", list(payload.keys()))
         raw_message = (
             payload.get("message")
@@ -297,12 +331,24 @@ async def api_broadcast_message(request: Request):
         parse_mode_raw = payload.get("parseMode")
         markdown_v2_raw = payload.get("markdownV2") or payload.get("useMarkdownV2")
         image_url = payload.get("imageUrl") or payload.get("image_url")
+        send_vk_default = bool(settings.vk_community_key)
+        send_vk = send_vk_default
+        if "sendVk" in payload or "send_vk" in payload:
+            send_vk = _parse_bool(payload.get("sendVk") or payload.get("send_vk"))
+        send_telegram = True
+        if "sendTelegram" in payload or "send_telegram" in payload:
+            send_telegram = _parse_bool(payload.get("sendTelegram") or payload.get("send_telegram"))
         log.info(
-            "broadcast: parsed message_len=%s image_upload=%s image_url=%s",
+            "broadcast: parsed message_len=%s image_upload=%s image_url=%s send_vk=%s send_tg=%s",
             len(message_text),
             bool(image_upload),
             bool(image_url),
+            send_vk,
+            send_telegram,
         )
+
+        if not send_telegram and not send_vk:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Выберите хотя бы один канал отправки")
 
         if len(message_text.strip()) == 0 and not (image_upload or image_url):
             raise HTTPException(
@@ -350,23 +396,19 @@ async def api_broadcast_message(request: Request):
             log.warning("Scheduled messaging not yet implemented, sending immediately")
 
         try:
-            links = client_link_repository.list_links()
+            tg_links = client_link_repository.list_links() if send_telegram else []
+            vk_links = vk_client_link_repository.list_links() if send_vk else []
         except Exception as exc:  # pylint: disable=broad-except
             log.exception("Failed to fetch client links")
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to fetch client links") from exc
 
-        if not links:
+        if send_telegram and send_vk:
+            if not tg_links and not vk_links:
+                return {"sent": 0, "message": "Нет подключённых пользователей"}
+        elif send_telegram and not tg_links:
             return {"sent": 0, "message": "Нет подключённых пользователей"}
-
-        if client_id_filter is not None:
-            links = [link for link in links if int(link.get("client_id") or 0) in client_id_filter]
-            if not links:
-                return {"sent": 0, "message": "Нет получателей среди выбранных клиентов"}
-
-        if race_client_ids is not None:
-            links = [link for link in links if int(link.get("client_id") or 0) in race_client_ids]
-            if not links:
-                return {"sent": 0, "message": "Нет получателей среди участников гонки"}
+        elif send_vk and not vk_links:
+            return {"sent": 0, "message": "Нет подключённых VK-пользователей"}
 
         normalized_gender = None
         if filter_gender_raw is not None:
@@ -388,11 +430,6 @@ async def api_broadcast_message(request: Request):
                         status.HTTP_400_BAD_REQUEST,
                         "filterGender must be one of male, female, unknown, or omitted",
                     )
-
-        if normalized_gender:
-            links = [link for link in links if _gender_matches(normalized_gender, link.get("gender"))]
-            if not links:
-                return {"sent": 0, "message": "Нет получателей указанного пола"}
 
         parse_mode = "HTML"
         if isinstance(parse_mode_raw, str):
@@ -435,11 +472,6 @@ async def api_broadcast_message(request: Request):
             slot_ids, _ = _collect_clients_with_bookings_for_slot(slot_id)
             inclusion_ids = slot_ids if inclusion_ids is None else inclusion_ids | slot_ids
 
-        if inclusion_ids is not None:
-            links = [link for link in links if int(link.get("client_id") or 0) in inclusion_ids]
-            if not links:
-                return {"sent": 0, "message": "Нет получателей с бронью по выбранным условиям"}
-
         # Exclude clients who already have bookings on the selected dates
         exclusion_ids: set[int] = set()
         exclusion_notes: list[str] = []
@@ -454,14 +486,43 @@ async def api_broadcast_message(request: Request):
             exclusion_ids.update(tomorrow_ids)
             exclusion_notes.append(note)
 
-        if exclusion_ids:
-            links = [link for link in links if int(link.get("client_id") or 0) not in exclusion_ids]
-            if not links:
-                return {"sent": 0, "message": "Нет получателей без броней на выбранные дни"}
+        no_recipient_reason = "Нет получателей по выбранным фильтрам"
+        if client_id_filter is not None:
+            no_recipient_reason = "Нет получателей среди выбранных клиентов"
+        elif race_client_ids is not None:
+            no_recipient_reason = "Нет получателей среди участников гонки"
+        elif inclusion_ids is not None:
+            no_recipient_reason = "Нет получателей с бронью по выбранным условиям"
+        elif exclusion_ids:
+            no_recipient_reason = "Нет получателей без броней на выбранные дни"
 
-        settings = get_settings()
+        tg_recipients = _filter_links(
+            tg_links,
+            client_id_filter=client_id_filter,
+            race_client_ids=race_client_ids,
+            normalized_gender=normalized_gender,
+            inclusion_ids=inclusion_ids,
+            exclusion_ids=exclusion_ids,
+        ) if send_telegram else []
+        vk_recipients = _filter_links(
+            vk_links,
+            client_id_filter=client_id_filter,
+            race_client_ids=race_client_ids,
+            normalized_gender=normalized_gender,
+            inclusion_ids=inclusion_ids,
+            exclusion_ids=exclusion_ids,
+        ) if send_vk else []
+
+        total_recipients = len(tg_recipients) + len(vk_recipients)
+        if total_recipients == 0:
+            if send_vk and not send_telegram and not vk_links:
+                return {"sent": 0, "message": "Нет подключённых VK-пользователей"}
+            if send_telegram and not send_vk and not tg_links:
+                return {"sent": 0, "message": "Нет подключённых пользователей"}
+            return {"sent": 0, "message": no_recipient_reason}
+
         bot_token = settings.krutilkavn_bot_token
-        if not bot_token:
+        if send_telegram and not bot_token:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "KRUTILKAVN_BOT_TOKEN not configured")
 
         image_bytes: bytes | None = None
@@ -485,132 +546,267 @@ async def api_broadcast_message(request: Request):
                 log.exception("Failed to store uploaded image")
                 raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to store uploaded image") from exc
 
-        sent_count = 0
-        failed_count = 0
-        total_recipients = len(links)
+        sent_tg = 0
+        failed_tg = 0
+        sent_vk = 0
+        failed_vk = 0
         error_reasons: list[str] = []
 
-        for link in links:
-            tg_user_id = link.get("tg_user_id")
-            if not tg_user_id:
-                continue
-
-            try:
-                import requests
-
-                if image_bytes is not None or image_url:
-                    photo_url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-                    caption = message_text.strip() if isinstance(message_text, str) else ""
-                    caption_allowed = bool(caption) and len(caption) <= 1024
-
-                    photo_sent = False
-                    last_status = None
-                    last_text = None
-
-                    if image_url:
-                        payload = {
-                            "chat_id": str(tg_user_id),
-                            "photo": image_url,
-                        }
-                        if caption_allowed:
-                            payload["caption"] = caption
-                            payload["parse_mode"] = parse_mode
-                        response = requests.post(photo_url, data=payload, timeout=20)
-                        last_status = response.status_code
-                        last_text = response.text
-                        if response.status_code == 200:
-                            photo_sent = True
-
-                    if not photo_sent and image_bytes is not None:
-                        files = {"photo": (image_filename or "image.jpg", image_bytes)}
-                        data = {"chat_id": str(tg_user_id)}
-                        if caption_allowed:
-                            data["caption"] = caption
-                            data["parse_mode"] = parse_mode
-                        response = requests.post(photo_url, data=data, files=files, timeout=30)
-                        last_status = response.status_code
-                        last_text = response.text
-                        if response.status_code == 200:
-                            photo_sent = True
-
-                    if not photo_sent:
-                        log.warning(
-                            "Failed to send photo to user %s: %s %s",
-                            tg_user_id,
-                            last_status,
-                            last_text,
-                        )
-                        if last_status:
-                            error_reasons.append(f"sendPhoto {last_status}: {last_text}")
-                            if int(last_status) == 403:
-                                client_link_repository.mark_link_blocked(int(tg_user_id))
-                        failed_count += 1
-                        continue
-
-                    sent_count += 1
-                    client_link_repository.mark_link_active(int(tg_user_id))
-
-                    if caption and not caption_allowed:
-                        follow_data = {
-                            "chat_id": str(tg_user_id),
-                            "text": caption,
-                            "parse_mode": parse_mode,
-                            "disable_web_page_preview": True,
-                        }
-                        response = requests.post(
-                            f"https://api.telegram.org/bot{bot_token}/sendMessage", json=follow_data, timeout=10
-                        )
-                        if response.status_code != 200:
-                            log.warning(
-                                "Failed to send caption message to user %s: %s %s",
-                                tg_user_id,
-                                response.status_code,
-                                response.text,
-                            )
-                            error_reasons.append(f"caption {response.status_code}: {response.text}")
-                            if response.status_code == 403:
-                                client_link_repository.mark_link_blocked(int(tg_user_id))
-                            failed_count += 1
+        if send_telegram:
+            for link in tg_recipients:
+                tg_user_id = link.get("tg_user_id")
+                if not tg_user_id:
                     continue
 
-                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                data = {
-                    "chat_id": str(tg_user_id),
-                    "text": message_text,
-                    "parse_mode": parse_mode,
-                    "disable_web_page_preview": True,
+                try:
+                    import requests
+
+                    if image_bytes is not None or image_url:
+                        photo_url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+                        caption = message_text.strip() if isinstance(message_text, str) else ""
+                        caption_allowed = bool(caption) and len(caption) <= 1024
+
+                        photo_sent = False
+                        last_status = None
+                        last_text = None
+
+                        if image_url:
+                            payload = {
+                                "chat_id": str(tg_user_id),
+                                "photo": image_url,
+                            }
+                            if caption_allowed:
+                                payload["caption"] = caption
+                                payload["parse_mode"] = parse_mode
+                            response = requests.post(photo_url, data=payload, timeout=20)
+                            last_status = response.status_code
+                            last_text = response.text
+                            if response.status_code == 200:
+                                photo_sent = True
+
+                        if not photo_sent and image_bytes is not None:
+                            files = {"photo": (image_filename or "image.jpg", image_bytes)}
+                            data = {"chat_id": str(tg_user_id)}
+                            if caption_allowed:
+                                data["caption"] = caption
+                                data["parse_mode"] = parse_mode
+                            response = requests.post(photo_url, data=data, files=files, timeout=30)
+                            last_status = response.status_code
+                            last_text = response.text
+                            if response.status_code == 200:
+                                photo_sent = True
+
+                        if not photo_sent:
+                            log.warning(
+                                "Failed to send photo to user %s: %s %s",
+                                tg_user_id,
+                                last_status,
+                                last_text,
+                            )
+                            if last_status:
+                                error_reasons.append(f"sendPhoto {last_status}: {last_text}")
+                                if int(last_status) == 403:
+                                    client_link_repository.mark_link_blocked(int(tg_user_id))
+                            failed_tg += 1
+                            continue
+
+                        sent_tg += 1
+                        client_link_repository.mark_link_active(int(tg_user_id))
+
+                        if caption and not caption_allowed:
+                            follow_data = {
+                                "chat_id": str(tg_user_id),
+                                "text": caption,
+                                "parse_mode": parse_mode,
+                                "disable_web_page_preview": True,
+                            }
+                            response = requests.post(
+                                f"https://api.telegram.org/bot{bot_token}/sendMessage", json=follow_data, timeout=10
+                            )
+                            if response.status_code != 200:
+                                log.warning(
+                                    "Failed to send caption message to user %s: %s %s",
+                                    tg_user_id,
+                                    response.status_code,
+                                    response.text,
+                                )
+                                error_reasons.append(f"caption {response.status_code}: {response.text}")
+                                if response.status_code == 403:
+                                    client_link_repository.mark_link_blocked(int(tg_user_id))
+                                failed_tg += 1
+                        continue
+
+                    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                    data = {
+                        "chat_id": str(tg_user_id),
+                        "text": message_text,
+                        "parse_mode": parse_mode,
+                        "disable_web_page_preview": True,
+                    }
+
+                    response = requests.post(url, json=data, timeout=10)
+
+                    if response.status_code == 200:
+                        sent_tg += 1
+                        client_link_repository.mark_link_active(int(tg_user_id))
+                    else:
+                        log.warning(
+                            "Failed to send message to user %s: %s %s",
+                            tg_user_id,
+                            response.status_code,
+                            response.text,
+                        )
+                        error_reasons.append(f"sendMessage {response.status_code}: {response.text}")
+                        if response.status_code == 403:
+                            client_link_repository.mark_link_blocked(int(tg_user_id))
+                        failed_tg += 1
+
+                except Exception as exc:
+                    log.exception("Failed to send message to user %s", tg_user_id)
+                    error_reasons.append(str(exc))
+                    failed_tg += 1
+
+        if send_vk:
+            vk_token = settings.vk_community_key
+            vk_version = settings.vk_api_version or "5.199"
+            if not vk_token:
+                raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "VK_API_COMMUNITY_KEY not configured")
+
+            import requests
+
+            vk_attachment: str | None = None
+            vk_upload_bytes = image_bytes
+            vk_upload_name = image_filename
+
+            if vk_upload_bytes is None and image_url:
+                try:
+                    response = requests.get(image_url, timeout=15)
+                    if response.status_code == 200:
+                        vk_upload_bytes = response.content
+                        candidate_name = Path(image_url).name
+                        if candidate_name:
+                            vk_upload_name = candidate_name
+                    else:
+                        log.warning("Failed to download image for VK, status %s", response.status_code)
+                except Exception:
+                    log.exception("Failed to download image for VK")
+                    vk_upload_bytes = None
+
+            if vk_upload_bytes:
+                try:
+                    upload_server = requests.get(
+                        "https://api.vk.com/method/photos.getMessagesUploadServer",
+                        params={"access_token": vk_token, "v": vk_version},
+                        timeout=10,
+                    ).json()
+                    upload_url = (upload_server.get("response") or {}).get("upload_url")
+                    if upload_url:
+                        upload_response = requests.post(
+                            upload_url,
+                            files={"photo": (vk_upload_name or "image.jpg", vk_upload_bytes)},
+                            timeout=30,
+                        ).json()
+                        saved = requests.post(
+                            "https://api.vk.com/method/photos.saveMessagesPhoto",
+                            data={
+                                "access_token": vk_token,
+                                "v": vk_version,
+                                "photo": upload_response.get("photo"),
+                                "server": upload_response.get("server"),
+                                "hash": upload_response.get("hash"),
+                            },
+                            timeout=10,
+                        ).json()
+                        items = saved.get("response") or []
+                        if items:
+                            item = items[0]
+                            owner_id = item.get("owner_id")
+                            media_id = item.get("id")
+                            access_key = item.get("access_key")
+                            if owner_id and media_id:
+                                vk_attachment = f"photo{owner_id}_{media_id}"
+                                if access_key:
+                                    vk_attachment = f"{vk_attachment}_{access_key}"
+                    if not vk_attachment:
+                        log.warning("VK photo upload failed, falling back to URL/text")
+                except Exception:
+                    log.exception("Failed to upload image to VK, sending without attachment")
+
+            for link in vk_recipients:
+                vk_user_id = link.get("vk_user_id")
+                if not vk_user_id:
+                    continue
+
+                message_for_vk = message_text.strip() if isinstance(message_text, str) else ""
+                if vk_attachment is None and image_url and image_url not in message_for_vk:
+                    message_for_vk = f"{message_for_vk}\n\n{image_url}".strip()
+                if not message_for_vk and vk_attachment is None:
+                    message_for_vk = image_url or ""
+
+                payload = {
+                    "access_token": vk_token,
+                    "v": vk_version,
+                    "user_id": int(vk_user_id),
+                    "random_id": uuid4().int & 0x7FFFFFFF,
                 }
+                if message_for_vk:
+                    payload["message"] = message_for_vk
+                if vk_attachment:
+                    payload["attachment"] = vk_attachment
 
-                response = requests.post(url, json=data, timeout=10)
+                try:
+                    response = requests.post("https://api.vk.com/method/messages.send", data=payload, timeout=15)
+                    status_ok = False
+                    error_msg = None
+                    error_code = None
 
-                if response.status_code == 200:
-                    sent_count += 1
-                    client_link_repository.mark_link_active(int(tg_user_id))
-                else:
-                    log.warning(
-                        "Failed to send message to user %s: %s %s",
-                        tg_user_id,
-                        response.status_code,
-                        response.text,
-                    )
-                    error_reasons.append(f"sendMessage {response.status_code}: {response.text}")
-                    if response.status_code == 403:
-                        client_link_repository.mark_link_blocked(int(tg_user_id))
-                    failed_count += 1
+                    try:
+                        response_json = response.json()
+                    except Exception:
+                        response_json = {}
 
-            except Exception as exc:
-                log.exception("Failed to send message to user %s", tg_user_id)
-                error_reasons.append(str(exc))
-                failed_count += 1
+                    if response.status_code == 200 and not response_json.get("error"):
+                        status_ok = True
+                    else:
+                        error = response_json.get("error") or {}
+                        error_code = error.get("error_code") or response.status_code
+                        error_msg = error.get("error_msg") or response.text
 
-        detail_message = f"Отправлено {sent_count} из {total_recipients} пользователей, ошибок: {failed_count}"
+                    if status_ok:
+                        sent_vk += 1
+                    else:
+                        failed_vk += 1
+                        error_reasons.append(f"vk {error_code}: {error_msg}")
+                        log.warning(
+                            "Failed to send VK message to user %s: %s %s",
+                            vk_user_id,
+                            error_code,
+                            error_msg,
+                        )
+                except Exception as exc:
+                    failed_vk += 1
+                    error_reasons.append(str(exc))
+                    log.exception("Failed to send VK message to user %s", vk_user_id)
+
+        sent_total = sent_tg + sent_vk
+        failed_total = failed_tg + failed_vk
+        detail_message = f"Отправлено {sent_total} из {total_recipients} пользователей, ошибок: {failed_total}"
+        channel_details: list[str] = []
+        if send_telegram:
+            channel_details.append(f"TG {sent_tg}/{len(tg_recipients)}")
+        if send_vk:
+            channel_details.append(f"VK {sent_vk}/{len(vk_recipients)}")
+        if channel_details:
+            detail_message += f" ({', '.join(channel_details)})"
         if error_reasons:
             detail_message += f". Пример ошибки: {error_reasons[0][:240]}"
 
         return {
-            "sent": sent_count,
-            "failed": failed_count,
+            "sent": sent_total,
+            "failed": failed_total,
             "total": total_recipients,
+            "sentTelegram": sent_tg,
+            "sentVk": sent_vk,
             "message": detail_message,
             "errors": error_reasons[:5],
         }

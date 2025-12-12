@@ -116,7 +116,8 @@ def list_links(limit: int | None = None, offset: int = 0) -> List[Dict]:
     query = (
         "SELECT v.client_id, v.vk_user_id, v.vk_username, v.vk_full_name, "
         "v.created_at, v.updated_at, "
-        "COALESCE(c.full_name, CONCAT_WS(' ', c.first_name, c.last_name)) AS client_name "
+        "COALESCE(c.full_name, CONCAT_WS(' ', c.first_name, c.last_name)) AS client_name, "
+        "c.gender AS gender "
         "FROM vk_client_links v "
         "LEFT JOIN clients c ON c.id = v.client_id "
         "ORDER BY v.created_at DESC"

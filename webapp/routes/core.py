@@ -38,6 +38,7 @@ def api_config():
         "loginBotUsername": settings.telegram_login_bot_username,
         "clientsPageSize": settings.clients_page_size,
         "baseUrl": settings.base_url,
+        "vkBroadcastEnabled": bool(settings.vk_community_key),
     }
 
 
